@@ -1,0 +1,264 @@
+# Verifier OS identity — deployment
+
+The out-of-process verifier (`trust/verifier_main.py`) holds the
+signing key. Run under the same OS user as builder/orchestrator
+code, that boundary is process isolation only: any code running as
+that user can read the `0600` key file directly and sign anything.
+This directory is the deployment step that turns it into a real
+OS-level boundary on one machine: a dedicated system user,
+`aion-verifier`, owns the key, the signing ledger, and the anchor
+file, and the verifier is launched as that user via `runuser`.
+
+## Layout
+
+Created by `setup.sh` (root, idempotent):
+
+| Path | Owner / mode | Contents |
+|---|---|---|
+| `/var/lib/aion-verifier/home/` | `aion-verifier`, 0700 | `AION_VERIFIER_HOME`: the signing-ledger directory (`signing-ledger.json`) |
+| `/var/lib/aion-verifier/keys/` | `aion-verifier`, 0700 | The signing key file (`gate.key`, itself exactly 0600 — `load_signing_key` refuses any other mode) |
+| `/var/lib/aion-verifier/anchors/` | `aion-verifier`, 0700 | Ledger anchor files (`trust/anchoring.py`), e.g. `signing.anchor.json` |
+| `/var/lib/aion-verifier/registry/` | `aion-verifier`, 0700 | The verifier's own copy of the sealed registry (see below) |
+| `/var/lib/aion-verifier/code/` | `root`-owned staged code copy | A staged copy of the repo packages the verifier actually executes; the wrapper is pointed at it via `AION_REPO_ROOT` because the `aion-verifier` uid cannot read the live checkout (see Launch) |
+| `/etc/aion-verifier/verifier.env` | `root`, 0600 | The ONLY configuration source: plain `KEY=VALUE` lines naming key path, signer/actor ids, registry dir, verifier home, TTL/purpose, anchor path, the deployment mode (`AION_DEPLOYMENT_MODE`, required — see *Deployment mode* below), and the sealed-eval query budgets (`AION_VERIFIER_PROPOSAL_BUDGET`, `AION_VERIFIER_IDENTITY_BUDGET` — the template writes the compiled defaults, 25 / 500, explicitly) |
+
+File modes inside those directories: the ledger, budgets and
+anchor files are created mode 0660 (group-writable). That is
+why the rollback wording below names the `aion-verifier`
+**group**, not only the uid: the group must remain
+single-member (the `aion-verifier` user alone), because every
+additional member would inherit write access to both halves
+of the anchored state.
+
+The user is a system user with a `nologin` shell and no password:
+nothing logs in *as* `aion-verifier` interactively; the
+orchestrator assumes the uid with `runuser` per request.
+Re-running `setup.sh` converges a pre-existing `aion-verifier`
+user (`usermod` re-asserts the `nologin` shell and the
+`/var/lib/aion-verifier/home` home directory) rather than keeping
+whatever shell/home it happens to have.
+
+> **Status on the development VM — ceremony EXECUTED
+> 2026-11-20:** `setup.sh` was run and the operator ceremony
+> below **has been performed** (an earlier version of this
+> paragraph said it had deliberately not been; that is no
+> longer true). The `aion-verifier` user is uid 999; the
+> signing key was generated and handed over verifier-owned at
+> mode 0600; the registry was provisioned with the initial
+> operator set — 3 public / 6 sealed / 1 golden
+> general-knowledge items, recorded under actor
+> `operator-ceremony`. The anchor ceremony was run in research
+> mode with the INIT flags set, the env was then flipped to
+> `AION_DEPLOYMENT_MODE=production` with the INIT flags
+> blanked, and a final operator budget reset was performed
+> (budgets store deleted, budgets anchor re-bootstrapped) so
+> the delivered deployment starts with fresh budgets: the
+> ceremony's own `sealed_eval` had already consumed the
+> all-correct transcript once, which itself demonstrated
+> replay detection when it was re-presented. The
+> production-deploy suite
+> (`tests/test_trust_production_deploy.py`: 8 live tests in
+> `LiveDeploymentTests` plus the then-3 production-mode spec
+> tests) passed 11/11 against this deployment at provisioning
+> time; on later runs
+> its `test_10`/`test_11` skip until an operator budget reset,
+> because the live tests' fixed transcripts have by then been
+> consumed — that is the stateful replay accounting working
+> by design, not a broken deployment.
+
+## Launch
+
+`setup.sh` once, fill in `/etc/aion-verifier/verifier.env`, place
+the key and registry (below), then per request:
+
+```sh
+deploy/verifier-identity/run-verifier.sh < request.json > response.json
+```
+
+The wrapper (run as root by the orchestrator):
+
+1. Refuses unless the env file is root-owned with mode `600`.
+2. **Parses** the env file line-by-line against an allowlist of
+   verifier variable names — it is never `source`d, so the file
+   cannot execute shell in the orchestrator.
+3. `exec runuser -u aion-verifier -- env -i <allowlisted config>
+   python3 -m trust.verifier_main` from the repo root, with a
+   clean environment (fixed `PATH`, the verifier's `HOME`,
+   `PYTHONPATH` = the repo). stdin/stdout pass through untouched:
+   the wire protocol is one JSON document each way, and the
+   wrapper neither inspects nor alters it.
+
+Two consequences to plan around:
+
+- **The code must be readable by `aion-verifier`.** The verifier
+  executes the repo's Python packages as that user. Deploy the
+  checkout world-readable (or group-readable with `aion-verifier`
+  in the group). Note the checkout on the development VM is
+  `root:nogroup`, mode `0660` — the verifier user *cannot* read
+  it there, which is why the end-to-end test in
+  `tests/test_trust_identity.py` stages a readable copy in a temp
+  directory instead. `AION_REPO_ROOT` (wrapper) exists to point
+  the launcher at such an installed copy — and on the
+  provisioned deployment it does exactly that: the wrapper is
+  pointed at the root-owned staged copy in
+  `/var/lib/aion-verifier/code/` (see the Layout table), not at
+  the live checkout.
+- **The client side needs no change of identity.** The builder
+  client (`trust/client.py`) never holds key material; the
+  orchestrator only needs a launch path that goes through this
+  wrapper (or the equivalent `runuser` invocation) instead of
+  spawning `python3 -m trust.verifier_main` as its own user.
+
+## Deployment mode: production vs research
+
+The verifier's anchoring behaviour depends on its deployment
+mode (`AION_DEPLOYMENT_MODE`, set in `verifier.env` and passed
+through the wrapper's allowlist):
+
+- **Production mode** (`AION_DEPLOYMENT_MODE=production`):
+  anchoring is **mandatory and fail-closed**. The verifier
+  refuses to start (exit 3) when no anchor path is configured,
+  and it refuses to start when an anchor-init flag
+  (`AION_ANCHOR_INIT` / `AION_BUDGETS_ANCHOR_INIT`) is present —
+  the bootstrap ceremony is an operator action performed outside
+  production configuration, never a flag a production launch
+  carries, so the ceremony cannot be silently repeated after
+  state loss.
+- **Research mode** (`AION_DEPLOYMENT_MODE=research`, set
+  explicitly): the verifier runs with whatever anchoring is
+  configured, including none. This is the mode for development
+  and test deployments — and it is explicitly **NOT
+  rollback-protected**: with no external anchor, the signing
+  ledger's hash chain alone cannot distinguish a rolled-back
+  ledger from a short honest one. Do not describe a
+  research-mode deployment as rollback-protected.
+
+**Fail-closed mode contract (Trust Boundary v3.1).** There
+is no default mode. `AION_DEPLOYMENT_MODE` is required, and
+research mode is entered only via the explicit value
+`research` above. A missing, blank, unknown or malformed
+value (including whitespace-padded or wrongly-cased
+spellings) **refuses startup**: the verifier refuses it
+fail-closed (`deployment_mode_refused`, exit 3), and a launch
+through `run-verifier.sh` refuses with it — the wrapper
+forwards only the env file's allowlisted value, so there is
+no wrapper-side path around the refusal. Blanking the
+variable in the env file therefore no longer selects
+anything: it stops the verifier from starting, with the
+refusal named in the error. (Before v3.1 an absent variable
+silently selected research mode and dropped the production
+anchor requirements with it; that fail-open behaviour is
+removed.)
+
+## Co-located rollback — the declared residual
+
+The signing anchor and the signing ledger are **both
+verifier-owned** (the `anchors/` and `home/` directories above,
+same machine, same privilege domain). That placement is
+deliberate — it puts both files outside the *builder's* reach —
+but it has a precise limit, stated plainly:
+
+- Rolling back the ledger **alone** is detected: the anchor
+  names a head/seq the truncated chain no longer contains, and
+  startup refuses.
+- Rolling back the anchor **alone** (or deleting it while the
+  ledger is non-empty) is detected the same way.
+- Rolling back **both together** to a consistent older pair is
+  **undetectable from inside this deployment**: the pair agrees
+  with itself, and there is no third copy to disagree with it.
+  Performing that joint rollback requires write access to both
+  verifier-owned directories — on the provisioned deployment
+  that means **root, the `aion-verifier` uid, or any member of
+  the `aion-verifier` group** (the ledger, budgets and anchor
+  files are created 0660, group-writable; see the Layout
+  section). The group must therefore remain single-member.
+  The builder identity can write **neither** file, so the residual
+  does not weaken the builder/verifier boundary this deployment
+  exists to create.
+- A whole-machine snapshot restore by the machine owner rolls
+  back every file at once, anchor included, and is **out of
+  scope** for this deployment: closing it needs the anchor (or a
+  digest of it) held off-machine or in an HSM, which a
+  single-machine deployment does not have.
+
+## Why the registry needs a verifier-writable copy
+
+The verifier does not merely read the sealed registry: every
+sealed access appends to the registry's hash-chained **access
+log** and rewrites `registry.json` (`eval/registry.py` persists
+the log entry before performing the access). A read-only registry
+mount therefore breaks sealed evaluation, and a registry directory
+owned by the builder user would let builder-side code rewrite the
+sealed set and its log — the thing the boundary exists to
+prevent. Deployment rule: the verifier opens **its own copy** of
+the registry under `/var/lib/aion-verifier/registry/`, owned by
+`aion-verifier`. (An ACL granting `aion-verifier` write access to
+a shared directory is mechanically possible but strictly worse:
+it leaves the file owned — and replaceable — by the builder
+side.) Whoever provisions sealed items writes them into the
+verifier's copy through the registry API running as
+`aion-verifier`, or by a root-run provisioning step that hands
+ownership over (`chown -R aion-verifier:aion-verifier`) before
+the verifier starts.
+
+## Why the anchor directory is verifier-owned
+
+The signing ledger's rollback protection is its external anchor
+(`trust/anchoring.py`): the anchor pins the ledger head outside
+the journal. If builder-side code could rewrite the anchor, it
+could roll the ledger back and re-pin the rolled-back head in the
+same motion, and the rollback would be undetectable. The anchor
+therefore lives in a directory only `aion-verifier` can write —
+the same privilege domain as the ledger and the key, and a
+different one from the builder. The ship ledger's anchor belongs
+with whichever identity runs the ship path, by the same argument.
+The same directory holds each anchor's reanchor audit chain
+(`<anchor-stem>.reanchor-audit.json`, written by
+`force_reanchor` in `trust/anchoring.py`): every audited re-pin
+records the old anchor, the new anchor, the reason, and a
+timestamp there, hash-chained, so the escape hatch cannot be
+used silently from inside the verifier's own privilege domain
+either.
+
+## Key provisioning
+
+`setup.sh` deliberately does **not** create the key. As root:
+
+```sh
+# generate with the repo's own tooling, then hand over ownership
+python3 -c "from signing import generate_key_file; \
+    generate_key_file('/var/lib/aion-verifier/keys/gate.key')"
+chown aion-verifier:aion-verifier /var/lib/aion-verifier/keys/gate.key
+chmod 0600 /var/lib/aion-verifier/keys/gate.key
+```
+
+(`generate_key_file` writes mode 0600 and refuses to overwrite;
+the file must not live inside the repo or the registry directory
+— `load_signing_key` enforces both at every load.)
+
+## Honest scope
+
+- **Same machine, same kernel.** This protects the key, ledger,
+  registry copy, and anchor from builder-side code running as
+  *other* OS users — the stated threat model (evolved or
+  convenience code paths, a compromised builder process).
+- **It does not protect anything from root — root compromise
+  is verifier compromise.** Root can read the key, rewrite the
+  ledger and anchor, and impersonate the user; root can also
+  alter the deployment environment file
+  (`/etc/aion-verifier/verifier.env`), replace the staged code
+  the wrapper launches, interfere with process startup, and
+  inspect the verifier's execution context. Anyone with root
+  on this machine is outside the boundary; the isolation here
+  protects against unprivileged and builder identities only,
+  and a stronger claim needs a separate machine or an HSM,
+  not a uid.
+- **It does not sandbox a modified verifier.** The verifier runs
+  the repo's code as `aion-verifier`; code signing is out of
+  scope. What the uid separation buys is that *builder-side* code
+  cannot reach the key — not that verifier-side code is trusted
+  by construction.
+- The nologin shell and per-request `runuser` launch mean there
+  is no daemon to attack between requests; each request is a
+  fresh process that loads config from the environment the
+  wrapper built, exactly as `trust/verifier_main.py` documents.

@@ -1,0 +1,853 @@
+{
+  "schema_version": 1,
+  "cycle_seq": 10,
+  "phase": "SCAN",
+  "backlog": [
+    {
+      "id": "core-loop-v1",
+      "title": "Build the core loop foundation",
+      "title_hash": "e1a2bbd024dff5a3551fdd977c53b7f242ec835679388a43b4cc59454c5c7969",
+      "leverage": 10.0,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 0
+    },
+    {
+      "id": "phase-handlers",
+      "title": "Add per-phase handlers and a driver loop",
+      "title_hash": "d5b0f9b6077c227978d23e1e12e24ba0f62dba28a9e2ef4c2e911e291a438d2b",
+      "leverage": 9.0,
+      "status": "blocked",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 1
+    },
+    {
+      "id": "signed-state",
+      "title": "Signed state and per-seat vote records",
+      "title_hash": "badd73d53a50cf51ac6d10d2a51408cd1e0a7f5df953b84ae830cd3443e0113e",
+      "leverage": 7.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 2
+    },
+    {
+      "id": "adversarial-test-factory",
+      "title": "Adversarial test factory with rotating sealed batches and gap flag",
+      "title_hash": "213cd419380f607d87435e98bd135944053bd22bc500b5997ac9498ab2967acc",
+      "leverage": 10.0,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 3
+    },
+    {
+      "id": "memory-store-p2",
+      "title": "Long-term memory store with gated writes and sealed reuse test",
+      "title_hash": "8f5fbec37b1fa4011b13c656de8602a0bcef05f32d845fdcc3d528949864ddb9",
+      "leverage": 9.5,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 4
+    },
+    {
+      "id": "cycle2-paper-trail",
+      "title": "Close cycle 2 state entry and review record placeholder",
+      "title_hash": "2c2550c193a2a0c22b2d1af702451a6d0e717dd68d1a498f044a9a2af53cb5cc",
+      "leverage": 4.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 5
+    },
+    {
+      "id": "commit-reveal-calibration",
+      "title": "Commit-reveal proof for calibration blind timing",
+      "title_hash": "863846c3a93791a63ee4da58d14699d2090b1bee400119df5b9db26ff7fd397c",
+      "leverage": 5.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 6
+    },
+    {
+      "id": "eval-gate-calibration",
+      "title": "Build frozen and sealed evaluation, ship gate and reviewer calibration",
+      "title_hash": "a66c72f91338b186ea0f0c710633a6e57f7430d75e49d302d3d9194bcfe0160d",
+      "leverage": 10.0,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 7
+    },
+    {
+      "id": "protected-gate-enforcement",
+      "title": "Protected gate enforcement: external approval workflow for oversight code changes",
+      "title_hash": "909225e0bcffb122e1e960601a1ec3e80f10fc8ed4ec33a10614f325024a9b5f",
+      "leverage": 8.0,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 8
+    },
+    {
+      "id": "selfmod-canary-rollback",
+      "title": "Self-modification machinery: one change at a time, canary apply, rollback to last verified state",
+      "title_hash": "2d609b8d9cba4ef008ac38f843fea3e401f551d8f740c8e61116b8a1b67d65ba",
+      "leverage": 8.5,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 9
+    },
+    {
+      "id": "memory-consolidation",
+      "title": "Memory consolidation, pruning and re-derivation policy for stale lessons; retrieval caps per source (A42)",
+      "title_hash": "f13c94efae47723bf5b9c7d6586b56e8d44a79be0d1b80ddc5227308c3a96751",
+      "leverage": 6.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 10
+    },
+    {
+      "id": "signed-gate-decisions",
+      "title": "Signed gate decisions so a memory commit can prove the gate ran (closes A30); signature must cover the decision including its content-hash binding segment",
+      "title_hash": "363154f3be82bf1724f2a411b472c4c027edf4fb3d99a4a86d9230df45cb0f30",
+      "leverage": 7.5,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 11
+    },
+    {
+      "id": "dirfd-replace-hardening",
+      "title": "Directory-fd-relative os.replace hardening for registry and memory stores (seat-8)",
+      "title_hash": "b9b31beb7441d87d832d8c4b3cd6d103fc06367d86656d0f7134d7a9fbcead0a",
+      "leverage": 5.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 12
+    },
+    {
+      "id": "selfmod-journal-compaction",
+      "title": "Journal compaction and snapshot/canary pruning for the canary manager; recovery-path containment check",
+      "title_hash": "a995a569491544c4c8fede2a6579e95eb461ade84d2905664ca6167bae0375d0",
+      "leverage": 5.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 13
+    },
+    {
+      "id": "gate-path-canonicalisation",
+      "title": "Canonicalise paths in the gate protected check and add oversight scope there; protected change requiring owner approval via the new oversight workflow",
+      "title_hash": "ab26bca244714cfd26f2223213d6af68d2f50defe72f0cd8ec970c2b4961dc5a",
+      "leverage": 7.0,
+      "status": "blocked",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 14
+    },
+    {
+      "id": "oversight-journal-compaction",
+      "title": "Journal compaction and rotation for the oversight approval journal (200-entry lifetime cap)",
+      "title_hash": "c0ba7504c4ddb4db32c2dddcc9494ba919126d799fbffcff66f98839fd0b542e",
+      "leverage": 5.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 15
+    },
+    {
+      "id": "store-enforced-signed-commits",
+      "title": "Make a memory store require signed gate decisions (closes the unsigned-path bypass); bind store id/epoch into the envelope; decide attestation-by-default there",
+      "title_hash": "8c474aab43b0079cb4104d33f870c92131f490152ff0c1a47e2cdf0ceb1c5a5d",
+      "leverage": 8.0,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 16
+    },
+    {
+      "id": "signing-key-rotation",
+      "title": "Signing keyring with rotation and a verify-only grace window for retired keys",
+      "title_hash": "1540bcfa85b35ee9bb81a5e5a06063e973e6e7abab28b5e14fa2ca0b404af980",
+      "leverage": 5.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 17
+    },
+    {
+      "id": "signer-recompute-from-raw-inputs",
+      "title": "Make the signer recompute gate decisions from raw evidence instead of signing caller-asserted score maps; gate accepts require sealed_eval-produced evidence",
+      "title_hash": "f112002d58414b4e7e7a1920db455ef8c5d193cd103209dbee775b6c2c2e5eee",
+      "leverage": 7.5,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 18
+    },
+    {
+      "id": "production-signed-path-wiring",
+      "title": "Wire production flows through the sanctioned signed paths (verifier gate/attest, commit_signed, record_ship) and migrate memory/reuse.py off the legacy unsigned exception",
+      "title_hash": "c85110c65325c99faa92aa6311d4c24a329e7309ad1f3c93c1212cfb3f654948",
+      "leverage": 7.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 19
+    },
+    {
+      "id": "ledger-head-anchoring",
+      "title": "Anchor ship/signing ledger heads outside writable storage so ledger rollback or deletion is detectable without a caller-supplied pin",
+      "title_hash": "be3cceef2ab06254bc0bed6079d5d16127e33f2654396fd4c589f66de0643687",
+      "leverage": 6.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 20
+    },
+    {
+      "id": "separate-os-user-verifier",
+      "title": "Run the verifier under a separate OS user (or evaluate asymmetric signatures) so the key file is unreadable by builder-side code",
+      "title_hash": "0102388760bb50e24a966540e62cd0420dddfa55ca027c36407b12b9ac8e280f",
+      "leverage": 6.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 21
+    },
+    {
+      "id": "protected-list-reconciliation",
+      "title": "Reconcile the gate protected-path list (eval/, core/loop.py) with the oversight list (incl. oversight/) so verifier-side gate checks cover both; via the protected-change workflow",
+      "title_hash": "0368b25c161e82cd3a10d4b4d1dea0ceafd7fd8e39fa158400c7947ab3d85181",
+      "leverage": 6.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 22
+    },
+    {
+      "id": "reviewer-independence-measurement",
+      "title": "Measure reviewer independence empirically (score correlation and shared-context controls) instead of asserting it from roster construction",
+      "title_hash": "852523b1e3ed73a3f4618860e96f25a6932d20785b7fe05dbb83315e618b866f",
+      "leverage": 5.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 23
+    },
+    {
+      "id": "attestation-freshness-window",
+      "title": "Bound the plain attestation attested_at recency at gate time; freshness is currently anchored only on the signed wrapper's window",
+      "title_hash": "75dc3a1ad7c40ef9ca42f9d784d8a3b97d745dceb02252b7cc74c9cf07eb96ed",
+      "leverage": 4.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 24
+    },
+    {
+      "id": "client-streaming-capture",
+      "title": "Stream-cap the verifier client subprocess capture so a rogue verifier module cannot force unbounded in-memory buffering before the size check fires",
+      "title_hash": "d79f4e3e445b7f6b359e74facfc6d3848a7b4b0716440ae2e124a666d4e30484",
+      "leverage": 4.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 25
+    },
+    {
+      "id": "suite-speed-budget",
+      "title": "Bring the full suite back under a time budget (split or parallelise the slow verifier subprocess tests); it grew across cycles 7-8",
+      "title_hash": "abfb8d45d62c7abee148a6a53013aac5204e6dc8b52b03e99eec25ef1ffc0d4f",
+      "leverage": 3.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 26
+    },
+    {
+      "id": "legacy-digest-retirement",
+      "title": "Retire the legacy fieldless store digest so stripping security_mode can no longer downgrade a signed store to unsigned",
+      "title_hash": "14c85402d750348036ce8b672e4671337b6cf87140829267763f0d741f673b3f",
+      "leverage": 6.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 27
+    },
+    {
+      "id": "ship-variant-issue-attestation",
+      "title": "Add a ship variant of issue_attestation that binds the attestation envelope to a build manifest hash",
+      "title_hash": "483bcfe3109aa741ce0f5db1070299769099cf0220382553413f4ac561e3ce7e",
+      "leverage": 5.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 28
+    },
+    {
+      "id": "ship-tx-journal-anchoring",
+      "title": "Anchor the ship transaction journal head externally like the signing and ship ledgers",
+      "title_hash": "67e266d472a9fe7cb16c1578bde5bc5b8390a996241dd48dac23de748deefd02",
+      "leverage": 5.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 29
+    },
+    {
+      "id": "verifier-wrapper-routing",
+      "title": "Route the verifier client through the aion-verifier wrapper identity in production wiring and complete the operator provisioning ceremony",
+      "title_hash": "90b4507963fcc7b71c59647748f21fda37ca9304b844cd5e82b6dfc087e73889",
+      "leverage": 6.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 30
+    },
+    {
+      "id": "trust-boundary-v3-demonstrations",
+      "title": "Trust Boundary v3: provenance chain, crash laboratory, extraction accounting, production provisioning",
+      "title_hash": "92fe7ec3160b552a4cc565e31646921b79471f504cebafe99226e64507307b27",
+      "leverage": 8.5,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "coordinator",
+      "seq": 31
+    },
+    {
+      "id": "consumption-race-error-code",
+      "title": "Concurrent issuance loser error code varies under race (registry_untrusted vs eval_evidence_consumed); make the refusal deterministic or the test contract explicit",
+      "title_hash": "4acdef627c8d4386c0339ad8ac056d5e736f2a8fcbb9254dd39eb1b833113637",
+      "leverage": 4.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 32
+    }
+  ],
+  "history": [
+    {
+      "cycle_id": 1,
+      "item_id": "core-loop-v1",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-5",
+        "seat-9",
+        "seat-10"
+      ],
+      "reviewers": [
+        "seat-1",
+        "seat-3",
+        "seat-15",
+        "seat-2",
+        "seat-6",
+        "seat-7"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T05:11:13.666824+00:00"
+    },
+    {
+      "cycle_id": 2,
+      "item_id": "adversarial-test-factory",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-3",
+        "seat-4",
+        "seat-15"
+      ],
+      "reviewers": [
+        "seat-1",
+        "seat-5",
+        "seat-2",
+        "seat-9",
+        "seat-12",
+        "seat-6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T05:55:09.277794+00:00"
+    },
+    {
+      "cycle_id": 3,
+      "item_id": "eval-gate-calibration",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T06:02:19.646006+00:00"
+    },
+    {
+      "cycle_id": 4,
+      "item_id": "memory-store-p2",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T06:44:49.875243+00:00"
+    },
+    {
+      "cycle_id": 5,
+      "item_id": "selfmod-canary-rollback",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T07:20:09.944743+00:00"
+    },
+    {
+      "cycle_id": 6,
+      "item_id": "protected-gate-enforcement",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T08:07:53.374139+00:00"
+    },
+    {
+      "cycle_id": 7,
+      "item_id": "signed-gate-decisions",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T09:10:47+00:00"
+    },
+    {
+      "cycle_id": 8,
+      "item_id": "store-enforced-signed-commits",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T10:10:18.108760+00:00"
+    },
+    {
+      "cycle_id": 9,
+      "item_id": "signer-recompute-from-raw-inputs",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T11:06:47.032212+00:00"
+    },
+    {
+      "cycle_id": 10,
+      "item_id": "trust-boundary-v3-demonstrations",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T12:04:11.853628+00:00"
+    }
+  ],
+  "deltas": [
+    {
+      "metric": "tests_passing",
+      "before": 0.0,
+      "after": 36.0,
+      "change": 36.0,
+      "evidence_ref": "tests/test_loop.py - 36 tests OK in coordinator run",
+      "verifier": "seat-1",
+      "recorded_at": "2026-11-20T05:11:13.666731+00:00",
+      "cycle_id": 1
+    },
+    {
+      "metric": "tests_passing",
+      "before": 119.0,
+      "after": 156.0,
+      "change": 37.0,
+      "evidence_ref": "tests/test_factory.py - 156 tests OK in coordinator run; internal/REVIEW-CYCLE-3.md",
+      "verifier": "seat-1",
+      "recorded_at": "2026-11-20T05:55:09.277666+00:00",
+      "cycle_id": 2
+    },
+    {
+      "metric": "tests_passing",
+      "before": 36.0,
+      "after": 125.0,
+      "change": 89.0,
+      "evidence_ref": "cycle-2 modules (test_loop 36 + test_registry 39 + test_gate 31 + test_calibration 19) - 125 tests OK in coordinator run; internal/REVIEW-CYCLE-2.md",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T06:02:19.645848+00:00",
+      "cycle_id": 3
+    },
+    {
+      "metric": "tests_passing",
+      "before": 160.0,
+      "after": 270.0,
+      "change": 110.0,
+      "evidence_ref": "memory/ package: test_memory_store 64 + test_memory_solver 28 + test_memory_reuse 18 = 110 new tests; full suite 270 OK in coordinator run; sealed reuse 20/100 -> 100/100 (+0.80), verifier seat-3 in harness; internal/REVIEW-CYCLE-4.md",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T06:44:49.874914+00:00",
+      "cycle_id": 4
+    },
+    {
+      "metric": "tests_passing",
+      "before": 270.0,
+      "after": 328.0,
+      "change": 58.0,
+      "evidence_ref": "selfmod/ package: tests/test_selfmod_canary.py 58 tests; full suite 328 OK in coordinator run; internal/REVIEW-CYCLE-5.md",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T07:20:09.944470+00:00",
+      "cycle_id": 5
+    },
+    {
+      "metric": "tests_passing",
+      "before": 328.0,
+      "after": 379.0,
+      "change": 51.0,
+      "evidence_ref": "oversight/ package: tests/test_oversight_approval.py 51 tests; full suite 379 OK in coordinator run; internal/REVIEW-CYCLE-6.md",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T08:07:53.373858+00:00",
+      "cycle_id": 6
+    },
+    {
+      "metric": "tests_passing",
+      "before": 379.0,
+      "after": 466.0,
+      "change": 87.0,
+      "evidence_ref": "signing/ package: tests/test_signing_gate_decision.py 87 tests; full suite 466 OK in coordinator run; internal/REVIEW-CYCLE-7.md",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T09:10:47+00:00",
+      "cycle_id": 7
+    },
+    {
+      "metric": "tests_passing",
+      "before": 466.0,
+      "after": 602.0,
+      "change": 136.0,
+      "evidence_ref": "internal/REVIEW-CYCLE-8.md + internal/BUILD-CYCLE-8.md; PROVISIONAL pending seat-gpt/seat-gemini (internal/CROSS-CHECK-3.md)",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T10:10:18.108352+00:00",
+      "cycle_id": 8
+    },
+    {
+      "metric": "tests_passing",
+      "before": 602.0,
+      "after": 820.0,
+      "change": 218.0,
+      "evidence_ref": "internal/REVIEW-CYCLE-9.md + internal/BUILD-CYCLE-9.md; full suite 820 OK in coordinator run; PROVISIONAL pending seat-gpt/seat-gemini (internal/CROSS-CHECK-BRIEF-CYCLE-V2.md)",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T11:06:47.031816+00:00",
+      "cycle_id": 9
+    },
+    {
+      "metric": "tests_passing",
+      "before": 820.0,
+      "after": 964.0,
+      "change": 144.0,
+      "evidence_ref": "internal/REVIEW-CYCLE-10.md + internal/BUILD-CYCLE-10.md; full suite 964 OK (skipped=2, live budget-consumed skips) in coordinator run; PROVISIONAL pending seat-gpt/seat-gemini (internal/CROSS-CHECK-BRIEF-CYCLE-V3.md)",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T12:04:11.851777+00:00",
+      "cycle_id": 10
+    }
+  ],
+  "history_pruned": 0,
+  "deltas_pruned": 0,
+  "current_item_id": null
+}
