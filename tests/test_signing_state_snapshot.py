@@ -570,6 +570,246 @@ class Cycle12FixRoundTests(unittest.TestCase):
         self.assertIn("signed_in_future", reasons)
 
 
+class Cycle14ChainGapTests(unittest.TestCase):
+    """Cycle 14: the strict wrapper refuses cycle_seq > pin + 1.
+
+    A single pin anchors only its immediate successor; beyond that
+    the intermediates are unobserved, so the strict path reports
+    chain_gap (never ()) while bare verification keeps the gap by
+    design. Every case goes through verify_snapshot_for_state with
+    all bindings supplied."""
+
+    @staticmethod
+    def _hist(n):
+        return [{"cycle_id": i, "item_id": f"item-{i}",
+                 "completed_at": "2026-11-20T05:11:13+00:00"}
+                for i in range(1, n + 1)]
+
+    def _sign_seq(self, seq, prev=""):
+        state = state_bytes(cycle_seq=seq, history=self._hist(seq))
+        signed = sign(state=state, calibration_bytes=CAL_BYTES,
+                      prev_snapshot_hash=prev)
+        return signed, state
+
+    @staticmethod
+    def _strict(signed, state, pin):
+        from signing.state_snapshot import verify_snapshot_for_state
+        return verify_snapshot_for_state(
+            signed, signing_key=KEY, state_bytes=state,
+            calibration_bytes=CAL_BYTES, expected_pin=pin,
+            expected_signer_id=SIGNER, now=NOW)
+
+    @staticmethod
+    def _pin(signed):
+        return {"cycle_seq": signed.cycle_seq,
+                "payload_hash": signed.payload_hash}
+
+    def test_pin_same_seq_passes(self):
+        signed, state = self._sign_seq(2)
+        self.assertEqual(self._strict(signed, state, self._pin(signed)), ())
+
+    def test_pin_plus_one_correctly_chained_passes(self):
+        first, _ = self._sign_seq(1)
+        second, state2 = self._sign_seq(2, prev=first.payload_hash)
+        self.assertEqual(self._strict(second, state2, self._pin(first)), ())
+
+    def test_pin_plus_two_refused_even_with_correct_prev(self):
+        # seq3's prev correctly names the unseen seq2 snapshot:
+        # correctness at that distance is unobservable from the pin.
+        first, _ = self._sign_seq(1)
+        second, _ = self._sign_seq(2, prev=first.payload_hash)
+        third, state3 = self._sign_seq(3, prev=second.payload_hash)
+        reasons = self._strict(third, state3, self._pin(first))
+        self.assertEqual(reasons, ("chain_gap",))
+        # Deterministic: a repeated call refuses identically.
+        self.assertEqual(self._strict(third, state3, self._pin(first)),
+                         ("chain_gap",))
+
+    def test_pin_plus_two_refused_with_garbage_prev(self):
+        # The original rev-r2 shape: seq3 chained to garbage.
+        first, _ = self._sign_seq(1)
+        third, state3 = self._sign_seq(3, prev="a" * 64)
+        self.assertEqual(self._strict(third, state3, self._pin(first)),
+                         ("chain_gap",))
+
+    def test_large_jump_refused(self):
+        first, _ = self._sign_seq(1)
+        fifth, state5 = self._sign_seq(5, prev="b" * 64)
+        self.assertEqual(self._strict(fifth, state5, self._pin(first)),
+                         ("chain_gap",))
+
+    def test_gap_co_reports_other_reasons_once(self):
+        from signing.state_snapshot import verify_snapshot_for_state
+        first, _ = self._sign_seq(1)
+        third, state3 = self._sign_seq(3, prev="a" * 64)
+        reasons = verify_snapshot_for_state(
+            third, signing_key=KEY, state_bytes=state3,
+            calibration_bytes=b"{}",
+            expected_pin=self._pin(first),
+            expected_signer_id=SIGNER, now=NOW)
+        self.assertIn("chain_gap", reasons)
+        self.assertIn("calibration_mismatch", reasons)
+        self.assertEqual(reasons.count("chain_gap"), 1)
+
+    def test_pin_plus_one_forked_is_discontinuity_not_gap(self):
+        first, _ = self._sign_seq(1)
+        forked, state2 = self._sign_seq(2, prev="c" * 64)
+        reasons = self._strict(forked, state2, self._pin(first))
+        self.assertEqual(reasons, ("chain_discontinuity",))
+
+    def test_older_than_pin_is_rollback_not_gap(self):
+        second, _ = self._sign_seq(2)
+        first, state1 = self._sign_seq(1)
+        reasons = self._strict(first, state1, self._pin(second))
+        self.assertEqual(reasons, ("snapshot_rolled_back",))
+
+    def test_same_seq_wrong_hash_is_pin_mismatch_not_gap(self):
+        signed, state = self._sign_seq(2)
+        pin = {"cycle_seq": 2, "payload_hash": "d" * 64}
+        reasons = self._strict(signed, state, pin)
+        self.assertEqual(reasons, ("pin_mismatch",))
+
+    def test_pin_seq_zero_boundaries(self):
+        empty_state = state_bytes(cycle_seq=0, history=[])
+        genesis = sign(state=empty_state, calibration_bytes=CAL_BYTES)
+        pin0 = self._pin(genesis)
+        first, state1 = self._sign_seq(1, prev=genesis.payload_hash)
+        self.assertEqual(self._strict(first, state1, pin0), ())
+        second, state2 = self._sign_seq(2, prev=first.payload_hash)
+        self.assertEqual(self._strict(second, state2, pin0),
+                         ("chain_gap",))
+
+    def test_bare_verify_still_tolerates_gap(self):
+        # Scope pin: enforcement is the strict wrapper's alone.
+        first, _ = self._sign_seq(1)
+        third, state3 = self._sign_seq(3, prev="a" * 64)
+        reasons = verify_signed_snapshot(
+            third, signing_key=KEY, expected_state_bytes=state3,
+            expected_calibration_bytes=CAL_BYTES,
+            require_calibration=True, expected_signer_id=SIGNER,
+            expected_pin=self._pin(first), now=NOW)
+        self.assertEqual(reasons, ())
+
+    def test_pruned_state_history_successor_still_passes(self):
+        # Pruned state history is orthogonal: a single-entry state
+        # at seq5 chained to a seq4 pin is a legitimate successor.
+        fourth, _ = self._sign_seq(4)
+        state5 = state_bytes(cycle_seq=5, history=[
+            {"cycle_id": 5, "item_id": "item-5",
+             "completed_at": "2026-11-20T05:11:13+00:00"}])
+        fifth = sign(state=state5, calibration_bytes=CAL_BYTES,
+                     prev_snapshot_hash=fourth.payload_hash)
+        self.assertEqual(self._strict(fifth, state5, self._pin(fourth)), ())
+        # The same jumped state two past a pin is a gap.
+        third, _ = self._sign_seq(3)
+        self.assertEqual(self._strict(fifth, state5, self._pin(third)),
+                         ("chain_gap",))
+
+    def test_malformed_pins_raise_signing_error_via_strict(self):
+        from signing.state_snapshot import verify_snapshot_for_state
+        signed, state = self._sign_seq(3)
+        bad_pins = [
+            {"cycle_seq": 1},
+            {"cycle_seq": -1, "payload_hash": "a" * 64},
+            {"cycle_seq": True, "payload_hash": "a" * 64},
+            {"cycle_seq": "1", "payload_hash": "a" * 64},
+            {"cycle_seq": 1, "payload_hash": "not-hex"},
+            {"cycle_seq": 1, "payload_hash": "a" * 64, "extra": 1},
+            "not-a-dict",
+        ]
+        for pin in bad_pins:
+            with self.subTest(pin=repr(pin)):
+                with self.assertRaises(SigningError):
+                    verify_snapshot_for_state(
+                        signed, signing_key=KEY, state_bytes=state,
+                        calibration_bytes=CAL_BYTES, expected_pin=pin,
+                        expected_signer_id=SIGNER, now=NOW)
+
+
+class Cycle14FixRoundTests(unittest.TestCase):
+    """War-room cycle 14 fix round: every FIX finding pinned."""
+
+    _hist = staticmethod(Cycle14ChainGapTests._hist)
+    _sign_seq = Cycle14ChainGapTests._sign_seq
+    _strict = staticmethod(Cycle14ChainGapTests._strict)
+    _pin = staticmethod(Cycle14ChainGapTests._pin)
+
+    def test_pin_plus_two_prev_pointing_at_pin_still_gap(self):
+        # The most attacker-shaped variant (rev-r5): seq3 names
+        # the PIN as its prev, masquerading as its successor. The
+        # pin+1 branch cannot fire at distance 2.
+        first, _ = self._sign_seq(1)
+        third, state3 = self._sign_seq(3, prev=first.payload_hash)
+        self.assertEqual(self._strict(third, state3, self._pin(first)),
+                         ("chain_gap",))
+
+    def test_gap_dedup_with_double_pin_mismatch_sources(self):
+        # A pin whose key_id AND signer_id both mismatch appends
+        # pin_mismatch twice pre-dedup; the result carries it once,
+        # ahead of chain_gap (rev-r5).
+        first, _ = self._sign_seq(1)
+        third, state3 = self._sign_seq(3, prev="a" * 64)
+        pin = {"cycle_seq": 1, "payload_hash": first.payload_hash,
+               "key_id": "key-0000000000000000",
+               "signer_id": "seat-99"}
+        self.assertEqual(self._strict(third, state3, pin),
+                         ("pin_mismatch", "chain_gap"))
+
+    def test_inconsistent_read_pin_cannot_fall_through_to_pass(self):
+        # rev-r2: a mapping whose cycle_seq changes between reads
+        # was validated as one pin and compared as several others,
+        # falling through every branch to (). The validated pin is
+        # now captured into locals once; all comparisons use them.
+        class FlipDict(dict):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.reads = 0
+
+            def __getitem__(self, key):
+                if key == "cycle_seq":
+                    self.reads += 1
+                    if self.reads > 2:
+                        return 10
+                return super().__getitem__(key)
+
+        first, _ = self._sign_seq(1)
+        second, _ = self._sign_seq(2, prev=first.payload_hash)
+        third, state3 = self._sign_seq(3, prev=second.payload_hash)
+        flip = FlipDict(cycle_seq=1, payload_hash=first.payload_hash)
+        self.assertEqual(self._strict(third, state3, flip),
+                         ("chain_gap",))
+        # Control: the same shape as an honest dict refuses too.
+        honest = {"cycle_seq": 1, "payload_hash": first.payload_hash}
+        self.assertEqual(self._strict(third, state3, honest),
+                         ("chain_gap",))
+
+    def test_get_accessor_flip_cannot_split_validation_from_capture(self):
+        # Re-verification residual: validation read the pin via
+        # .get while capture used [] / `in`, so a mapping whose
+        # accessors disagree could be validated as one pin and
+        # compared as another. Each field is now read once, via
+        # .get alone, and only the captured locals are used.
+        class GetFlipDict(dict):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.gets = 0
+
+            def get(self, key, default=None):
+                if key == "cycle_seq":
+                    self.gets += 1
+                    if self.gets > 1:
+                        return 10
+                return super().get(key, default)
+
+        first, _ = self._sign_seq(1)
+        second, _ = self._sign_seq(2, prev=first.payload_hash)
+        third, state3 = self._sign_seq(3, prev=second.payload_hash)
+        flip = GetFlipDict(cycle_seq=1, payload_hash=first.payload_hash)
+        reasons = self._strict(third, state3, flip)
+        self.assertNotEqual(reasons, ())
+        self.assertEqual(reasons, ("chain_gap",))
+
+
 class LiveStateTests(unittest.TestCase):
     def test_live_state_and_calibration_snapshot(self):
         # Expectations — including the signing instant — are

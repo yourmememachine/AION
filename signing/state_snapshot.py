@@ -87,7 +87,15 @@ Honest limits, stated not hidden:
   successor of a pin, or an explicitly supplied expected previous
   hash); a chain alone does not establish completeness — omitted
   intermediate snapshots are invisible without a trusted
-  checkpoint. Timestamps rest on the host clock: the 300-second
+  checkpoint. The strict wrapper narrows this (cycle 14): it
+  refuses a snapshot more than one sequence past the pin with
+  ``chain_gap``, so through that entry point an omitted
+  intermediate can no longer be laundered into a pin advance —
+  but it still proves nothing about intermediates it never saw,
+  and the bare verifier keeps the gap by design. That refusal
+  assumes one verified snapshot per cycle: a missed or expired
+  intermediate deadlocks strict catch-up until an external pin
+  ceremony (not yet implemented) re-anchors the pin. Timestamps rest on the host clock: the 300-second
   skew is a policy choice, not proof of trustworthy time, and
   the effective validity window is at most TTL + skew.
 - A valid snapshot establishes membership in the key-holder
@@ -141,6 +149,7 @@ MAX_CALIBRATION_BYTES = 5 * 1024 * 1024
 MAX_HISTORY = 200  # mirrors core/loop.py's history cap
 
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
+_PIN_ABSENT = object()  # sentinel: optional pin binding not supplied
 
 
 def _mac(key: bytes, payload_hash: str, key_id: str) -> str:
@@ -529,7 +538,7 @@ def verify_signed_snapshot(signed, *, signing_key: SigningKey,
                            expected_purpose=PURPOSE_STATE_SNAPSHOT,
                            expected_pin=None,
                            expected_prev_snapshot_hash=None,
-                           now=None) -> tuple:
+                           now=None, _enforce_chain_gap=False) -> tuple:
     """Failure reasons for a snapshot envelope; () means authentic,
     unexpired, internally consistent, and bound as expected.
 
@@ -542,7 +551,12 @@ def verify_signed_snapshot(signed, *, signing_key: SigningKey,
     older than the pin reports ``snapshot_rolled_back`` and one at
     the pinned sequence with a different hash reports
     ``pin_mismatch``. Without a pin, rollback is undetectable and
-    this function does not claim otherwise.
+    this function does not claim otherwise. This bare check does
+    NOT enforce chain completeness past the pin's immediate
+    successor — a snapshot further ahead verifies here if its
+    other bindings hold; the strict wrapper
+    ``verify_snapshot_for_state`` is the entry point that refuses
+    that gap (``chain_gap``, cycle 14).
     """
     if not isinstance(signed, SignedStateSnapshot):
         raise SigningError("signed must be a SignedStateSnapshot")
@@ -615,35 +629,63 @@ def verify_signed_snapshot(signed, *, signing_key: SigningKey,
     if expected_pin is not None:
         if not isinstance(expected_pin, dict) \
                 or not set(expected_pin) <= {
-                    "cycle_seq", "payload_hash", "key_id", "signer_id"} \
-                or not _is_int(expected_pin.get("cycle_seq")) \
-                or expected_pin["cycle_seq"] < 0 \
-                or not isinstance(expected_pin.get("payload_hash"), str) \
-                or not _HEX64_RE.fullmatch(expected_pin["payload_hash"]):
+                    "cycle_seq", "payload_hash", "key_id", "signer_id"}:
             raise SigningError(
                 "expected_pin must be {'cycle_seq': int >= 0, "
                 "'payload_hash': hex64} with optional 'key_id' / "
                 "'signer_id' bindings and no other keys")
-        if "key_id" in expected_pin \
-                and expected_pin["key_id"] != signed.key_id:
+        # Capture each pin field ONCE, through the one accessor,
+        # and validate and compare only the captured locals
+        # (war-room cycle 14, rev-r2 + re-verification seat): the
+        # pin is the trust anchor, and re-reading a mapping lets
+        # an inconsistent-read pin (values changing between reads,
+        # or a shared dict mutated concurrently) be validated as
+        # one pin and compared as several others, falling through
+        # every branch to (). One read per field, via .get alone,
+        # leaves no validation-to-comparison window to split.
+        pin_seq = expected_pin.get("cycle_seq")
+        pin_hash = expected_pin.get("payload_hash")
+        pin_key_id = expected_pin.get("key_id", _PIN_ABSENT)
+        pin_signer_id = expected_pin.get("signer_id", _PIN_ABSENT)
+        if not _is_int(pin_seq) or pin_seq < 0 \
+                or not isinstance(pin_hash, str) \
+                or not _HEX64_RE.fullmatch(pin_hash):
+            raise SigningError(
+                "expected_pin must be {'cycle_seq': int >= 0, "
+                "'payload_hash': hex64} with optional 'key_id' / "
+                "'signer_id' bindings and no other keys")
+        if pin_key_id is not _PIN_ABSENT \
+                and pin_key_id != signed.key_id:
             reasons.append("pin_mismatch")
-        if "signer_id" in expected_pin \
-                and expected_pin["signer_id"] != signed.signer_id:
+        if pin_signer_id is not _PIN_ABSENT \
+                and pin_signer_id != signed.signer_id:
             reasons.append("pin_mismatch")
-        if signed.cycle_seq < expected_pin["cycle_seq"]:
+        if signed.cycle_seq < pin_seq:
             reasons.append("snapshot_rolled_back")
-        elif signed.cycle_seq == expected_pin["cycle_seq"] \
-                and recomputed_hash != expected_pin["payload_hash"]:
+        elif signed.cycle_seq == pin_seq \
+                and recomputed_hash != pin_hash:
             reasons.append("pin_mismatch")
-        elif signed.cycle_seq == expected_pin["cycle_seq"] + 1 \
+        elif signed.cycle_seq == pin_seq + 1 \
                 and signed.prev_snapshot_hash \
-                != expected_pin["payload_hash"]:
+                != pin_hash:
             # The immediate successor of the pinned snapshot must
             # chain to it: this is the one continuity check a
             # single pin supports (war-room cycle 10, rev-r5 +
             # external seat). Older gaps are not chain-verified;
             # see the module docstring.
             reasons.append("chain_discontinuity")
+        elif _enforce_chain_gap \
+                and signed.cycle_seq > pin_seq + 1:
+            # Strict-wrapper only (cycle 14): a snapshot more than
+            # one sequence past the pin cannot have its chain
+            # verified from the pin alone — the intermediate
+            # snapshots are unobserved, so their existence and
+            # validity are unprovable either way. The reason is
+            # chain_gap, not chain_discontinuity: at this distance
+            # discontinuity is unprovable, not proven. Bare
+            # verification never sets this flag; it stays an
+            # envelope/rollback check, as documented.
+            reasons.append("chain_gap")
     moment = _parse_time(_now() if now is None else now, "now")
     signed_at = _parse_time(signed.signed_at, "signed_at")
     expires_at = _parse_time(signed.expires_at, "expires_at")
@@ -669,13 +711,28 @@ def verify_snapshot_for_state(signed, *, signing_key: SigningKey,
     convention as ``verify_signed_decision``); consumers attesting
     a live state must use this wrapper, which is to snapshots what
     ``commit_signed``'s strong form is to gate decisions
-    (war-room cycle 10, rev-r2). Chain continuity is still
-    verified only for the pin's immediate successor: callers must
-    advance the pin one sequence at a time, because a snapshot
-    more than one sequence past the pin verifies its bindings
-    here but not its chain (war-room cycle 12, rev-r2 — dissent
-    preserved in internal/REVIEW-CYCLE-12.md; code-level
-    enforcement is backlog item snapshot-chain-gap-enforcement)."""
+    (war-room cycle 10, rev-r2). Chain continuity is enforced
+    here (cycle 14, closing the war-room cycle 12 rev-r2 dissent):
+    a snapshot more than one sequence past the pin reports
+    ``chain_gap`` — never ``()`` — even when every other binding
+    is perfect and its ``prev_snapshot_hash`` points at the unseen
+    intermediate, because a single pin cannot verify intermediates
+    it never observed. Callers must therefore present each
+    intermediate snapshot in order and advance the pin one
+    sequence at a time. A result of exactly ``("chain_gap",)`` has
+    a precise meaning a caller may act on: every attestation
+    binding passed and only history completeness is unverified —
+    the caller may quarantine the candidate on that basis, but
+    must not advance the pin to it. The cost is stated plainly: this assumes
+    one snapshot is taken and verified per cycle; a missed
+    intermediate, or one aged past its TTL, deadlocks catch-up
+    through this wrapper, and there is no in-wrapper jump or
+    recovery — re-pinning is an external ceremony (backlog item
+    snapshot-pin-ceremony, not yet implemented), never a pin
+    reconstructed from the candidate snapshot itself. Pruned
+    *state* history is unaffected: ``history_len`` below
+    ``cycle_seq`` stays legitimate; only unobserved *snapshot*
+    sequences are refused."""
     if state_bytes is None or calibration_bytes is None \
             or expected_pin is None or not expected_signer_id:
         raise SigningError(
@@ -686,7 +743,7 @@ def verify_snapshot_for_state(signed, *, signing_key: SigningKey,
         expected_state_bytes=state_bytes,
         expected_calibration_bytes=calibration_bytes,
         require_calibration=True, expected_signer_id=expected_signer_id,
-        expected_pin=expected_pin, now=now)
+        expected_pin=expected_pin, now=now, _enforce_chain_gap=True)
 
 
 def sign_state_files(state_path, calibration_path=None, *,
