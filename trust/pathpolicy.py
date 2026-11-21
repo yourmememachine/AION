@@ -1,21 +1,23 @@
 """The versioned path policy, path-policy/1 (Trust Boundary
-v2, item 6) — consumed by the build manifest and by the
-verifier; the gate has NOT adopted it, and that adoption is
-pending Dilip's approval of the Protected Gate Rule proposal
+v2, item 6) — consumed by the build manifest, by the verifier,
+and now by the gate: the gate HAS adopted it, lazily, inside
+eval.gate.check_protected_paths, under Dilip's approval of the
+Protected Gate Rule proposal
 (internal/PROTECTED-GATE-PROPOSAL.md). It is not a universal
 policy: see the adoption-status section below for exactly who
 consumes it and who does not.
 
 Path canonicalisation drift between the verifier, the gate, the
 oversight workflow and the build manifest was a cycle-8
-cross-check finding (F8): the gate's protected-path check matches
-literal spellings (its _normalise_path strips a leading "./" and
-translates backslashes, nothing more), so "core//loop.py" or
-"core/./loop.py" slip the gate's exact-file check while
-oversight's canonicalised check catches them, and the verifier
-had to grow a canonical-spelling workaround in _mode_gate to
-compensate. This module is the policy the manifest and the
-verifier share (the gate does not consume it — see below):
+cross-check finding (F8): the gate's protected-path check
+formerly matched literal spellings (its _normalise_path stripped
+a leading "./" and translated backslashes, nothing more), so
+"core//loop.py" or "core/./loop.py" slipped the gate's exact-file
+check while oversight's canonicalised check caught them, and the
+verifier had to grow a canonical-spelling workaround in
+_mode_gate to compensate. This module is the policy the manifest
+and the verifier share, and which the gate now also consumes
+(lazily — see below):
 
 * Spelling rules come from ONE source:
   oversight.approval.canonicalise_path. canonicalise() below
@@ -52,19 +54,26 @@ a silent gap):
   above) and checks the signed gate decision bound to that
   manifest, so policy-canonical paths reach it through the
   manifest, not through a direct call.
-* eval/gate.py does NOT consume this policy — that adoption has
-  NOT happened and remains for a Protected Gate Rule proposal.
-  eval/ is a protected path: changing the gate to canonicalise
-  before checking requires Dilip's Protected Gate Rule approval
-  (the dual-leg oversight workflow). Until then the policy
-  MIRRORS the gate under drift detection, and callers that feed
-  paths to the gate must canonicalise first (as the verifier
-  does) — the gate fed a raw non-canonical spelling can still
-  miss a protected file, e.g. check_protected_paths(
-  ["core//loop.py"]) returns () while classify("core//loop.py")
-  reports it gate-protected. The drift-corpus tests pin exactly
-  this divergence so it is a known, watched remainder, not a
-  discovered-later surprise.
+* eval/gate.py HAS now adopted this policy: its
+  check_protected_paths lazily imports canonicalise from this
+  module inside the function (a module-level import would
+  cycle), judges each path on its canonical spelling, returns
+  offenders as their canonical spelling, and raises
+  GateInputError for any spelling that cannot be canonicalised.
+  That adoption was a Protected Gate Rule change (eval/ is a
+  protected path), approved by Dilip under the proposal cited
+  above. The policy still MIRRORS the gate's protected lists
+  under drift detection. Callers that feed paths to the gate no
+  longer need to canonicalise first for the gate's own verdict
+  to be correct — e.g. check_protected_paths(["core//loop.py"])
+  now returns ("core/loop.py",), matching what
+  classify("core//loop.py") reports as gate-protected. The
+  verifier's own rules remain on top of this, unchanged: the
+  verifier still refuses any entry whose canonical spelling
+  differs from the spelling presented, and still demands a
+  lowercase first component — both are verifier-local
+  strictness, not part of this policy and not removed by the
+  gate's adoption.
 
 One classification caveat every consumer must honour:
 classify() returns protected_by=[] for spellings that cannot be
@@ -85,9 +94,10 @@ POLICY_VERSION = "path-policy/1"
 # eval/gate.py, module level:
 #     PROTECTED_PREFIXES = ("eval/",)
 #     PROTECTED_FILES = ("core/loop.py",)
-# enforced by eval.gate.check_protected_paths over its own
-# _normalise_path spelling (see the module docstring above for
-# why the mirror is applied to the CANONICAL spelling here).
+# enforced by eval.gate.check_protected_paths over the
+# canonical spelling, judged via this policy since the cycle-13
+# adoption (see the module docstring above for why the mirror is
+# applied to the CANONICAL spelling here).
 GATE_PROTECTED_PREFIXES = ("eval/",)
 GATE_PROTECTED_FILES = frozenset({"core/loop.py"})
 

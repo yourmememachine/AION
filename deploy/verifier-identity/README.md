@@ -136,19 +136,30 @@ through the wrapper's allowlist):
 **Fail-closed mode contract (Trust Boundary v3.1).** There
 is no default mode. `AION_DEPLOYMENT_MODE` is required, and
 research mode is entered only via the explicit value
-`research` above. A missing, blank, unknown or malformed
-value (including whitespace-padded or wrongly-cased
-spellings) **refuses startup**: the verifier refuses it
-fail-closed (`deployment_mode_refused`, exit 3), and a launch
-through `run-verifier.sh` refuses with it — the wrapper
-forwards only the env file's allowlisted value, so there is
-no wrapper-side path around the refusal. Blanking the
-variable in the env file therefore no longer selects
-anything: it stops the verifier from starting, with the
-refusal named in the error. (Before v3.1 an absent variable
-silently selected research mode and dropped the production
-anchor requirements with it; that fail-open behaviour is
-removed.)
+`research` above. The contract has two distinct layers:
+
+- **(i) The verifier itself.** Any launch of
+  `trust.verifier_main` with the mode missing, blank,
+  unknown or malformed (including whitespace-padded or
+  wrongly-cased spellings) refuses with
+  `deployment_mode_refused`, exit 3 — before key load or any
+  ledger, anchor or budget side effect. This refusal applies
+  however the verifier is launched, not only through the
+  wrapper.
+- **(ii) The wrapper.** `run-verifier.sh` refuses **before**
+  `runuser` — exit 1, with its own stderr message naming
+  `AION_DEPLOYMENT_MODE` — when the env file's mode is
+  absent, empty, invalid, or duplicated. In those states a
+  wrapper launch therefore never reaches the verifier at
+  all: the wrapper is the first line, the verifier's own
+  refusal in (i) is the second, and there is no wrapper-side
+  path around either.
+
+Blanking the variable in the env file therefore no longer
+selects anything: it stops the launch, with the refusal
+named in the error. (Before v3.1 an absent variable silently
+selected research mode and dropped the production anchor
+requirements with it; that fail-open behaviour is removed.)
 
 ## Co-located rollback — the declared residual
 

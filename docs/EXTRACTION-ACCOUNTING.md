@@ -128,9 +128,17 @@ sealed set of **n = 8** items whose answers come from a known
 harness's three implemented strategies — coordinate descent
 recovered **2 of 8** positions before the latch stopped it,
 label rotation recovered **2 of 8** (identical outcome, as
-(iii) predicts), and non-adaptive group testing recovered
-**4 of 8** positions in 20 attempted queries (19 evaluated)
-under a 60-query allowance. "At most 4/8 recovered" is a
+(iii) predicts), and group testing recovered **4 of 8**
+positions in 20 attempted queries (19 evaluated) under a
+60-query allowance — with the attribution stated exactly:
+the non-adaptive block-pool phase alone recovers **0 of 8**
+(16 consistent assignments remain, none forced); the measured
+4/8 comes from group testing **plus** the tolerated
+near-duplicate refinement probes (the size-2 pool refinements,
+which differ from their parent pools in exactly 2 positions:
+2 tolerated, the 3rd latches and is refused, resolving the
+first block's 4 positions and leaving the remaining block
+unresolved). "At most 4/8 recovered" is a
 measurement of those strategies against that set; it must not
 be read as a guarantee for other set sizes, other entropies
 or alphabets, or adaptive strategies the harness does not
@@ -151,8 +159,11 @@ buys more bits than the sealed set contains is not constrained
 by the accounting, whatever the probe latch does. Non-adaptive
 queries (≥ 3 differing positions from every prior) remain
 possible within the caps, each disclosing only the single
-aggregate of (i) — the group-testing attacker in
-`tests/test_trust_extraction.py` is exactly such a design — so
+aggregate of (i) — the group-testing attacker's block-pool
+phase in `tests/test_trust_extraction.py` is exactly such a
+design (and, as (iv) states, that phase alone recovers 0/8;
+its 4/8 total additionally required the tolerated
+near-duplicate refinement probes, which the latch bounds) — so
 for those regimes the concrete-attacker measurements are the
 operative evidence there, not the cap.
 

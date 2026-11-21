@@ -67,6 +67,11 @@ from .pathpolicy import (
 )
 from .shipcheck import check_ship, record_ship, recover_ship_tx
 from .shiptx import ShipTxJournal, derive_tx_id
+from .wiring import (
+    commit_production,
+    open_production_store,
+    production_client,
+)
 
 __all__ = [
     "EVAL_DOMAIN",
@@ -105,4 +110,7 @@ __all__ = [
     "release_from_json",
     "check_ship",
     "record_ship",
+    "commit_production",
+    "open_production_store",
+    "production_client",
 ]

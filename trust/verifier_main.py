@@ -178,7 +178,7 @@ from trust.anchoring import AnchorError, initialise_anchor, \
 from trust.budgets import BudgetError, BudgetStore, \
     DEFAULT_PER_IDENTITY_CAP, DEFAULT_PER_PROPOSAL_CAP, \
     GENESIS_CHAIN_HASH
-from trust.ledger import SigningLedger
+from trust.ledger import CorruptLedgerError, SigningLedger
 from trust.pathpolicy import canonicalise as _policy_canonicalise
 
 GENESIS_HASH = "0" * 64
@@ -229,7 +229,7 @@ class _Config:
                  identity_budget=DEFAULT_PER_IDENTITY_CAP,
                  anchor_path=None, anchor_init=False,
                  budgets_anchor_path=None, budgets_anchor_init=False,
-                 deployment_mode="research"):
+                 *, deployment_mode):
         self.signing_key = signing_key
         self.signer_id = signer_id
         self.actor = actor
@@ -495,12 +495,19 @@ def _read_budgets_anchor(path):
     if not anchor_file.exists():
         return None
     try:
-        doc = json.loads(anchor_file.read_text(encoding="utf-8"))
-    except Exception:
+        doc = protocol.strict_loads(anchor_file.read_bytes(),
+                                    cap=64 << 10,
+                                    what="budgets anchor")
+    except (protocol.ProtocolError, OSError):
         raise _config("anchor_refused", "budgets anchor malformed")
-    if not isinstance(doc, dict) or doc.get("v") != "budgets-anchor/1" \
-            or not isinstance(doc.get("head"), str) \
-            or len(doc["head"]) != 64:
+    if not isinstance(doc, dict) \
+            or set(doc) != {"v", "head", "anchored_at"} \
+            or doc["v"] != "budgets-anchor/1" \
+            or not isinstance(doc["head"], str) \
+            or len(doc["head"]) != 64 \
+            or any(c not in "0123456789abcdef" for c in doc["head"]) \
+            or not isinstance(doc["anchored_at"], str) \
+            or not doc["anchored_at"]:
         raise _config("anchor_refused", "budgets anchor malformed")
     return doc["head"]
 
@@ -539,6 +546,11 @@ def _open_registry(config: _Config) -> EvalRegistry:
                       "the sealed registry failed validation")
 
 
+_SNAPSHOT_ATTEMPTS = 40
+_EVAL_ATTEMPTS = 40
+_LEDGER_ATTEMPTS = 40
+
+
 def _registry_snapshot(config: _Config):
     """Return (registry, metadata, manifest_hash) from a FRESH
     registry instance, retrying transient staleness.
@@ -555,8 +567,30 @@ def _registry_snapshot(config: _Config):
     retries are semantically safe: each attempt reloads fresh
     and re-records its access. Genuine corruption persists
     across fresh loads, so after all attempts fail the refusal
-    is registry_untrusted — deterministically."""
-    for _attempt in range(12):
+    is registry_untrusted — deterministically.
+
+    Bound rationale — an engineering margin, NOT a proof:
+    each attempt fails only if a competitor's save lands
+    inside its load->save window; attempts are independent
+    races, so no attempt count PROVES success under sustained
+    contention. The bound of 40 was validated empirically
+    under barrier-synchronised multi-process contention
+    (10-wide in tests/test_trust_sealed_eval_contention.py,
+    12-wide in the fix-round probe), and exhaustion still
+    refuses registry_untrusted — fail-closed, never a wrong
+    success.
+
+    Cost, accounted exactly: a FAILED attempt persists at
+    most 1 access-log entry — the metadata save may land
+    before the manifest save detects staleness, while a
+    metadata save that itself detects staleness persists 0
+    (staleness is checked before any write) — and a
+    SUCCESSFUL attempt persists 2 (metadata + manifest). A
+    snapshot call therefore adds at most 39*1 + 2 = 41
+    entries under adversarial contention vs 2 uncontended;
+    the entries are truthful attempt records, and the log
+    cap fails closed."""
+    for _attempt in range(_SNAPSHOT_ATTEMPTS):
         registry = _open_registry(config)
         try:
             metadata = registry.list_sealed_metadata(config.actor)
@@ -830,13 +864,12 @@ def _mode_gate(config: _Config, body: dict) -> dict:
     changed_paths = body["changed_paths"]
     if isinstance(changed_paths, (list, tuple)):
         for path in changed_paths:
-            # The protected-path check inside the gate matches
-            # literal spellings; non-canonical spellings of a
-            # protected path ("../eval/gate.py", "EVAL/gate.py")
-            # would slip it. The gate module is protected and
-            # cannot be fixed this cycle, so the verifier accepts
-            # only canonical spellings — anything else is a
-            # malformed request, never a signed accept.
+            # The verifier canonicalises-or-refuses every entry
+            # before the gate as defence-in-depth: it accepts only
+            # canonical spellings — anything else is a malformed
+            # request, never a signed accept. Since cycle 13 the
+            # gate itself also judges canonical spellings
+            # (path-policy/1 adoption), so the layers agree.
             if not isinstance(path, str):
                 raise _malformed("malformed_request",
                                  "changed_paths must be strings")
@@ -1097,12 +1130,14 @@ def _mode_sealed_eval(config: _Config, body: dict) -> dict:
             except Exception:
                 pass
         raise _config("query_budget_exceeded", exc.reason)
-    registry = _open_registry(config)
-    try:
-        metadata = registry.list_sealed_metadata(config.actor)
-    except (CorruptRegistryError, ValueError):
-        raise _config("registry_untrusted",
-                      "the sealed registry failed validation")
+    # Through the snapshot retry, not a direct open: a direct
+    # instance goes stale when a competing process appends
+    # access-log entries, and its save then misreports
+    # registry_untrusted under concurrency. The snapshot's
+    # manifest_hash is not used here — the digest below is
+    # derived from the evaluation report's own manifest hash.
+    registry, metadata, _snapshot_manifest_hash = \
+        _registry_snapshot(config)
     if not metadata:
         raise _config("registry_empty", "the sealed set is empty")
     if len(answers) != len(metadata):
@@ -1115,25 +1150,72 @@ def _mode_sealed_eval(config: _Config, body: dict) -> dict:
     except BudgetError as exc:
         raise _config("query_budget_exceeded", exc.reason)
     _update_budgets_anchor(config, budget_store)
-    remaining = iter(answers)
+    # The scorer factory is built ONCE, outside the retry loop
+    # below (as is all answers parsing/validation above); each
+    # attempt calls it for a FRESH answer iterator, because a
+    # failed attempt may already have consumed part of the
+    # transcript and a retry must score the whole transcript.
 
-    def scorer(prompt):  # prompt is seen only inside this process
+    def _fresh_scorer():
+        remaining = iter(answers)
+
+        def scorer(prompt):  # prompt seen only in this process
+            try:
+                return next(remaining)
+            except StopIteration:
+                raise EvaluationError("answer count mismatch")
+
+        return scorer
+
+    # Evaluate retry on FRESH instances (Trust Boundary v3.1,
+    # fix round 2, C1). The budget was recorded exactly ONCE,
+    # above, BEFORE this loop — the v2 two-phase discipline
+    # (check_only earlier in this mode, record here) — and is
+    # NEVER re-recorded on retries, so a retried evaluation
+    # still costs exactly one recorded query. The first
+    # attempt reuses the snapshot instance; on
+    # CorruptRegistryError the instance is discarded and the
+    # next attempt runs on a fresh _open_registry instance.
+    # Retrying a STALENESS failure is safe: in
+    # eval/registry.py the evaluate access-log save checks
+    # staleness (_disk_changed) BEFORE any write and the
+    # sealed-access wrapper rolls its in-memory state back,
+    # so a stale evaluate persists nothing and scores
+    # nothing. (A CorruptRegistryError raised for genuine
+    # tampering inside the evaluation itself occurs after
+    # that log entry landed; retrying it is still safe — it
+    # simply refuses again — and exhaustion below refuses
+    # registry_untrusted either way.)
+    # The bound of _EVAL_ATTEMPTS is an engineering margin,
+    # NOT a proof, in the same sense as _registry_snapshot:
+    # each attempt fails only if a competitor's save lands
+    # inside its load->save window, attempts are independent
+    # races, the margin was validated empirically under
+    # barrier-synchronised contention (see
+    # tests/test_trust_sealed_eval_contention.py), and
+    # exhaustion refuses registry_untrusted — fail-closed,
+    # never a wrong success.
+    report = None
+    eval_registry = registry
+    for _eval_attempt in range(_EVAL_ATTEMPTS):
+        if _eval_attempt:
+            eval_registry = _open_registry(config)
         try:
-            return next(remaining)
-        except StopIteration:
-            raise EvaluationError("answer count mismatch")
-
-    try:
-        report = registry.run_sealed_evaluation(config.actor, scorer)
-    except CorruptRegistryError:
+            report = eval_registry.run_sealed_evaluation(
+                config.actor, _fresh_scorer())
+            break
+        except CorruptRegistryError:
+            continue
+        except EvaluationError:
+            raise _config("evaluation_failed",
+                          "the sealed evaluation failed closed")
+        except ValueError:
+            raise _config("registry_untrusted",
+                          "the sealed registry failed validation")
+    else:
         raise _config("registry_untrusted",
                       "the sealed registry failed validation")
-    except EvaluationError:
-        raise _config("evaluation_failed",
-                      "the sealed evaluation failed closed")
-    except ValueError:
-        raise _config("registry_untrusted",
-                      "the sealed registry failed validation")
+    registry = eval_registry
     try:
         digest = _registry_digest(registry, config.actor,
                                   report["manifest_hash"])
@@ -1145,10 +1227,65 @@ def _mode_sealed_eval(config: _Config, body: dict) -> dict:
         signer_id=config.signer_id, actor=config.actor,
         registry_digest=digest, answers_hash=answers_hash_for(answers),
         ttl_seconds=config.ttl_seconds, scope=proposal_id)
-    try:
-        SigningLedger(config.home).append_eval_attestation(
-            record, recorded_at=_now())
-    except Exception:
+    # Ledger append retry on FRESH instances (Trust Boundary
+    # v3.1, fix round 3). The record above is built ONCE from
+    # the successful evaluation and is re-appended VERBATIM on
+    # every attempt: the evaluation is not re-run, the budget
+    # is not re-recorded and the record is not re-signed. The
+    # ledger entry append_eval_attestation derives from it
+    # (decision_id / payload_hash = record["payload_hash"],
+    # signer_id = record["payload"]["signer_id"]) is a
+    # deterministic function of the record, and recorded_at is
+    # captured once here and reused, mirroring the recorded_at
+    # reuse in ShipLedger.burn's reload-and-retry
+    # (trust/ledger.py); the only entry fields that differ on
+    # a retry are the chain fields (seq / prev_hash /
+    # entry_hash), which name the fresh head the entry extends
+    # — they are not part of the signed record, of the response
+    # below ({"attestation": record}), or of the payload_hash
+    # downstream ledger-presence checks look up, so a retry
+    # cannot break the response or its verification.
+    # Retrying a CorruptLedgerError is safe against
+    # double-append ONLY because of a verified property of
+    # HashChainJournal._save (trust/ledger.py): its freshness
+    # check runs under the directory flock BEFORE the tmp file
+    # is written or replaced, and every other
+    # CorruptLedgerError on the append path (the _reload /
+    # under-lock _load validation) likewise precedes any
+    # write — a CorruptLedgerError from the append therefore
+    # guarantees that attempt wrote NOTHING, so the successful
+    # attempt is the one and only append of this record. Any
+    # other exception is not a staleness race and refuses
+    # ledger_failed at once, exactly as before.
+    # The bound of _LEDGER_ATTEMPTS is an engineering margin,
+    # NOT a proof, in the same sense as the evaluate loop
+    # above: each attempt fails only if a competitor's append
+    # lands inside its load->save window, attempts are
+    # independent races, the margin was validated empirically
+    # under barrier-synchronised contention (see
+    # tests/test_trust_sealed_eval_contention.py), and
+    # exhaustion refuses ledger_failed — fail-closed, never a
+    # wrong success.
+    ledger_recorded_at = _now()
+    ledger_entry = None
+    for _ledger_attempt in range(_LEDGER_ATTEMPTS):
+        try:
+            ledger_entry = SigningLedger(
+                config.home).append_eval_attestation(
+                    record, recorded_at=ledger_recorded_at)
+            break
+        except CorruptLedgerError:
+            # Stale instance: discard it; the next attempt
+            # constructs a fresh SigningLedger and re-appends
+            # the same record.
+            continue
+        except Exception:
+            raise _config("ledger_failed",
+                          "the eval attestation could not be "
+                          "ledgered; refusing to return it")
+    if ledger_entry is None:
+        # Every attempt lost the append race: exhaustion still
+        # refuses ledger_failed, fail-closed.
         raise _config("ledger_failed",
                       "the eval attestation could not be ledgered; "
                       "refusing to return it")

@@ -348,11 +348,22 @@ def _validate_facts(facts: StateFacts) -> str | None:
         raise SigningError("empty history requires cycle_seq 0")
     if facts.history_len > 0 and facts.cycle_seq != facts.last_cycle_id:
         raise SigningError("cycle_seq must equal the last history cycle")
+    if facts.history_len > 0 and facts.history_len > facts.last_cycle_id:
+        # History cycle ids are strictly increasing positive
+        # integers ending at cycle_seq, so at most cycle_seq
+        # entries can exist; more is signer-impossible even though
+        # fewer is legitimate (pruned history). War-room cycle 12,
+        # rev-r1/rev-r4.
+        raise SigningError(
+            "history_len exceeds the last history cycle")
     if facts.last_item_id is not None:
         _check_id(facts.last_item_id, "last item id")
     if (facts.history_len == 0) != (facts.last_item_id is None):
         raise SigningError(
             "history_len and last_item_id disagree about emptiness")
+    if (facts.history_len == 0) != (facts.last_completed_at is None):
+        raise SigningError(
+            "history_len and last_completed_at disagree about emptiness")
     if facts.last_completed_at is None:
         return None
     return _normalise_time(facts.last_completed_at, "last_completed_at")
@@ -455,8 +466,9 @@ def sign_state_snapshot(state_bytes, *, signing_key: SigningKey, signer_id,
     Every bound fact is recomputed here from the raw bytes; the
     caller asserts nothing but the signer identity and the chain
     link. ``calibration_bytes=None`` leaves the vote record
-    unbound (``calibration_sha256 == ""``); passing ``b""`` binds
-    the hash of an empty log and is a different, explicit claim.
+    unbound (``calibration_sha256 == ""``); passing ``b""`` is
+    refused as malformed — an empty log is not a vote record —
+    so ``None`` is the only spelling of unbound.
     """
     if not isinstance(signing_key, SigningKey):
         raise SigningError("signing_key must be a SigningKey")
@@ -657,7 +669,13 @@ def verify_snapshot_for_state(signed, *, signing_key: SigningKey,
     convention as ``verify_signed_decision``); consumers attesting
     a live state must use this wrapper, which is to snapshots what
     ``commit_signed``'s strong form is to gate decisions
-    (war-room cycle 10, rev-r2)."""
+    (war-room cycle 10, rev-r2). Chain continuity is still
+    verified only for the pin's immediate successor: callers must
+    advance the pin one sequence at a time, because a snapshot
+    more than one sequence past the pin verifies its bindings
+    here but not its chain (war-room cycle 12, rev-r2 — dissent
+    preserved in internal/REVIEW-CYCLE-12.md; code-level
+    enforcement is backlog item snapshot-chain-gap-enforcement)."""
     if state_bytes is None or calibration_bytes is None \
             or expected_pin is None or not expected_signer_id:
         raise SigningError(

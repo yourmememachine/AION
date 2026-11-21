@@ -71,6 +71,16 @@ def _parse_float(text: str) -> float:
     return value
 
 
+def _no_duplicate_keys(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise CorruptCalibrationError(
+                f"duplicate key in log: {key}")
+        out[key] = value
+    return out
+
+
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -322,7 +332,8 @@ class CalibrationLog:
         try:
             data = json.loads(raw.decode("utf-8"),
                               parse_constant=_reject_constant,
-                              parse_float=_parse_float)
+                              parse_float=_parse_float,
+                              object_pairs_hook=_no_duplicate_keys)
         except CorruptCalibrationError:
             raise
         except Exception as exc:

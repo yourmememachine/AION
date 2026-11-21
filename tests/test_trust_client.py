@@ -10,12 +10,15 @@ construction (meta-test).
 """
 
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from eval.registry import EvalRegistry
+from signing import generate_key_file
 from trust.client import VerifierClient
 from trust.errors import (
     VerifierConfigError,
@@ -110,6 +113,109 @@ class NewModeSurfaceTests(unittest.TestCase):
                 proposal_id="prop-1", baseline_eval={},
                 candidate_eval={}, public_baseline_score=0.5,
                 public_candidate_score=0.6)
+
+
+_NO_MODE_VERIFIER = '''
+"""Fake verifier: well-formed ok responses, NO deployment_mode."""
+import json
+import sys
+
+
+def main():
+    request = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    doc = {"v": "trust-response/1",
+           "request_id": request["request_id"],
+           "mode": request["mode"], "status": "ok",
+           "result": {"valid": True, "reasons": []}, "error": None}
+    sys.stdout.write(json.dumps(doc))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+class ModePinTests(unittest.TestCase):
+    """Client deployment-mode pin against the REAL verifier in
+    research mode (fixture idiom mirrors
+    tests/test_trust_mode_contract.py: fake registry + generated
+    key in a temp verifier-home)."""
+
+    ACTOR = "verifier-actor"
+    SIGNER = "verifier-svc"
+    ITEMS = [("sealed-1", "algebra", "2+2?", "4"),
+             ("sealed-2", "algebra", "3*3?", "9"),
+             ("sealed-3", "geo", "pi~?", "3.14")]
+    ANSWERS = [expected for *_x, expected in ITEMS]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        base.chmod(0o700)
+        self.home = base / "verifier-home"
+        self.home.mkdir()
+        self.home.chmod(0o700)
+        self.key = generate_key_file(self.home / "gate.key")
+        self.registry_dir = base / "registry"
+        registry = EvalRegistry(self.registry_dir)
+        for item_id, domain, prompt, expected in self.ITEMS:
+            registry.add_sealed_item(item_id, domain, prompt, expected,
+                                     "test-actor")
+        self.env = {
+            "AION_VERIFIER_KEY_PATH": str(self.home / "gate.key"),
+            "AION_VERIFIER_SIGNER_ID": self.SIGNER,
+            "AION_VERIFIER_ACTOR_ID": self.ACTOR,
+            "AION_REGISTRY_DIR": str(self.registry_dir),
+            "AION_VERIFIER_HOME": str(self.home / "ledger"),
+            "AION_DEPLOYMENT_MODE": "research",
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def real_client(self, **kw):
+        kw.setdefault("verifier_env", self.env)
+        kw.setdefault("expected_signer_id", self.SIGNER)
+        kw.setdefault("expected_key_id", self.key.key_id)
+        return VerifierClient(**kw)
+
+    def test_invalid_pin_refused_at_construction(self):
+        with self.assertRaises(VerifierConfigError):
+            VerifierClient(expected_deployment_mode="staging")
+
+    def test_pinned_research_client_succeeds_and_observes(self):
+        client = self.real_client(expected_deployment_mode="research")
+        self.assertIsNone(client.observed_deployment_mode)
+        record = client.sealed_eval(self.ANSWERS)
+        self.assertEqual(record["payload"]["score"], 1.0)
+        self.assertEqual(client.observed_deployment_mode, "research")
+
+    def test_pinned_production_against_research_verifier_refused(self):
+        client = self.real_client(
+            expected_deployment_mode="production")
+        with self.assertRaises(VerifierProtocolError):
+            client.sealed_eval(self.ANSWERS)
+        self.assertEqual(client.observed_deployment_mode, "research")
+
+    def test_pinned_client_refuses_verifier_omitting_mode(self):
+        fake_dir = Path(self.tmp.name) / "fake-verifier"
+        fake_dir.mkdir()
+        (fake_dir / "fake_no_mode_verifier.py").write_text(
+            _NO_MODE_VERIFIER)
+        client = VerifierClient(
+            module="fake_no_mode_verifier",
+            pythonpath_extra=(fake_dir,),
+            expected_deployment_mode="research")
+        with self.assertRaises(VerifierProtocolError):
+            client.verify_envelope({"x": 1})
+        self.assertIsNone(client.observed_deployment_mode)
+
+    def test_unpinned_client_still_observes_mode(self):
+        client = self.real_client()
+        record = client.sealed_eval(self.ANSWERS)
+        self.assertEqual(record["payload"]["score"], 1.0)
+        self.assertEqual(client.observed_deployment_mode, "research")
 
 
 class KeyFreeMetaTests(unittest.TestCase):

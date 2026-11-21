@@ -29,11 +29,27 @@ are deliberately ABSENT from ALLOWLIST (whose entries all carry
 positive counts); the zero-caller expectation is pinned by
 test_legacy_paths_have_no_production_callers below.
 
+Also watched (cycle 13, production signed-path wiring):
+constructions of VerifierClient and MemoryStore in production
+code, in the same forms as GateDecision constructions (bare
+name, module attribute, and import alias). The sanctioned
+production construction site is trust/wiring.py, with exactly
+one construction of each; memory/reuse.py's two legacy
+MemoryStore constructions are an explicit counted QUARANTINED
+exception, in the design note's terms. Any other production
+construction in the detected forms (bare / attribute /
+import-alias constructions) — e.g. a convenience path building
+its own client from an unvalidated env, or opening a plain
+store where a signed_only one is required — fails this lint.
+
 Known blind spots, pinned by tests below rather than hidden:
 getattr-style indirection, bare method references
-(`f = store.commit_write` without a call), and functools.partial
-wrapping are NOT detected. Runtime trickery is out of scope for
-a static lint and the record says so.
+(`f = store.commit_write` without a call), functools.partial
+wrapping, subclassing a watched class
+(`class C(VerifierClient)`), and name-reassignment
+(`VC2 = VerifierClient; VC2(...)`) are NOT detected. Runtime
+trickery is out of scope for a static lint and the record
+says so.
 """
 
 import ast
@@ -45,7 +61,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 REPO = Path(__file__).resolve().parents[1]
 PRODUCTION_ROOTS = ("core", "eval", "memory", "signing", "selfmod",
-                    "oversight", "trust", "machine", "products")
+                    "oversight", "trust", "machine", "products",
+                    "deploy")
 
 # (repo-relative path, kind) -> (exact call-site count, why this
 # call site is sanctioned). Every entry must correspond to real
@@ -77,6 +94,30 @@ ALLOWLIST = {
            "commit_signed"),
     ("trust/shipcheck.py", "run_one_cycle"): (
         1, "THE sanctioned ship path"),
+    ("trust/wiring.py", "verifier_client_ctor"): (
+        1, "THE sanctioned production construction site "
+           "(production signed-path wiring): production_client "
+           "validates a copy of the env against the wrapper "
+           "allowlist, requires production mode and both "
+           "anchors, and pins signer, key and deployment mode "
+           "before this one construction"),
+    ("trust/wiring.py", "memory_store_ctor"): (
+        1, "THE sanctioned production construction site: "
+           "open_production_store constructs the store only "
+           "after a read-only parse shows the persisted mode "
+           "is signed_only, and re-asserts the mode on the "
+           "constructed instance"),
+    ("memory/reuse.py", "memory_store_ctor"): (
+        2, "LEGACY, QUARANTINED (production signed-path wiring "
+           "design note): the cycle-4 reuse harness constructs "
+           "plain stores in-process (its measurement store and "
+           "an empty control store), but the path is "
+           "quarantined behind run_reuse_measurement's "
+           "test-only legacy_test_mode flag — the default call "
+           "raises before any store is constructed, and no "
+           "production entrypoint calls it (pinned by "
+           "test_legacy_paths_have_no_production_callers). New "
+           "code must use trust.wiring.open_production_store"),
 }
 
 _KIND_BY_ATTR = {"commit_write": "commit_write",
@@ -93,15 +134,28 @@ _KIND_BY_ATTR = {"commit_write": "commit_write",
 _KIND_BY_NAME = {"run_reuse_measurement": "run_reuse_measurement"}
 
 
+# Watched constructions, by class name. Constructions are
+# detected in bare form (ClassName(...)), attribute form
+# (module.ClassName(...), which also covers module import
+# aliases, whose receiver spelling the scanner does not need to
+# resolve) and import-alias form (from x import ClassName as
+# Alias; Alias(...)).
+_CTOR_KIND_BY_CLASS = {"GateDecision": "gate_decision_ctor",
+                       "VerifierClient": "verifier_client_ctor",
+                       "MemoryStore": "memory_store_ctor"}
+
+
 def scan_source(text: str) -> dict:
     """{kind: count} of watched calls in one source text."""
     tree = ast.parse(text)
-    ctor_names = {"GateDecision"}
+    ctor_names = {name: kind for name, kind
+                  in _CTOR_KIND_BY_CLASS.items()}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if alias.name == "GateDecision":
-                    ctor_names.add(alias.asname or alias.name)
+                if alias.name in _CTOR_KIND_BY_CLASS:
+                    ctor_names[alias.asname or alias.name] = \
+                        _CTOR_KIND_BY_CLASS[alias.name]
     found = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -114,10 +168,10 @@ def scan_source(text: str) -> dict:
         elif isinstance(func, ast.Name) and func.id in _KIND_BY_NAME:
             kind = _KIND_BY_NAME[func.id]
         elif isinstance(func, ast.Name) and func.id in ctor_names:
-            kind = "gate_decision_ctor"
+            kind = ctor_names[func.id]
         elif isinstance(func, ast.Attribute) \
-                and func.attr == "GateDecision":
-            kind = "gate_decision_ctor"
+                and func.attr in _CTOR_KIND_BY_CLASS:
+            kind = _CTOR_KIND_BY_CLASS[func.attr]
         if kind:
             found[kind] = found.get(kind, 0) + 1
     return found
@@ -204,6 +258,57 @@ class LintTests(unittest.TestCase):
                   "d = GD(accepted=True)\n")
         self.assertEqual(scan_source(source), {"gate_decision_ctor": 1})
 
+    def test_scanner_catches_production_constructions(self):
+        # Cycle 13: VerifierClient and MemoryStore constructions
+        # are counted in bare and attribute forms.
+        self.assertEqual(
+            scan_source("c = VerifierClient(verifier_env={})\n"),
+            {"verifier_client_ctor": 1})
+        self.assertEqual(
+            scan_source("c = client.VerifierClient(verifier_env={})\n"),
+            {"verifier_client_ctor": 1})
+        self.assertEqual(
+            scan_source("s = MemoryStore(d, signed_only=True)\n"),
+            {"memory_store_ctor": 1})
+        self.assertEqual(
+            scan_source("s = store.MemoryStore(d)\n"),
+            {"memory_store_ctor": 1})
+        # A method call ON the class is not a construction: the
+        # audited migration keeps its own kind, not the ctor kind.
+        self.assertEqual(
+            scan_source(
+                "MemoryStore.migrate_security_mode("
+                "d, to_mode='unsigned', actor='op', reason='r')\n"),
+            {"migrate_security_mode": 1})
+
+    def test_scanner_catches_construction_import_aliases(self):
+        source = ("from trust.client import VerifierClient as VC\n"
+                  "from memory.store import MemoryStore as MS\n"
+                  "c = VC(verifier_env={})\n"
+                  "s = MS(d, signed_only=True)\n")
+        self.assertEqual(
+            scan_source(source),
+            {"verifier_client_ctor": 1, "memory_store_ctor": 1})
+
+    def test_production_constructions_confined_to_wiring(self):
+        # Cycle 13 pin, stated positively: the ONLY production
+        # VerifierClient construction is trust/wiring.py's one,
+        # and production MemoryStore constructions are wiring's
+        # one plus memory/reuse.py's two quarantined legacy ones.
+        # (The exact-equality allowlist test above also enforces
+        # this; this pin names the intent so a failure here reads
+        # as a wiring violation, not a bookkeeping mismatch.)
+        found = scan_repo()
+        client_sites = {rel: count for (rel, k), count
+                        in found.items()
+                        if k == "verifier_client_ctor"}
+        self.assertEqual(client_sites, {"trust/wiring.py": 1})
+        store_sites = {rel: count for (rel, k), count
+                       in found.items() if k == "memory_store_ctor"}
+        self.assertEqual(
+            store_sites,
+            {"trust/wiring.py": 1, "memory/reuse.py": 2})
+
     def test_production_roots_cover_every_python_directory(self):
         # A new top-level package must not silently escape the
         # lint: any top-level directory containing Python files
@@ -241,6 +346,26 @@ class LintTests(unittest.TestCase):
         sneaky = ("from functools import partial\n"
                   "f = partial(store.commit_write, fields)\n"
                   "f(decision)\n")
+        self.assertEqual(scan_source(sneaky), {})
+
+    def test_subclassing_is_a_known_blind_spot(self):
+        # Subclassing a watched class is not a construction in
+        # any detected form: the class definition names the
+        # watched class as a base (not a Call), and calling the
+        # subclass calls the subclass's own name, which the
+        # scanner does not resolve to the watched class.
+        sneaky = ("class C(VerifierClient):\n"
+                  "    pass\n"
+                  "c = C(verifier_env={})\n")
+        self.assertEqual(scan_source(sneaky), {})
+
+    def test_name_reassignment_is_a_known_blind_spot(self):
+        # Reassigning a watched class to a new name (not an
+        # import alias) is not detected: the assignment is not
+        # an ImportFrom, so the scanner never learns the new
+        # name, and calling it is invisible to the scanner.
+        sneaky = ("VC2 = VerifierClient\n"
+                  "c = VC2(verifier_env={})\n")
         self.assertEqual(scan_source(sneaky), {})
 
 

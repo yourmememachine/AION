@@ -70,8 +70,10 @@ Protected scope
 Tier A (the gate's, authoritative): check_protected_paths refuses any
 path under eval/ and core/loop.py exactly. Paths are canonicalised
 BEFORE that check (backslashes and duplicate separators collapsed,
-"." segments dropped), because the gate's exact/prefix match alone
-misses spellings like core/./loop.py; any ".." segment is refused
+"." segments dropped); this local canonicalisation is now redundant
+defence-in-depth, since the gate's adoption of path-policy/1 in
+cycle 13 means the gate itself also judges canonical spellings
+such as core/./loop.py. Any ".." segment is refused
 outright, which is stronger than canonicalise-then-match. Tier B
 (local policy, labelled as ours, not the gate's): selfmod/, .git/
 and state/ are also refused, including a bare file named exactly

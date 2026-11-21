@@ -159,19 +159,23 @@ class SyntheticDeploymentTests(unittest.TestCase):
                      base / "anchors" / "signing.anchor.json",
                      base / "anchors" / "budgets.anchor.json"):
             os.chown(path, self.pw.pw_uid, self.pw.pw_gid)
-        # Staged code copy: repo packages + the wrapper, root-owned
-        # and world-readable, as in the live deployment.
+            # State files carry no world access (the live files
+            # are 0660, group access tolerated via the group's
+            # sole membership; registry.json is 0600 below).
+            path.chmod(0o660)
+        (base / "registry" / "registry.json").chmod(0o600)
+        # Staged code copy: repo packages + the whole
+        # deploy/verifier-identity directory, root-owned and
+        # world-readable, as in the live deployment.
         staged = base / "code"
         for package in PACKAGES:
             shutil.copytree(
                 REPO / package, staged / package,
                 ignore=shutil.ignore_patterns("__pycache__"))
-        wrapper_dest = (staged / "deploy" / "verifier-identity"
-                        / "run-verifier.sh")
-        wrapper_dest.parent.mkdir(parents=True)
-        shutil.copyfile(
-            REPO / "deploy" / "verifier-identity" / "run-verifier.sh",
-            wrapper_dest)
+        shutil.copytree(
+            REPO / "deploy" / "verifier-identity",
+            staged / "deploy" / "verifier-identity",
+            ignore=shutil.ignore_patterns("__pycache__"))
         staged.chmod(0o755)
         for path in staged.rglob("*"):
             path.chmod(0o755 if path.is_dir() else 0o644)
@@ -210,35 +214,46 @@ class SyntheticDeploymentTests(unittest.TestCase):
              "--user", "aion-verifier"],
             capture_output=True, timeout=120)
 
-    def assert_drift_detected(self, result, check_name):
+    def assert_drift_detected(self, result, check_name, reason=None):
         out = result.stdout.decode("utf-8", errors="replace")
         self.assertNotEqual(
             result.returncode, 0,
             msg=out + result.stderr.decode("utf-8",
                                            errors="replace"))
         self.assertIn(f"FAIL {check_name}", out)
+        if reason is not None:
+            fail_line = next(
+                (line for line in out.splitlines()
+                 if line.startswith(f"FAIL {check_name}")), "")
+            self.assertIn(reason, fail_line)
 
     # -- healthy + drift ----------------------------------------------
 
     def test_healthy_synthetic_deployment_passes(self):
         ledger_file = self.base / "home" / "signing-ledger.json"
         ledger_before = ledger_file.read_bytes()
+        registry_file = self.base / "registry" / "registry.json"
+        registry_before = registry_file.read_bytes()
         result = self.run_checker()
         out = result.stdout.decode("utf-8", errors="replace")
         self.assertEqual(
             result.returncode, 0,
             msg=out + result.stderr.decode("utf-8",
                                            errors="replace"))
-        self.assertIn("health-check: 8/8 checks passed", out)
+        self.assertIn("health-check: 10/10 checks passed", out)
         # Read-only by design: the probe ledgered nothing and no
         # budget store was created by the checker's visit.
         self.assertEqual(ledger_file.read_bytes(), ledger_before)
         self.assertFalse((self.base / "home" / "budgets.json")
                          .exists())
+        # Registry validation ran entirely on a copy: the live
+        # registry file (and its access log) is byte-unmoved.
+        self.assertEqual(registry_file.read_bytes(), registry_before)
 
     def test_drift_keys_dir_mode_0755(self):
         (self.base / "keys").chmod(0o755)
-        self.assert_drift_detected(self.run_checker(), "directories")
+        self.assert_drift_detected(self.run_checker(), "directories",
+                                   "0o755")
 
     def test_drift_env_mode_blanked(self):
         text = self.env_file.read_text(encoding="utf-8")
@@ -246,21 +261,23 @@ class SyntheticDeploymentTests(unittest.TestCase):
             text.replace("AION_DEPLOYMENT_MODE=production",
                          "AION_DEPLOYMENT_MODE="), encoding="utf-8")
         self.env_file.chmod(0o600)
-        self.assert_drift_detected(self.run_checker(), "env-file")
+        self.assert_drift_detected(self.run_checker(), "env-file",
+                                   "AION_DEPLOYMENT_MODE")
 
     def test_drift_signing_ledger_truncated(self):
         ledger_file = self.base / "home" / "signing-ledger.json"
         data = json.loads(ledger_file.read_text(encoding="utf-8"))
         data["entries"] = data["entries"][:-1]
         ledger_file.write_text(json.dumps(data), encoding="utf-8")
-        self.assert_drift_detected(self.run_checker(), "anchors")
+        self.assert_drift_detected(self.run_checker(), "anchors",
+                                   "signing anchor")
 
     def test_drift_staged_package_file_modified(self):
         target = self.base / "code" / "trust" / "protocol.py"
         with open(target, "a", encoding="utf-8") as fh:
             fh.write("\n# drift\n")
         self.assert_drift_detected(self.run_checker(),
-                                   "staged-code")
+                                   "staged-code", "trust/protocol.py")
 
     def test_drift_staged_wrapper_modified(self):
         target = (self.base / "code" / "deploy" / "verifier-identity"
@@ -268,11 +285,60 @@ class SyntheticDeploymentTests(unittest.TestCase):
         with open(target, "a", encoding="utf-8") as fh:
             fh.write("\n# drift\n")
         self.assert_drift_detected(self.run_checker(),
-                                   "staged-code")
+                                   "staged-code", "run-verifier.sh")
 
     def test_drift_key_file_mode_0644(self):
         (self.base / "keys" / "gate.key").chmod(0o644)
-        self.assert_drift_detected(self.run_checker(), "key-file")
+        self.assert_drift_detected(self.run_checker(), "key-file",
+                                   "0o644")
+
+    def test_drift_budgets_anchor_head_mismatch(self):
+        anchor_file = self.base / "anchors" / "budgets.anchor.json"
+        doc = json.loads(anchor_file.read_text(encoding="utf-8"))
+        doc["head"] = "f" * 64
+        anchor_file.write_text(json.dumps(doc, sort_keys=True),
+                               encoding="utf-8")
+        self.assert_drift_detected(self.run_checker(), "anchors",
+                                   "budgets anchor")
+
+    def test_drift_init_flag_env_probe_gated(self):
+        # An INIT-flagged env must FAIL the env-file check AND the
+        # effective-mode probe must not run: a probe against this
+        # env could CREATE the missing signing anchor (that is the
+        # INIT ceremony), healing the drift being reported.
+        anchor_file = self.base / "anchors" / "signing.anchor.json"
+        anchor_file.unlink()
+        text = self.env_file.read_text(encoding="utf-8")
+        self.env_file.write_text(
+            text.replace("AION_ANCHOR_INIT=\n",
+                         "AION_ANCHOR_INIT=1\n"), encoding="utf-8")
+        self.env_file.chmod(0o600)
+        result = self.run_checker()
+        self.assert_drift_detected(result, "env-file",
+                                   "AION_ANCHOR_INIT")
+        out = result.stdout.decode("utf-8", errors="replace")
+        self.assertIn("FAIL effective-mode", out)
+        self.assertIn("probe not run", out)
+        self.assertFalse(anchor_file.exists())
+
+    def test_drift_staged_extra_root_py_file(self):
+        target = self.base / "code" / "sitecustomize.py"
+        target.write_text("# staged-root drift\n", encoding="utf-8")
+        self.assert_drift_detected(self.run_checker(),
+                                   "staged-code", "sitecustomize.py")
+
+    def test_drift_registry_corruption(self):
+        registry_file = self.base / "registry" / "registry.json"
+        data = registry_file.read_bytes()
+        corrupted = data.replace(b"algebra", b"algebrx", 1)
+        self.assertNotEqual(corrupted, data)
+        registry_file.write_bytes(corrupted)
+        self.assert_drift_detected(self.run_checker(), "registry")
+
+    def test_drift_anchor_file_mode_0777(self):
+        (self.base / "anchors" / "signing.anchor.json").chmod(0o777)
+        self.assert_drift_detected(self.run_checker(), "state-files",
+                                   "signing.anchor.json")
 
 
 if __name__ == "__main__":

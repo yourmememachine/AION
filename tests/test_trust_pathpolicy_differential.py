@@ -1,36 +1,48 @@
 """Differential harness: gate vs path-policy/1 vs oversight
 (Trust Boundary v3, CROSS-CHECK-4 item 4).
 
-Both external seats voted FIX on v2 in part because the gate's
-protected-path logic has NOT adopted path-policy/1, while v2
-wording called the policy canonical/universal. This suite does
-not edit the gate (eval/ is protected; adoption is Dilip's
-Protected Gate Rule decision — see
-internal/PROTECTED-GATE-PROPOSAL.md). It DEMONSTRATES the
-equivalence domain and enumerates the divergences outside it
-within the corpus (the corpus is not exhaustive: the gate-miss
-class in particular is an open family — any separator/dot-
-component perturbation of the exact-file entry core/loop.py
-derives it — and the bound that actually protects production
-is the verifier's canonical-only rule, not corpus
-enumeration):
+ADOPTION HAS HAPPENED: in cycle 13, under Dilip's approval of
+the Protected Gate proposal
+(internal/PROTECTED-GATE-PROPOSAL.md), eval/gate.py adopted
+path-policy/1 — its check_protected_paths judges the canonical
+spelling of each path (via a function-local import of
+trust.pathpolicy.canonicalise), returns offenders as their
+canonical spelling, and raises GateInputError for any spelling
+that cannot be canonicalised. This suite now pins the
+POST-adoption table. It formerly demonstrated the pre-adoption
+divergence (the gate missing non-canonical spellings of the
+exact-file entry core/loop.py); that divergence is closed, and
+the table below is the record of the closed shape, not a claim
+that any miss remains.
 
-* EQUIVALENCE DOMAIN — canonical spellings. For every spelling
-  that IS its own canonical form, the gate's verdict equals the
-  policy's "gate" tag, and oversight's verdict equals the
-  policy's combined (gate or oversight) verdict. Pinned by
-  EquivalenceDomainTests.
+* EQUIVALENCE DOMAIN — canonical spellings, extended by
+  adoption. For every spelling that IS its own canonical form,
+  the gate's verdict equals the policy's "gate" tag, and
+  oversight's verdict equals the policy's combined (gate or
+  oversight) verdict. After adoption the equivalence extends
+  to every CANONICALISABLE spelling: the gate's verdict on the
+  spelling presented equals the policy's "gate" tag on its
+  canonical form. Uncanonicalisable spellings are gate errors
+  (GateInputError), never verdicts. Pinned by
+  EquivalenceDomainTests and DivergenceTableTests.
 
-* DIVERGENCE TABLE — non-canonical spellings. Every other
+* POST-ADOPTION TABLE — non-canonical spellings. Every other
   spelling in the corpus is classified into exactly one
   enumerated class (EXPECTED below), and the test rebuilds the
   table from live verdicts and asserts each row matches its
-  recorded expectation. Any future change in the divergence
-  shape — a gate fix, a policy change, a canonicaliser change —
-  fails this suite loudly instead of silently moving the
-  boundary.
+  recorded expectation. The gate-miss and gate-stricter classes
+  are EMPTY after adoption (pinned empty, not deleted, so a
+  regression refills them loudly), and both-refuse rows are
+  gate errors. Any future change in this shape — a gate
+  regression, a policy change, a canonicaliser change — fails
+  this suite loudly instead of silently moving the boundary.
+  The corpus is still not exhaustive: it pins the spellings it
+  lists, and no claim is made about spellings outside it; the
+  bound that protects production through the verifier is the
+  verifier's canonical-only rule, not corpus enumeration.
 
-* VERIFIER DEFENCE — the claim that matters operationally: no
+* VERIFIER DEFENCE — unchanged by adoption, and still the
+  claim that matters operationally on the signing path: no
   non-canonical spelling of a protected path can reach the gate
   through the verifier. trust/verifier_main._mode_gate
   canonicalises every changed_paths entry via the policy and
@@ -67,19 +79,33 @@ BOM = "\ufeffeval/gate.py"           # byte-order mark before "eval"
 CYRILLIC = "ev\u0430l/gate.py"       # Cyrillic а homoglyph for "a"
 NUL = "eval/gate.py\x00"
 
-# Divergence classes for NON-canonical spellings.
+# Classes for NON-canonical spellings (post-adoption names kept
+# from the pre-adoption divergence table so the closure is
+# visible in the record).
 CANONICAL = "canonical"  # in the equivalence domain, not a divergence
-GATE_MISS = "gate-miss"  # policy gate-protected; gate raw verdict misses
+GATE_MISS = "gate-miss"
+#   policy gate-protected; gate verdict misses. EMPTY after the
+#   cycle-13 adoption — kept as a class, and pinned empty by
+#   DivergenceTableTests, so a regression refills it loudly.
 POLICY_CATCHES_OVERSIGHT = "policy-catches-oversight"
 #   policy oversight-protected; the gate never protects oversight
-#   scope at all (its list is eval/ + core/loop.py only)
+#   scope at all (its list is eval/ + core/loop.py only) — this
+#   divergence is by design and survives adoption (oversight's
+#   list is a superset, per the proposal's remainder section)
 GATE_CATCHES_ANYWAY = "gate-catches-anyway"
-#   non-canonical, but the gate's prefix/strip rules still flag it
+#   non-canonical, but the gate flags it. After adoption the
+#   mechanism is canonicalisation: the gate judges the canonical
+#   spelling (before adoption, its prefix/strip rules happened
+#   to flag some of these spellings, and missed others outright)
 BOTH_REFUSE = "both-refuse"
 #   uncanonicalisable: policy and oversight refuse the spelling
-#   outright ([] from classify means "unclassifiable", never safe)
+#   outright ([] from classify means "unclassifiable", never
+#   safe), and after adoption the gate refuses it too — its
+#   verdict on these rows is "error" (GateInputError)
 GATE_STRICTER = "gate-stricter"
-#   gate flags a spelling whose canonical form is unprotected
+#   gate flags a spelling whose canonical form is unprotected.
+#   EMPTY after adoption (the one former row, "eval/", now
+#   agrees unprotected); kept and pinned empty like GATE_MISS.
 AGREE_UNPROTECTED = "agree-unprotected-noncanonical"
 #   canonicalisable, unprotected under every verdict; only the
 #   spelling is non-canonical
@@ -133,20 +159,35 @@ EXPECTED = [
     (ZWSP, CANONICAL, ZWSP, ["gate"], True),
     (BOM, CANONICAL, BOM, [], False),
     (CYRILLIC, CANONICAL, CYRILLIC, [], False),
-    # --- Gate misses: the exact-file check is brittle. ----------
-    ("core//loop.py", GATE_MISS, "core/loop.py", ["gate"], False),
-    ("core/./loop.py", GATE_MISS, "core/loop.py", ["gate"], False),
-    ("core/loop.py/", GATE_MISS, "core/loop.py", ["gate"], False),
-    ("core/loop.py/.", GATE_MISS, "core/loop.py", ["gate"], False),
-    # Round C probes: further spellings from the same open
-    # family (repeated slashes, backslash separators, dot
-    # components in any position, trailing slash/dot).
-    ("core///loop.py", GATE_MISS, "core/loop.py", ["gate"], False),
-    ("core\\\\loop.py", GATE_MISS, "core/loop.py", ["gate"], False),
-    ("core\\./loop.py", GATE_MISS, "core/loop.py", ["gate"], False),
-    ("core/././loop.py", GATE_MISS, "core/loop.py", ["gate"], False),
-    ("core//.//loop.py", GATE_MISS, "core/loop.py", ["gate"], False),
-    ("core/loop.py//.", GATE_MISS, "core/loop.py", ["gate"], False),
+    # --- Former gate misses, now caught by canonicalisation. ---
+    # Pre-adoption these ten spellings of the exact-file entry
+    # core/loop.py passed the gate's raw check (the GATE_MISS
+    # class); after the cycle-13 adoption the gate judges their
+    # canonical spelling and flags every one, so they sit in
+    # GATE_CATCHES_ANYWAY and the gate-miss class is empty.
+    ("core//loop.py", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    ("core/./loop.py", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    ("core/loop.py/", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    ("core/loop.py/.", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    # Round C probes: further spellings from the same family
+    # (repeated slashes, backslash separators, dot components in
+    # any position, trailing slash/dot).
+    ("core///loop.py", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    ("core\\\\loop.py", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    ("core\\./loop.py", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    ("core/././loop.py", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    ("core//.//loop.py", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
+    ("core/loop.py//.", GATE_CATCHES_ANYWAY, "core/loop.py",
+     ["gate"], True),
     # --- Oversight scope the gate does not carry at all. --------
     ("oversight/", POLICY_CATCHES_OVERSIGHT, "oversight",
      ["oversight"], False),
@@ -182,20 +223,32 @@ EXPECTED = [
     ("eval/gate.py/.", GATE_CATCHES_ANYWAY, "eval/gate.py",
      ["gate"], True),
     # --- Uncanonicalisable: every consumer refuses. -------------
-    ("eval/../eval/gate.py", BOTH_REFUSE, None, [], True),
-    ("a/../../eval/gate.py", BOTH_REFUSE, None, [], False),
-    ("/eval/gate.py", BOTH_REFUSE, None, [], False),
-    ("C:/eval/gate.py", BOTH_REFUSE, None, [], False),
+    # After adoption the gate's verdict on every one of these
+    # rows is "error" (GateInputError): an uncanonicalisable
+    # spelling is malformed input, never a pass and never a
+    # signed verdict.
+    ("eval/../eval/gate.py", BOTH_REFUSE, None, [], "error"),
+    ("a/../../eval/gate.py", BOTH_REFUSE, None, [], "error"),
+    ("/eval/gate.py", BOTH_REFUSE, None, [], "error"),
+    ("C:/eval/gate.py", BOTH_REFUSE, None, [], "error"),
     ("oversight/../oversight/approval.py", BOTH_REFUSE,
-     None, [], False),
-    ("trust/../eval/gate.py", BOTH_REFUSE, None, [], False),
-    (NUL, BOTH_REFUSE, None, [], True),
-    ("eval/gate.py/..", BOTH_REFUSE, None, [], True),
+     None, [], "error"),
+    ("trust/../eval/gate.py", BOTH_REFUSE, None, [], "error"),
+    (NUL, BOTH_REFUSE, None, [], "error"),
+    ("eval/gate.py/..", BOTH_REFUSE, None, [], "error"),
     ("", BOTH_REFUSE, None, [], "error"),
-    (".", BOTH_REFUSE, None, [], False),
-    ("..", BOTH_REFUSE, None, [], False),
-    # --- Gate stricter than the policy (a false positive). ------
-    ("eval/", GATE_STRICTER, "eval", [], True),
+    (".", BOTH_REFUSE, None, [], "error"),
+    ("..", BOTH_REFUSE, None, [], "error"),
+    # --- Former gate-stricter row, now in agreement. ------------
+    # Pre-adoption the gate flagged "eval/" (its normalised
+    # spelling starts with "eval/") while its canonical form
+    # "eval" is unprotected — the GATE_STRICTER false positive.
+    # After adoption the gate judges "eval" and agrees it is
+    # unprotected, so the gate-stricter class is empty and this
+    # row sits with the other agree-unprotected spellings (it is
+    # listed here, at its former position, so the closure is
+    # visible; it is counted under AGREE_UNPROTECTED below).
+    ("eval/", AGREE_UNPROTECTED, "eval", [], False),
     # --- Non-canonical spellings of unprotected paths. ----------
     ("....//eval/gate.py", AGREE_UNPROTECTED,
      "..../eval/gate.py", [], False),
@@ -284,8 +337,9 @@ NONCANONICAL_PROTECTED = [
 
 class EquivalenceDomainTests(unittest.TestCase):
     """(i) On canonical spellings the three verdicts agree with
-    the policy exactly — this is the demonstrated equivalence
-    domain of path-policy/1 today."""
+    the policy exactly — the equivalence domain of path-policy/1,
+    which adoption (cycle 13) extends to every canonicalisable
+    spelling (see DivergenceTableTests)."""
 
     def test_corpus_has_canonical_rows(self):
         canonical_rows = [r for r in EXPECTED if r[1] == CANONICAL]
@@ -327,8 +381,9 @@ class EquivalenceDomainTests(unittest.TestCase):
 
 class DivergenceTableTests(unittest.TestCase):
     """(ii) Every non-canonical spelling sits in exactly the
-    recorded divergence class; the table is rebuilt from live
-    verdicts, so any change in divergence shape fails loudly."""
+    recorded post-adoption class; the table is rebuilt from live
+    verdicts, so any change in shape — in particular a refilled
+    gate-miss or gate-stricter class — fails loudly."""
 
     def test_every_row_matches_recorded_expectation(self):
         for spelling, klass, canonical, protected_by, gv in EXPECTED:
@@ -353,25 +408,31 @@ class DivergenceTableTests(unittest.TestCase):
                         bool(protected_by))
 
     def test_gate_miss_list_within_corpus_is_exactly_these(self):
-        # Bounded to the corpus: gate-miss is an open family
-        # (any separator/dot-component perturbation of the
-        # exact-file entry core/loop.py), NOT exhausted by the
-        # spellings below; the bound that protects production
-        # is the verifier's canonical-only rule.
+        # ADOPTION PIN, inverted from its pre-adoption form: the
+        # test keeps its name and place, but where it formerly
+        # asserted the gate-miss list was exactly the ten
+        # spellings below, it now asserts the list is EMPTY —
+        # the cycle-13 adoption closed the class within the
+        # corpus. The ten former misses are pinned individually
+        # underneath: each is now flagged by the gate, as its
+        # canonical spelling, exactly as the policy's gate tag
+        # says. (Bounded to the corpus, as before: the corpus is
+        # not exhaustive, and the bound that protects production
+        # through the verifier is its canonical-only rule.)
         misses = [s for s, k, _c, _p, _g in EXPECTED if k == GATE_MISS]
-        self.assertEqual(
-            sorted(misses),
-            sorted(["core//loop.py", "core/./loop.py",
-                    "core/loop.py/", "core/loop.py/.",
-                    "core///loop.py", "core\\\\loop.py",
-                    "core\\./loop.py", "core/././loop.py",
-                    "core//.//loop.py", "core/loop.py//."]))
-        for spelling in misses:
+        self.assertEqual(misses, [])
+        former_misses = ["core//loop.py", "core/./loop.py",
+                         "core/loop.py/", "core/loop.py/.",
+                         "core///loop.py", "core\\\\loop.py",
+                         "core\\./loop.py", "core/././loop.py",
+                         "core//.//loop.py", "core/loop.py//."]
+        for spelling in former_misses:
             with self.subTest(spelling=spelling):
-                # The miss is real: raw gate verdict is a pass,
-                # the policy (on the canonical spelling) flags it.
+                # No miss remains: the gate flags the spelling,
+                # reported as the canonical spelling, and the
+                # policy (on the canonical spelling) agrees.
                 self.assertEqual(gate.check_protected_paths(
-                    [spelling]), ())
+                    [spelling]), ("core/loop.py",))
                 self.assertEqual(
                     pathpolicy.classify(spelling)["protected_by"],
                     ["gate"])
@@ -380,24 +441,34 @@ class DivergenceTableTests(unittest.TestCase):
         counts = {}
         for _s, klass, _c, _p, _g in EXPECTED:
             counts[klass] = counts.get(klass, 0) + 1
+        # Post-adoption counts: gate-miss 10 -> 0 and
+        # gate-stricter 1 -> 0 (both classes pinned empty by
+        # their absence here and by the inverted pin above);
+        # the ten former misses join gate-catches-anyway
+        # (10 -> 20) and the one former gate-stricter row joins
+        # agree-unprotected (8 -> 9). Oversight scope (6) and
+        # both-refuse (11) are unchanged in count — adoption did
+        # not merge the oversight superset, and both-refuse rows
+        # changed verdict (to gate "error"), not class.
         self.assertEqual(counts, {
             CANONICAL: 20,
-            GATE_MISS: 10,
             POLICY_CATCHES_OVERSIGHT: 6,
-            GATE_CATCHES_ANYWAY: 10,
+            GATE_CATCHES_ANYWAY: 20,
             BOTH_REFUSE: 11,
-            GATE_STRICTER: 1,
-            AGREE_UNPROTECTED: 8,
+            AGREE_UNPROTECTED: 9,
         })
+        self.assertEqual(counts.get(GATE_MISS, 0), 0)
+        self.assertEqual(counts.get(GATE_STRICTER, 0), 0)
         self.assertEqual(len(EXPECTED), 66)
 
 
 class VerifierDefenceTests(unittest.TestCase):
     """(iii, in-process) The verifier's gate path refuses every
-    non-canonical spelling of a protected path as malformed, so
-    the gate-miss class above is unreachable through the
-    verifier — the only production path that signs gate
-    decisions."""
+    non-canonical spelling of a protected path as malformed —
+    unchanged by the gate's adoption, and still the defence on
+    the only production path that signs gate decisions: through
+    the verifier, a non-canonical spelling never reaches the
+    gate at all, in any spelling."""
 
     def test_verifier_refuses_every_noncanonical_protected(self):
         self.assertEqual(len(NONCANONICAL_PROTECTED), 34)

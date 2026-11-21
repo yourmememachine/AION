@@ -1,6 +1,11 @@
 """Safety gate for proposed self-changes.
 
-Standard library only, pure functions, no I/O. A change is accepted only
+Mostly standard library only, pure functions, no I/O — with one
+stated exception: the protected-path check (check_protected_paths)
+lazily imports the shared path policy (trust.pathpolicy,
+path-policy/1) inside the function, so the gate judges the
+canonical spelling of each path. The rest of the gate stays
+stdlib-only, pure and I/O-free. A change is accepted only
 if every check passes at once:
 
 - no benchmark regresses, in the public suite or the sealed suite
@@ -51,23 +56,40 @@ PROTECTED_PREFIXES = ("eval/",)
 PROTECTED_FILES = ("core/loop.py",)
 
 
-def _normalise_path(value) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise GateInputError("changed path must be non-empty text")
-    path = value.strip().replace("\\", "/")
-    while path.startswith("./"):
-        path = path[2:]
-    return path
-
-
 def check_protected_paths(changed_paths) -> tuple:
-    """The subset of changed paths that fall inside protected scope."""
+    """The subset of changed paths that fall inside protected scope.
+
+    Judged on the CANONICAL spelling of each path under
+    path-policy/1 (trust.pathpolicy.canonicalise), lazily imported
+    here to avoid an import cycle; offenders are returned as their
+    canonical spelling. A non-string or empty/blank entry, and any
+    spelling that cannot be canonicalised, raises GateInputError —
+    a refusal, never a silent pass.
+    """
     if isinstance(changed_paths, (str, bytes)) or not isinstance(
             changed_paths, (list, tuple)):
         raise GateInputError("changed_paths must be a list of paths")
+    # Function-local import (Protected Gate proposal, Round-C
+    # correction): a module-level import of trust.pathpolicy cycles
+    # (trust/__init__ -> shipcheck -> signing.gate_decision ->
+    # eval.gate, and gate -> trust.pathpolicy -> oversight -> gate).
+    from trust.pathpolicy import canonicalise as _policy_canonicalise
     offenders = []
     for raw in changed_paths:
-        path = _normalise_path(raw)
+        # path-policy/1 adoption (Protected Gate Rule proposal,
+        # internal/PROTECTED-GATE-PROPOSAL.md): judge the
+        # canonical spelling, and refuse spellings that have
+        # none — an uncanonicalisable path is malformed input,
+        # never an unprotected one.
+        if not isinstance(raw, str) or not raw.strip():
+            raise GateInputError(
+                "changed path must be non-empty text")
+        try:
+            path = _policy_canonicalise(raw)
+        except ValueError as exc:
+            raise GateInputError(
+                f"changed path is not canonicalisable: {raw!r}"
+            ) from exc
         if path in PROTECTED_FILES or any(
                 path.startswith(prefix) for prefix in PROTECTED_PREFIXES):
             offenders.append(path)

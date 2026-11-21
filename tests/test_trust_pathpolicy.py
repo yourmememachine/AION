@@ -8,15 +8,17 @@ behaviour over a corpus of path spellings. If either source
 module's list changes without trust/pathpolicy.py following,
 this suite fails loudly. That failure is the point.
 
-The corpus also pins the KNOWN divergence the policy documents:
-the gate fed a RAW non-canonical spelling can miss a protected
-file (its _normalise_path is weaker than canonicalisation),
-while the policy — judging the canonical spelling — catches it.
-eval/gate.py is a protected path and does not consume the policy
-(adoption needs the Protected Gate Rule workflow), so the corpus
-asserts agreement with the gate's verdict on the CANONICAL
-spelling, and separately records where the raw-spelling verdict
-diverges.
+The corpus formerly also pinned a known divergence: the gate
+fed a RAW non-canonical spelling could miss a protected file,
+while the policy — judging the canonical spelling — caught it.
+That divergence is CLOSED: in cycle 13, under Dilip's approval
+of the Protected Gate proposal, eval/gate.py adopted the policy
+(its check_protected_paths now judges the canonical spelling
+and raises GateInputError for spellings that cannot be
+canonicalised). The corpus asserts agreement with the gate's
+verdict on the CANONICAL spelling, and AdoptionTests below
+record the adopted behaviour on raw spellings — the divergence
+is recorded as closed here, not silently edited away.
 """
 
 import sys
@@ -175,30 +177,53 @@ class CorpusAgreementTests(unittest.TestCase):
                         manifest_canonicalise(raw)
 
 
-class KnownDivergenceTests(unittest.TestCase):
-    """Pin the documented remainder: the gate fed a RAW
-    non-canonical spelling misses protected files its own list
-    names, because eval/gate.py's _normalise_path does not
-    collapse "//" or "/./" and matches files exactly. The policy
-    catches them on the canonical spelling. If a future
-    (Protected-Gate-approved) gate change closes this, these
-    assertions fail and the policy docstring must be updated —
-    which is the drift detector doing its job in the other
-    direction."""
+class AdoptionTests(unittest.TestCase):
+    """Pin the ADOPTED behaviour (cycle 13, Dilip's approval of
+    the Protected Gate proposal): the gate now judges the
+    canonical spelling via path-policy/1, so its verdict on a
+    RAW non-canonical spelling agrees with the policy's "gate"
+    tag. These tests replace the former KnownDivergenceTests,
+    which pinned the now-closed divergence (the gate missing
+    "core//loop.py" / "core/./loop.py" on the raw spelling);
+    the divergence is closed, and this class is the record of
+    that closure. If the gate ever regresses to judging raw
+    spellings, these assertions fail — the drift detector doing
+    its job in the other direction."""
 
-    def test_gate_raw_spelling_misses_that_policy_catches(self):
+    def test_gate_raw_spelling_now_catches_what_policy_catches(self):
         for raw in ("core//loop.py", "core/./loop.py"):
             with self.subTest(raw=raw):
-                self.assertEqual(gate.check_protected_paths([raw]), ())
+                self.assertEqual(
+                    gate.check_protected_paths([raw]),
+                    ("core/loop.py",))
                 self.assertEqual(
                     pathpolicy.classify(raw)["protected_by"], ["gate"])
+                # Agreement, stated directly: the gate's verdict
+                # on the raw spelling equals the policy's gate
+                # tag on that same spelling.
+                self.assertEqual(
+                    bool(gate.check_protected_paths([raw])),
+                    "gate" in pathpolicy.classify(raw)["protected_by"])
 
     def test_gate_raw_spelling_still_catches_prefix_cases(self):
-        # The prefix check survives most spelling tricks; only the
-        # exact-file check is brittle. Pin that asymmetry too.
+        # The prefix cases were caught before adoption and are
+        # still caught after it — now by canonicalisation rather
+        # than by the gate's former prefix/strip rules. Offenders
+        # are reported as their canonical spelling.
         for raw in ("./eval/gate.py", "eval//gate.py", "eval\\gate.py"):
             with self.subTest(raw=raw):
-                self.assertTrue(gate.check_protected_paths([raw]))
+                self.assertEqual(
+                    gate.check_protected_paths([raw]),
+                    ("eval/gate.py",))
+
+    def test_gate_uncanonicalisable_spelling_is_an_error(self):
+        # Adoption's other half: a spelling with no canonical
+        # form is a GateInputError (a refusal), never a pass.
+        # (Kept separate from the agreement pins above because
+        # the policy classifies such spellings as unclassifiable,
+        # not as unprotected.)
+        with self.assertRaises(gate.GateInputError):
+            gate.check_protected_paths(["a/../../eval/gate.py"])
 
 
 if __name__ == "__main__":

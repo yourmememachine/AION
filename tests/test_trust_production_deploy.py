@@ -68,6 +68,7 @@ from signing import generate_key_file, load_signing_key
 from trust import protocol
 from trust.anchoring import initialise_anchor, load_anchor, verify_anchor
 from trust.attestation import verify_eval_attestation
+from trust.budgets import BudgetStore, GENESIS_CHAIN_HASH
 from trust.ledger import SigningLedger
 
 REPO = Path(__file__).resolve().parents[1]
@@ -903,6 +904,111 @@ class ProductionModeSpecTests(unittest.TestCase):
                 self.assertEqual(doc["error"]["code"],
                                  "deployment_mode_refused")
                 self.assertEqual(self.sign_count(), 0)
+
+    def bootstrap_budgets_anchor(self):
+        """A valid budgets anchor pinning the budget store's
+        GENESIS head (the store has recorded no queries yet), in
+        the verifier's budgets-anchor format — exactly the three
+        keys {"v", "head", "anchored_at"} that
+        trust/verifier_main.py's _write_budgets_anchor writes and
+        its (strict) _read_budgets_anchor reads."""
+        anchors = Path(self.tmp.name) / "anchors"
+        anchors.mkdir(exist_ok=True)
+        budgets_anchor = anchors / "budgets.anchor.json"
+        genesis_head = BudgetStore(
+            self.home / "ledger" / "budgets.json").head_hash()
+        self.assertEqual(genesis_head, GENESIS_CHAIN_HASH)
+        budgets_anchor.write_text(
+            json.dumps({"v": "budgets-anchor/1",
+                        "head": genesis_head,
+                        "anchored_at": "2026-11-20T12:00:00+00:00"},
+                       sort_keys=True),
+            encoding="utf-8")
+        return budgets_anchor
+
+    def test_f_production_mode_successful_run_reports_production(self):
+        # The full production gate satisfied: a valid bootstrapped
+        # signing anchor AND a budgets anchor at the genesis head.
+        # The verifier runs, signs the sealed eval, and its
+        # response reports deployment_mode == "production" — the
+        # mode is proven from inside the process, not assumed.
+        anchor = self.bootstrap_signing_anchor()
+        budgets_anchor = self.bootstrap_budgets_anchor()
+        result, request_id = self.run_verifier({
+            "AION_DEPLOYMENT_MODE": "production",
+            "AION_ANCHOR_PATH": str(anchor),
+            "AION_BUDGETS_ANCHOR_PATH": str(budgets_anchor),
+        })
+        self.assertEqual(
+            result.returncode, 0,
+            msg=result.stdout.decode("utf-8", errors="replace")
+            + result.stderr.decode("utf-8", errors="replace"))
+        doc = protocol.decode_response(
+            result.stdout, expected_request_id=request_id,
+            expected_mode="sealed_eval")
+        self.assertEqual(doc["status"], "ok", msg=str(doc.get("error")))
+        self.assertEqual(doc.get("deployment_mode"), "production")
+        self.assertEqual(
+            doc["result"]["attestation"]["payload"]["score"], 1.0)
+        self.assertEqual(self.sign_count(), 1)
+
+    @unittest.skipUnless(
+        os.geteuid() == 0 and _aion_verifier() is not None,
+        "wrapper-refusal tests need root + the aion-verifier user "
+        "(the real wrapper refuses non-root / missing-user first)")
+    def test_g_wrapper_refuses_absent_mode_and_duplicate_key(self):
+        # These go through the REAL run-verifier.sh with an
+        # AION_VERIFIER_ENV_FILE override — no live deployment
+        # involved. (i) Mode line absent: exit 1, stderr names
+        # AION_DEPLOYMENT_MODE. (ii) A duplicated key line: exit 1,
+        # stderr names the duplicate.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        base.chmod(0o755)
+        common = (
+            "AION_VERIFIER_KEY_PATH=/var/lib/aion-verifier/keys/"
+            "gate.key\n"
+            "AION_VERIFIER_SIGNER_ID=verifier-main\n"
+            "AION_VERIFIER_ACTOR_ID=verifier-actor\n"
+            "AION_REGISTRY_DIR=/var/lib/aion-verifier/registry\n"
+            "AION_VERIFIER_HOME=/var/lib/aion-verifier/home\n")
+        wrapper_env = {
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:"
+                    "/usr/bin:/sbin:/bin",
+        }
+        # (i) No AION_DEPLOYMENT_MODE line at all.
+        env_file = base / "verifier.env"
+        env_file.write_text(common, encoding="utf-8")
+        os.chown(env_file, 0, 0)
+        env_file.chmod(0o600)
+        result = subprocess.run(
+            [str(WRAPPER)], input=b"{}", capture_output=True,
+            timeout=60,
+            env={**wrapper_env,
+                 "AION_VERIFIER_ENV_FILE": str(env_file)})
+        self.assertEqual(
+            result.returncode, 1,
+            msg=result.stderr.decode("utf-8", errors="replace"))
+        self.assertIn(b"AION_DEPLOYMENT_MODE", result.stderr)
+        # (ii) A duplicated allowlisted key line.
+        env_file.write_text(
+            common
+            + "AION_VERIFIER_SIGNER_ID=verifier-main\n"
+            + "AION_DEPLOYMENT_MODE=production\n",
+            encoding="utf-8")
+        os.chown(env_file, 0, 0)
+        env_file.chmod(0o600)
+        result = subprocess.run(
+            [str(WRAPPER)], input=b"{}", capture_output=True,
+            timeout=60,
+            env={**wrapper_env,
+                 "AION_VERIFIER_ENV_FILE": str(env_file)})
+        self.assertEqual(
+            result.returncode, 1,
+            msg=result.stderr.decode("utf-8", errors="replace"))
+        self.assertIn(b"duplicate", result.stderr.lower())
+        self.assertIn(b"AION_VERIFIER_SIGNER_ID", result.stderr)
 
     def test_c2_explicit_research_mode_without_anchor_still_runs(self):
         # Explicit AION_DEPLOYMENT_MODE=research is the ONLY

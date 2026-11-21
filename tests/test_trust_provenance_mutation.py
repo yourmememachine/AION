@@ -13,13 +13,16 @@ and consume nothing: consumption happens only after pair
 verification, so a refused issuance leaves the pair unspent.
 
 Relationship to tests/test_trust_provenance.py (checked before
-writing; no case here duplicates one there):
-* (a) is the mandated "registry mutated after evaluation" case.
-  The provenance file's registry-growth test asserts only the
-  exception type; here the specific code
-  (eval_evidence_unverifiable) and the zero-consumption
-  invariant are pinned as well.
-* (b) is deliberately NOT the provenance file's in-place
+writing):
+* (a) is a STRENGTHENED DUPLICATE of the provenance file's
+  registry-growth case (test_records_from_registry_v1_refused_
+  after_registry_grows): same scenario — a legitimate registry
+  growth after evaluation; this version additionally pins the
+  refusal code (eval_evidence_unverifiable) and zero
+  consumption, where the provenance file's version asserts
+  only the exception type (and no new signatures).
+* (b)–(f) are distinct from the provenance file's cases.
+  (b) is deliberately NOT the provenance file's in-place
   registry.json tamper nor its foreign-registry candidate
   (different item ids, single foreign record): here BOTH
   records are minted against registry copy A and issuance is
@@ -35,7 +38,11 @@ writing; no case here duplicates one there):
 
 Fixture discipline mirrors tests/test_trust_provenance.py, with
 the deployment mode pinned explicitly from the start:
-AION_DEPLOYMENT_MODE=research.
+AION_DEPLOYMENT_MODE=research, and no anchors configured —
+the demo runs in research mode against an unanchored
+deployment; the provenance bindings it exercises are
+mode-independent (the same checks run in production mode
+before any production-only gate).
 """
 
 import sys
@@ -141,14 +148,22 @@ class MutationFixture(unittest.TestCase):
                 if e["kind"] == "consume"]
 
     def assert_refused_clean(self, baseline, candidate, code, *,
-                             client=None, ledger_dir=None):
+                             client=None, ledger_dir=None,
+                             detail=None):
         """Issuance of the pair via client must refuse with the
         specific code, add no signature of any kind to the
-        relevant ledger, and consume nothing."""
+        relevant ledger, and consume nothing. When `detail` is
+        given, the refusal's DETAIL substring is pinned as well:
+        the code eval_evidence_unverifiable is overloaded across
+        cases (a)–(d), so the code alone does not prove that
+        THIS case's mutated dependency caused the refusal — the
+        discriminating detail substring does."""
         signs_before = self.sign_entries(ledger_dir)
         with self.assertRaises(VerifierConfigError) as ctx:
             self.issue(baseline, candidate, client=client)
         self.assertIn(code, str(ctx.exception))
+        if detail is not None:
+            self.assertIn(detail, str(ctx.exception))
         self.assertEqual(self.sign_entries(ledger_dir), signs_before)
         self.assertEqual(self.consumption_entries(ledger_dir), [])
         return str(ctx.exception)
@@ -178,8 +193,9 @@ class DependencyMutationTests(MutationFixture):
                                  "test-actor")
         self.assertNotEqual(registry.sealed_manifest_hash(ACTOR),
                             self.manifest_hash)
-        self.assert_refused_clean(baseline, candidate,
-                                  "eval_evidence_unverifiable")
+        self.assert_refused_clean(
+            baseline, candidate, "eval_evidence_unverifiable",
+            detail="bound to a different sealed manifest")
 
     def test_b_issuance_against_swapped_registry_copy_refused(self):
         baseline, candidate = self.eval_records()
@@ -204,9 +220,10 @@ class DependencyMutationTests(MutationFixture):
         # ledgered — the manifest binding alone refuses.
         client = self.attester(
             env_over={"AION_REGISTRY_DIR": str(other_dir)})
-        self.assert_refused_clean(baseline, candidate,
-                                  "eval_evidence_unverifiable",
-                                  client=client)
+        self.assert_refused_clean(
+            baseline, candidate, "eval_evidence_unverifiable",
+            client=client,
+            detail="bound to a different sealed manifest")
 
     def test_c_different_key_file_refused(self):
         baseline, candidate = self.eval_records()
@@ -222,9 +239,11 @@ class DependencyMutationTests(MutationFixture):
         client = self.attester(
             env_over={"AION_VERIFIER_KEY_PATH": str(home2 / "gate.key")},
             key_id=key2.key_id)
-        self.assert_refused_clean(baseline, candidate,
-                                  "eval_evidence_unverifiable",
-                                  client=client)
+        self.assert_refused_clean(
+            baseline, candidate, "eval_evidence_unverifiable",
+            client=client,
+            detail="failed verification: "
+                   "unknown_key,signature_mismatch")
 
     def test_d_different_signer_id_refused(self):
         baseline, candidate = self.eval_records()
@@ -232,9 +251,10 @@ class DependencyMutationTests(MutationFixture):
         # a different signer id than the records' signer (seat-3).
         # Same key, same registry, same ledger home.
         client = self.attester(signer=OTHER_SIGNER)
-        self.assert_refused_clean(baseline, candidate,
-                                  "eval_evidence_unverifiable",
-                                  client=client)
+        self.assert_refused_clean(
+            baseline, candidate, "eval_evidence_unverifiable",
+            client=client,
+            detail="failed verification: signer_mismatch")
 
     def test_e_empty_ledger_home_refused_not_ledgered(self):
         baseline, candidate = self.eval_records()

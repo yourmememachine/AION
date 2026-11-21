@@ -11,7 +11,14 @@ consistent (payload re-derivation, payload hash, decision id),
 the signer identity matches the orchestrator's pins, the expiry
 window is not already past, and (for sealed_eval) the attestation
 is bound to the very transcript the client sent, via the unkeyed
-answers hash. What it cannot do is verify any MAC: client-side
+answers hash. The client also supports an optional deployment-
+mode pin (expected_deployment_mode): when set, an ok response
+must carry a deployment_mode field equal to the pin, and the
+observed mode is recorded on the client either way. That field
+is verifier-reported: a compromised verifier can lie about its
+mode; the pin detects stale/downgraded verifiers and config
+drift, it is not cryptographic evidence. What it cannot do is
+verify any MAC: client-side
 acceptance means "well-formed, consistently bound, from the
 pinned signer identity, issued by the process the orchestrator
 launched". Cryptographic verification happens at key-holding
@@ -96,12 +103,21 @@ class VerifierClient:
                  timeout_seconds=30.0,
                  max_response_bytes=protocol.MAX_RESPONSE_BYTES,
                  expected_signer_id=None, expected_key_id=None,
+                 expected_deployment_mode=None,
                  verifier_env=None, pythonpath_extra=()):
+        if expected_deployment_mode is not None \
+                and expected_deployment_mode not in ("production",
+                                                     "research"):
+            raise VerifierConfigError(
+                "expected_deployment_mode must be None, "
+                "'production' or 'research'")
         self._module = module
         self._timeout = float(timeout_seconds)
         self._max_response = int(max_response_bytes)
         self._expected_signer_id = expected_signer_id
         self._expected_key_id = expected_key_id
+        self._expected_deployment_mode = expected_deployment_mode
+        self.observed_deployment_mode = None
         self._verifier_env = dict(verifier_env or {})
         self._pythonpath_extra = tuple(pythonpath_extra)
 
@@ -142,6 +158,16 @@ class VerifierClient:
             except protocol.ProtocolError as exc:
                 raise VerifierProtocolError(
                     f"unusable verifier response: {exc}") from exc
+            self.observed_deployment_mode = doc.get("deployment_mode")
+            if self._expected_deployment_mode is not None \
+                    and doc["status"] == "ok" \
+                    and self.observed_deployment_mode \
+                    != self._expected_deployment_mode:
+                raise VerifierProtocolError(
+                    "verifier response deployment_mode "
+                    f"{self.observed_deployment_mode!r} does not "
+                    "match the pinned mode "
+                    f"{self._expected_deployment_mode!r}")
             if doc["status"] != "ok":
                 raise VerifierProtocolError(
                     "verifier returned an error document at exit 0")

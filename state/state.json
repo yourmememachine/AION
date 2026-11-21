@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "cycle_seq": 10,
+  "cycle_seq": 13,
   "phase": "SCAN",
   "backlog": [
     {
@@ -30,7 +30,7 @@
       "title": "Signed state and per-seat vote records",
       "title_hash": "badd73d53a50cf51ac6d10d2a51408cd1e0a7f5df953b84ae830cd3443e0113e",
       "leverage": 7.0,
-      "status": "pending",
+      "status": "done",
       "source_type": "internal",
       "approved": true,
       "approved_by": "intake",
@@ -217,7 +217,7 @@
       "title": "Wire production flows through the sanctioned signed paths (verifier gate/attest, commit_signed, record_ship) and migrate memory/reuse.py off the legacy unsigned exception",
       "title_hash": "c85110c65325c99faa92aa6311d4c24a329e7309ad1f3c93c1212cfb3f654948",
       "leverage": 7.0,
-      "status": "pending",
+      "status": "done",
       "source_type": "internal",
       "approved": true,
       "approved_by": "intake",
@@ -365,6 +365,50 @@
       "approved": true,
       "approved_by": "intake",
       "seq": 32
+    },
+    {
+      "id": "trust-boundary-v31-fixes",
+      "title": "Trust Boundary v3.1: fail-closed deployment mode, deterministic refusal precedence, strict-parser inventory, deployment health check, provenance mutation demo (closes CROSS-CHECK-5 items 1-7; subsumes consumption-race-error-code in substance)",
+      "title_hash": "230886e38cd87dc2b2871b6885fa50bce0ccf102ce75f64795ba39ac20192b35",
+      "leverage": 8.5,
+      "status": "done",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "coordinator",
+      "seq": 33
+    },
+    {
+      "id": "snapshot-chain-gap-enforcement",
+      "title": "Enforce snapshot chain continuity beyond a pin's immediate successor in the strict wrapper (refuse or flag cycle_seq more than one past the pin); rev-r2 dissent + both external seats, cycle 12",
+      "title_hash": "679a0f51d688071619789da414639601275329e9766a54b6c9bc9ccb30df2a3d",
+      "leverage": 6.5,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 34
+    },
+    {
+      "id": "snapshot-pin-ceremony",
+      "title": "Pin persistence and recovery ceremony for state snapshots: who may advance or replace a pin, monotonicity, recovery from a lost or corrupted pin (external seats, cycle 12)",
+      "title_hash": "973408445430a276265b6432bda085669dbd3af5f77ee12340fd9ee52b574361",
+      "leverage": 4.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 35
+    },
+    {
+      "id": "reuse-legacy-migration",
+      "title": "Migrate memory/reuse.py off the legacy unsigned exception onto the sanctioned signed paths in trust/wiring.py (removes the counted QUARANTINED lint exception)",
+      "title_hash": "529f47fe8b47a120253e92d1cf003efc385c793fe00df0ac1342ace6f744e4ef",
+      "leverage": 6.0,
+      "status": "pending",
+      "source_type": "internal",
+      "approved": true,
+      "approved_by": "intake",
+      "seq": 36
     }
   ],
   "history": [
@@ -743,6 +787,126 @@
       "verdict": "reconciled",
       "verify_passed": true,
       "completed_at": "2026-11-20T12:04:11.853628+00:00"
+    },
+    {
+      "cycle_id": 11,
+      "item_id": "trust-boundary-v31-fixes",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T13:21:41.329480+00:00"
+    },
+    {
+      "cycle_id": 12,
+      "item_id": "signed-state",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T13:59:06.274141+00:00"
+    },
+    {
+      "cycle_id": 13,
+      "item_id": "production-signed-path-wiring",
+      "phases": [
+        "SCAN",
+        "BUILD",
+        "REVIEW",
+        "FIX_VERIFY",
+        "SELF_IMPROVE",
+        "SHIP"
+      ],
+      "coders": [
+        "seat-1",
+        "seat-2",
+        "seat-3",
+        "seat-4",
+        "seat-5",
+        "seat-6",
+        "seat-7",
+        "seat-8",
+        "seat-9",
+        "seat-10",
+        "seat-11",
+        "seat-12",
+        "seat-13",
+        "seat-14",
+        "seat-15"
+      ],
+      "reviewers": [
+        "rev-r1",
+        "rev-r2",
+        "rev-r3",
+        "rev-r4",
+        "rev-r5",
+        "rev-r6"
+      ],
+      "verdict": "reconciled",
+      "verify_passed": true,
+      "completed_at": "2026-11-20T22:26:44.933458+00:00"
     }
   ],
   "deltas": [
@@ -845,6 +1009,36 @@
       "verifier": "rev-r1",
       "recorded_at": "2026-11-20T12:04:11.851777+00:00",
       "cycle_id": 10
+    },
+    {
+      "metric": "tests_passing",
+      "before": 964.0,
+      "after": 1075.0,
+      "change": 111.0,
+      "evidence_ref": "internal/REVIEW-CYCLE-11.md + internal/BUILD-CYCLE-11.md; full suite 1075 OK (skipped=2 live budget-consumed skips; test_10/test_11 run+passed after operator budget reset); item-2 acceptance 20/20; live health check 10/10; PROVISIONAL pending seat-gpt/seat-gemini round 4 (internal/CROSS-CHECK-BRIEF-CYCLE-V3_1.md)",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T13:21:41.328457+00:00",
+      "cycle_id": 11
+    },
+    {
+      "metric": "tests_passing",
+      "before": 1075.0,
+      "after": 1081.0,
+      "change": 6.0,
+      "evidence_ref": "internal/REVIEW-CYCLE-12.md + internal/BUILD-CYCLE-12.md; full suite 1081 OK (skipped=2) in coordinator run; signed-state module 44 tests; PROVISIONAL pending external re-review of cycle-12 delta (internal/CROSS-CHECK-SIGNED-STATE-R2.md records round-2 FIX reconciliation)",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T13:59:06.273654+00:00",
+      "cycle_id": 12
+    },
+    {
+      "metric": "tests_passing",
+      "before": 1081.0,
+      "after": 1145.0,
+      "change": 64.0,
+      "evidence_ref": "internal/REVIEW-CYCLE-13.md + internal/BUILD-CYCLE-13.md; full suite 1145 OK (skipped=2) in coordinator run; live health check 10/10",
+      "verifier": "rev-r1",
+      "recorded_at": "2026-11-20T22:26:44.932641+00:00",
+      "cycle_id": 13
     }
   ],
   "history_pruned": 0,

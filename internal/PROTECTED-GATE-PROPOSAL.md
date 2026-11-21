@@ -1,3 +1,5 @@
+STATUS: APPROVED by Dilip, 2026-11-20. Implemented in the combined cycle-13 run in the Round-C form (function-local import in eval.gate.check_protected_paths; the option-(a) delegation flip was NOT taken), plus P-1/P-2 duplicate-key rejection and the gate negative-integration test. One war-room finding is NOT closed by this implementation and is escalated to Dilip: the gate now trusts trust/pathpolicy.py and oversight/approval.py, which are outside the gate's own protected list (eval/ + core/loop.py); closing it needs a further owner-approved protected change (backlog: protected-list-reconciliation). See internal/REVIEW-CYCLE-13.md. Item A's ship is withheld pending that decision.
+
 # Protected Gate Rule proposal — gate adoption of path-policy/1
 
 Item: CROSS-CHECK-4 item 4 (Trust Boundary v3). Both external

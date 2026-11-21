@@ -98,6 +98,16 @@ def _parse_float(text: str) -> float:
     return value
 
 
+def _no_duplicate_keys(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise CorruptRegistryError(
+                f"duplicate key in registry: {key}")
+        out[key] = value
+    return out
+
+
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -299,8 +309,11 @@ class EvalRegistry:
             return self._disk_digest != _state_digest(self._fresh())
         try:
             raw = self.registry_path.read_bytes()
-            on_disk = json.loads(raw.decode("utf-8"))
-        except (OSError, ValueError):
+            on_disk = json.loads(raw.decode("utf-8"),
+                                 parse_constant=_reject_constant,
+                                 parse_float=_parse_float,
+                                 object_pairs_hook=_no_duplicate_keys)
+        except (OSError, ValueError, CorruptRegistryError):
             return True
         return (not isinstance(on_disk, dict)
                 or on_disk.get("state_digest") != self._disk_digest)
@@ -330,7 +343,8 @@ class EvalRegistry:
         try:
             data = json.loads(raw.decode("utf-8"),
                               parse_constant=_reject_constant,
-                              parse_float=_parse_float)
+                              parse_float=_parse_float,
+                              object_pairs_hook=_no_duplicate_keys)
         except CorruptRegistryError:
             raise
         except Exception as exc:

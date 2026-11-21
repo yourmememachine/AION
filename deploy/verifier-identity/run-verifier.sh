@@ -87,6 +87,10 @@ while IFS= read -r line || [[ -n "${line}" ]]; do
         echo "run-verifier.sh: ${key} is not an allowlisted verifier variable" >&2
         exit 1
     fi
+    if [[ -v CONFIG[${key}] ]]; then
+        echo "run-verifier.sh: duplicate key ${key} in ${ENV_FILE}: each allowlisted variable may appear at most once" >&2
+        exit 1
+    fi
     CONFIG["${key}"]="${value}"
 done < "${ENV_FILE}"
 

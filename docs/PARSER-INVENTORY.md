@@ -5,8 +5,11 @@ Date: 2026-11-20. Scope: every place the production packages
 `signing/`, `trust/`) parse JSON or JSON-like artefact documents.
 Method: grep for `json.loads` / `json.load` / `JSONDecoder` /
 `strict_loads` across those packages (no other JSON parser exists
-in them, and no `json.loads` exists anywhere else in the repo
-outside `tests/`), code inspection of each loader's hooks and
+in them). Scoped precisely: that claim covers only the packages
+listed above — it is NOT repo-wide. Outside those packages, a
+further `json.loads` existed in the original v3.1 build:
+`deploy/verifier-identity/health_check.py`'s budgets-anchor
+reader (row 34 below), code inspection of each loader's hooks and
 post-parse validation, and empirical probes: each suspect loader
 was fed a fully valid document carrying a bogus FIRST copy of a
 duplicated key (real value second — a last-wins parser accepts
@@ -49,10 +52,15 @@ transaction journal, the budget store, the ledger anchor and
 reanchor-audit readers, the loop state loader, the memory store
 ( state, migration audit, freshness check), the oversight
 approval journal, and the self-modification canary journal.
-Two protected consumers in `eval/` do not yet meet the
-duplicate-key clause and are recorded as findings below; one
-consumer in `trust/verifier_main.py` is recorded as a finding
-for its owning pod.
+Two protected consumers in `eval/` did not meet the
+duplicate-key clause when this inventory was written and were
+recorded as findings P-1/P-2 below; both are FIXED in cycle 13
+under Dilip's Protected Gate approval (see the Protected
+findings section for their dispositions); one consumer in `trust/verifier_main.py` (row 26)
+and the budgets-anchor reader in
+`deploy/verifier-identity/health_check.py` (row 34) were
+recorded as findings and are FIXED in the v3.1 fix round (see
+their rows).
 
 ## Inventory
 
@@ -80,10 +88,10 @@ for its owning pod.
 | 20 | `memory/store.py` `MemoryStore._disk_changed` | Memory store (freshness re-read) | Same strict hooks as #18 | Refused (reads as changed) | Refused (reads as changed) | Yes | Refusing to overwrite externally changed state | strict |
 | 21 | `oversight/approval.py` `ApprovalManager._load` | Human-approval journal | `json.loads` with dup/constant/float hooks | Refused at parse | Refused at parse | Yes — top level; entries validated | Whether a protected change was human-approved | strict |
 | 22 | `selfmod/canary.py` `CanaryManager._load` | Canary journal | `json.loads` with dup/constant/float hooks | Refused at parse | Refused at parse | Yes — top level; entries validated | Self-modification commit / rollback decisions | strict |
-| 23 | `eval/registry.py` `EvalRegistry._load` | Sealed evaluation registry (`registry.json`) | `json.loads` with constant/float hooks, **no duplicate-key hook** | **ACCEPTED last-wins (verified: valid registry with bogus-first duplicate `public_version` loads)** | Refused at parse | Yes — top level, items, access-log entries (post-parse) | Sealed-eval integrity; the verifier refuses an untrusted registry | **protected-finding** (see below) |
-| 24 | `eval/registry.py` `EvalRegistry._disk_changed` | Registry (freshness re-read; reads `state_digest` only) | **Plain `json.loads`** | Accepted last-wins | Accepted by the parser (a non-finite token elsewhere is invisible to this read) | No (single field read) | Freshness guard behind #23's save path | **protected-finding** (see below) |
-| 25 | `eval/calibration.py` `CalibrationLog._load` | Reviewer calibration log | `json.loads` with constant/float hooks, **no duplicate-key hook** | **ACCEPTED last-wins (verified: bogus-first duplicate entry `score` loads; the entry hash covers the last-wins parse)** | Refused at parse | Entries yes; top level partial | Calibration scores feeding reviewer weighting | **protected-finding** (see below) |
-| 26 | `trust/verifier_main.py` `_read_budgets_anchor` | Budgets anchor file (`budgets-anchor/1`) | **Plain `json.loads`** | Accepted last-wins | Accepted by the parser (a numeric `head` then fails the string/length check) | No — only `v` and `head` checked; extra keys tolerated | Pins the budget-store head at verifier startup (budget accounting integrity) | finding — owned by the `verifier_main` pod; not edited by this cycle's parser pod |
+| 23 | `eval/registry.py` `EvalRegistry._load` | Sealed evaluation registry (`registry.json`) | **Was `json.loads` with constant/float hooks and no duplicate-key hook; now the same hooks plus an `object_pairs_hook` duplicate rejection raising `CorruptRegistryError`** | **Were accepted last-wins (verified pre-fix: valid registry with bogus-first duplicate `public_version` loaded); now refused at parse** | Refused at parse | Yes — top level, items, access-log entries (post-parse) | Sealed-eval integrity; the verifier refuses an untrusted registry | **fixed-in-cycle-13** (was protected-finding P-1, see below) |
+| 24 | `eval/registry.py` `EvalRegistry._disk_changed` | Registry (freshness re-read; reads `state_digest` only) | **Was plain `json.loads`; now the same strict parse as #23 (duplicate/constant/float hooks)** | Were accepted last-wins; now refused at parse | Were accepted by the parser (a non-finite token elsewhere was invisible to this read); now refused at parse | No (single field read) | Freshness guard behind #23's save path | **fixed-in-cycle-13** (was protected-finding P-1, see below) |
+| 25 | `eval/calibration.py` `CalibrationLog._load` | Reviewer calibration log | **Was `json.loads` with constant/float hooks and no duplicate-key hook; now the same hooks plus an `object_pairs_hook` duplicate rejection raising `CorruptCalibrationError`** | **Were accepted last-wins (verified pre-fix: bogus-first duplicate entry `score` loaded; the entry hash covered the last-wins parse); now refused at parse** | Refused at parse | Entries yes; top level partial | Calibration scores feeding reviewer weighting | **fixed-in-cycle-13** (was protected-finding P-2, see below) |
+| 26 | `trust/verifier_main.py` `_read_budgets_anchor` | Budgets anchor file (`budgets-anchor/1`) | **Was plain `json.loads` in the original v3.1 build; FIXED in the v3.1 fix round with `protocol.strict_loads` + exact keys** | Were accepted last-wins; now refused at parse | Were accepted by the parser (a numeric `head` then failed the string/length check); now refused at parse | Was no — only `v` and `head` checked, extra keys tolerated; now exact keys | Pins the budget-store head at verifier startup (budget accounting integrity) | **fixed-in-v3.1-fix-round** (sibling of row 34) |
 | 27 | `trust/attestation.py` | Sealed-eval attestation records | No JSON parser: operates on record dicts; the JSON boundary is `protocol.strict_loads` (#1) | n/a (inherits #1) | n/a (inherits #1) | Payload keys rebuilt and compared in `verify_eval_attestation` | Attestation verification inside the verifier | non-security-parser — inherits strict boundary, with reasons |
 | 28 | `eval/factory.py`, `eval/gate.py` | — | No JSON parsing (in-memory objects and the registry API only) | n/a | n/a | n/a | Gate decisions are computed, not parsed | non-security — no parser, with reasons |
 | 29 | `memory/reuse.py` | — | No JSON parsing (existence checks; delegates to #18/#23 loaders) | n/a | n/a | n/a | — | non-security — no parser, with reasons |
@@ -91,8 +99,9 @@ for its owning pod.
 | 31 | `trust/pathpolicy.py` | — | No JSON parsing (path canonicalisation) | n/a | n/a | n/a | Path policy is enforced on strings, not documents | non-security — no parser, with reasons |
 | 32 | `selfmod/canary.py` tree / snapshot byte reads | Working-tree and snapshot files | Raw bytes hashed and compared; never JSON-parsed | n/a | n/a | n/a | Tamper evidence is the byte hash itself | non-security — not a document parser, with reasons |
 | 33 | `signing/gate_decision.py` key-file loader | Signing key files | Hex text (`bytes.fromhex` after strip); not JSON | n/a | n/a | n/a | Key material loading | non-security — outside the JSON contract, with reasons |
+| 34 | `deploy/verifier-identity/health_check.py` budgets-anchor reader (`check_anchors`) | Budgets anchor file (`budgets-anchor/1`) | **Was plain `json.loads` in the original v3.1 build; FIXED in the v3.1 fix round (strict parse: duplicate rejection, exact key set, hex head — applied by the deployment fix agent in `health_check.py`)** | Were accepted last-wins; now refused at parse | Were accepted by the parser; now refused at parse | Was no; now exact key set, with the `head` required to be hex | Security-relevant: it cross-checks the budget-store head for a diagnostic verdict (the health checker's anchors verdict) | **security-relevant — fixed-in-v3.1-fix-round**; its sibling reader `trust/verifier_main.py:_read_budgets_anchor` (row 26) was fixed in the same round with `protocol.strict_loads` + exact keys |
 
-## Protected findings (eval/ — not edited by this pod)
+## Protected findings (eval/) — both FIXED in cycle 13
 
 **Finding P-1 (`eval/registry.py`, `EvalRegistry._load` and
 `_disk_changed`).** Wording for the protected-change proposal:
@@ -116,12 +125,16 @@ in the meantime. Recommended protected change: add an
 `CorruptRegistryError`, mirroring `memory/store.py`) and use the
 same strict parse in `_disk_changed`."
 
+Disposition: FIXED in cycle 13 under Dilip's Protected Gate approval — the recommended change was applied exactly as proposed: `_load` now rejects duplicate keys via an `object_pairs_hook` raising `CorruptRegistryError`, and `_disk_changed` uses the same strict parse (duplicate/constant/float hooks), so a duplicate-key `registry.json` is refused at parse by both loaders. The pre-fix residual was a parser differential, not an integrity break: both loaders' digests/chains were recomputed over the last-wins parse. No claim beyond that: the fix closes the duplicate-key differential for this loader; it does not change what the digest binds or make the registry tamper-proof against a writer who recomputes it.
+
 **Finding P-2 (`eval/calibration.py`, `CalibrationLog._load`).**
 Same shape as P-1: non-finite numbers are refused at parse time
 but duplicate keys are accepted last-wins; verified 2026-11-20
 with a bogus-first duplicate entry `score`. Recommended
 protected change: add the same `object_pairs_hook` rejection
 (raising `CorruptCalibrationError`).
+
+Disposition: FIXED in cycle 13 under Dilip's Protected Gate approval — the recommended change was applied exactly as proposed: `_load` now rejects duplicate keys via an `object_pairs_hook` raising `CorruptCalibrationError`, so a duplicate-key `calibration.json` is refused at parse. The pre-fix residual was a parser differential, not an integrity break: the entry hashes were recomputed over the last-wins parse. No claim beyond that: the fix closes the duplicate-key differential for this loader only.
 
 ## Differential tests
 
@@ -133,3 +146,12 @@ pair: the loop state bytes are fed to both `CoreLoop` and
 both refuse every ambiguous one; the ship-ledger, signing-ledger
 and ship-transaction journals are each exercised through the
 shared `HashChainJournal` loader they all inherit.
+
+## Closing note — `deploy/` coverage
+
+`deploy/` is now inside the call-graph lint roots:
+`tests/test_trust_lint.py`'s `PRODUCTION_ROOTS` includes
+`"deploy"` (added in the v3.1 fix round), so the directory no
+longer sits outside production-wide checks — the call-graph
+scan now covers, among others,
+`deploy/verifier-identity/health_check.py`.

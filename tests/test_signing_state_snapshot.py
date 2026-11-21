@@ -14,6 +14,7 @@ import json
 import sys
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -29,6 +30,7 @@ from signing import (
     verify_signed_snapshot,
 )
 from signing.state_snapshot import (
+    CLOCK_SKEW_SECONDS,
     calibration_hash_for,
     parse_state_bytes,
     self_test,
@@ -201,6 +203,22 @@ class SignVerifyTests(unittest.TestCase):
     def test_sign_refuses_pre_state_timestamp(self):
         with self.assertRaises(SigningError):
             sign(now="2026-11-20T05:00:00+00:00")
+
+    def test_sign_backdating_skew_boundary(self):
+        # The guard refuses a signed_at earlier than the state's
+        # last completed cycle minus the clock-skew allowance;
+        # exactly at the boundary it still signs. The default
+        # fixture state's last completed_at is
+        # 2026-11-20T06:02:19+00:00.
+        completed = datetime(2026, 11, 20, 6, 2, 19,
+                             tzinfo=timezone.utc)
+        at_boundary = (completed - timedelta(
+            seconds=CLOCK_SKEW_SECONDS)).isoformat()
+        beyond = (completed - timedelta(
+            seconds=CLOCK_SKEW_SECONDS + 1)).isoformat()
+        sign(now=at_boundary)
+        with self.assertRaises(SigningError):
+            sign(now=beyond)
 
     def test_sign_rejects_caller_asserted_facts(self):
         # There is no parameter to assert cycle_seq or hashes: the
@@ -484,10 +502,87 @@ class FixRoundTests(unittest.TestCase):
             state_hash_for(b"x" * (5 * 1024 * 1024 + 1))
 
 
+class Cycle12FixRoundTests(unittest.TestCase):
+    """War-room cycle 12 re-verification: every finding pinned."""
+
+    def test_history_len_cannot_exceed_last_cycle(self):
+        from signing.state_snapshot import StateFacts, state_snapshot_payload
+        facts = StateFacts(
+            state_sha256="a" * 64, schema_version=1, cycle_seq=2,
+            history_len=3, last_cycle_id=2,
+            last_item_id="eval-gate-calibration",
+            last_completed_at="2026-11-20T06:02:19+00:00")
+        with self.assertRaises(SigningError):
+            state_snapshot_payload(
+                facts, signer_id=SIGNER, key_id=KEY.key_id,
+                signed_at=NOW, expires_at="2026-11-20T12:15:00+00:00")
+        data = snapshot_envelope_to_dict(sign())
+        with self.assertRaises(SigningError):
+            snapshot_envelope_from_dict(dict(data, history_len=3))
+        forged = replace(sign(), history_len=3)
+        reasons = verify_signed_snapshot(forged, signing_key=KEY, now=NOW)
+        self.assertIn("malformed_payload", reasons)
+
+    def test_pruned_history_below_cycle_seq_still_signs(self):
+        # Fewer entries than cycle_seq is legitimate (pruning):
+        # the bound is history_len <= last_cycle_id, not equality.
+        state = state_bytes(cycle_seq=5, history=[
+            {"cycle_id": 5, "item_id": "trust-boundary",
+             "completed_at": "2026-11-20T06:02:19+00:00"}])
+        signed = sign(state=state)
+        self.assertEqual(signed.history_len, 1)
+        reasons = verify_signed_snapshot(
+            signed, signing_key=KEY, expected_state_bytes=state, now=NOW)
+        self.assertEqual(reasons, ())
+
+    def test_empty_history_cannot_carry_last_completed_at(self):
+        from signing.state_snapshot import StateFacts, state_snapshot_payload
+        facts = StateFacts(
+            state_sha256="a" * 64, schema_version=1, cycle_seq=0,
+            history_len=0, last_cycle_id=None, last_item_id=None,
+            last_completed_at="2026-11-20T06:02:19+00:00")
+        with self.assertRaises(SigningError):
+            state_snapshot_payload(
+                facts, signer_id=SIGNER, key_id=KEY.key_id,
+                signed_at=NOW, expires_at="2026-11-20T12:15:00+00:00")
+        empty = sign(state=state_bytes(cycle_seq=0, history=[]))
+        data = snapshot_envelope_to_dict(empty)
+        with self.assertRaises(SigningError):
+            snapshot_envelope_from_dict(
+                dict(data, last_completed_at="2026-11-20T06:02:19+00:00"))
+
+    def test_future_signed_at_skew_boundary(self):
+        # External-seat evidence (cycle 12): a far-future signed_at
+        # must not stretch the freshness window. Exactly at the
+        # skew allowance it verifies; one second beyond it reports
+        # signed_in_future.
+        signed = sign(now="2026-11-20T12:10:00+00:00")
+        at_boundary = "2026-11-20T12:05:00+00:00"  # signed_at - 300s
+        reasons = verify_signed_snapshot(
+            signed, signing_key=KEY, now=at_boundary)
+        self.assertNotIn("signed_in_future", reasons)
+        beyond = "2026-11-20T12:04:59+00:00"  # signed_at - 301s
+        reasons = verify_signed_snapshot(
+            signed, signing_key=KEY, now=beyond)
+        self.assertIn("signed_in_future", reasons)
+        far_future = sign(now="2026-12-20T12:00:00+00:00")
+        reasons = verify_signed_snapshot(far_future, signing_key=KEY, now=NOW)
+        self.assertIn("signed_in_future", reasons)
+
+
 class LiveStateTests(unittest.TestCase):
     def test_live_state_and_calibration_snapshot(self):
-        # Expectations are derived from the live file itself, so
-        # this test survives the cycle it ships in (rev-r6).
+        # Expectations — including the signing instant — are
+        # derived from the live file itself, so this test survives
+        # the cycle it ships in and every later one (rev-r6). The
+        # instant derivation is the load-bearing half: the original
+        # hard-coded "now" (2026-11-20T12:30Z) silently fell behind
+        # the state's last completed cycle the moment cycle 11
+        # recorded at 13:21Z, and the module's anti-backdating
+        # guard — correctly — refused the snapshot. Signing at the
+        # state's own last completed instant is the earliest moment
+        # this state can legitimately be attested, and stays valid
+        # no matter how many further cycles are recorded.
         root = Path(__file__).resolve().parents[1]
         state = (root / "state" / "state.json").read_bytes()
         cal = (root / "state" / "calibration"
@@ -495,14 +590,36 @@ class LiveStateTests(unittest.TestCase):
         facts = parse_state_bytes(state)
         self.assertEqual(facts.cycle_seq, facts.last_cycle_id)
         self.assertGreaterEqual(facts.history_len, 9)
+        now = facts.last_completed_at
+        self.assertIsNotNone(now)
         signed = sign_state_snapshot(
             state, signing_key=KEY, signer_id=SIGNER,
-            calibration_bytes=cal, now="2026-11-20T12:30:00+00:00")
+            calibration_bytes=cal, now=now)
         self.assertEqual(
             verify_signed_snapshot(
                 signed, signing_key=KEY, expected_state_bytes=state,
                 expected_calibration_bytes=cal,
-                now="2026-11-20T12:30:00+00:00"), ())
+                now=now), ())
+
+    def test_live_state_backdated_snapshot_refused(self):
+        # The anti-backdating guard must keep biting on the live
+        # file: an instant genuinely before the state's last
+        # completed cycle (beyond the clock-skew allowance) is
+        # refused, however the roundtrip test above derives its
+        # legitimate "now". This pins the refusal direction
+        # against the real state so the guard cannot be weakened
+        # to make the roundtrip pass.
+        root = Path(__file__).resolve().parents[1]
+        state = (root / "state" / "state.json").read_bytes()
+        facts = parse_state_bytes(state)
+        self.assertIsNotNone(facts.last_completed_at)
+        completed = datetime.fromisoformat(facts.last_completed_at)
+        backdated = (completed - timedelta(
+            seconds=CLOCK_SKEW_SECONDS + 1)).isoformat()
+        with self.assertRaises(SigningError):
+            sign_state_snapshot(
+                state, signing_key=KEY, signer_id=SIGNER,
+                now=backdated)
 
 
 if __name__ == "__main__":
