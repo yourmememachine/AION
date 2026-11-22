@@ -83,19 +83,25 @@ Honest limits, stated not hidden:
   the rollback domain, be protected against modification, be
   advanced only after a verification returns ``()``, and never
   be reconstructed from the snapshot being verified. The chain
-  link proves continuity only where it is checked (the immediate
-  successor of a pin, or an explicitly supplied expected previous
-  hash); a chain alone does not establish completeness — omitted
+  link proves observable continuity relative to the supplied pin
+  only where it is checked (the immediate successor of a pin, or
+  an explicitly supplied expected previous hash); it is
+  step-observation gating, not a cryptographic continuity proof,
+  and a chain alone does not establish completeness — omitted
   intermediate snapshots are invisible without a trusted
   checkpoint. The strict wrapper narrows this (cycle 14): it
   refuses a snapshot more than one sequence past the pin with
   ``chain_gap``, so through that entry point an omitted
   intermediate can no longer be laundered into a pin advance —
   but it still proves nothing about intermediates it never saw,
-  and the bare verifier keeps the gap by design. That refusal
-  assumes one verified snapshot per cycle: a missed or expired
-  intermediate deadlocks strict catch-up until an external pin
-  ceremony (not yet implemented) re-anchors the pin. Timestamps rest on the host clock: the 300-second
+  and the bare verifier keeps the gap by design. Pruned
+  *snapshot* sequences trigger ``chain_gap`` regardless of why
+  they are missing (missed, expired, filtered or pruned); only
+  pruned *state* history inside a snapshot is unaffected. That
+  refusal assumes one verified snapshot per cycle: a missed or
+  expired intermediate deadlocks strict catch-up until the
+  external pin ceremony (``signing/pin_ceremony.py``, cycle 15)
+  re-anchors the pin. Timestamps rest on the host clock: the 300-second
   skew is a policy choice, not proof of trustworthy time, and
   the effective validity window is at most TTL + skew.
 - A valid snapshot establishes membership in the key-holder
@@ -727,12 +733,16 @@ def verify_snapshot_for_state(signed, *, signing_key: SigningKey,
     one snapshot is taken and verified per cycle; a missed
     intermediate, or one aged past its TTL, deadlocks catch-up
     through this wrapper, and there is no in-wrapper jump or
-    recovery — re-pinning is an external ceremony (backlog item
-    snapshot-pin-ceremony, not yet implemented), never a pin
-    reconstructed from the candidate snapshot itself. Pruned
-    *state* history is unaffected: ``history_len`` below
-    ``cycle_seq`` stays legitimate; only unobserved *snapshot*
-    sequences are refused."""
+    recovery — re-pinning is the external ceremony in
+    ``signing/pin_ceremony.py`` (cycle 15), never a pin
+    reconstructed from the candidate snapshot itself. A sole
+    ``("chain_gap",)`` result classifies as ``reanchor_required``
+    for callers (see ``classify_verification``); any other
+    non-empty result is an integrity failure, not a ceremony
+    trigger. Pruned *state* history is unaffected:
+    ``history_len`` below ``cycle_seq`` stays legitimate; pruned
+    *snapshot* sequences are refused regardless of the reason
+    they are missing."""
     if state_bytes is None or calibration_bytes is None \
             or expected_pin is None or not expected_signer_id:
         raise SigningError(

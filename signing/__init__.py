@@ -54,6 +54,18 @@ from .state_snapshot import (
     verify_signed_snapshot,
     verify_snapshot_for_state,
 )
+from .pin_ceremony import (
+    PIN_CEREMONY_DOMAIN,
+    REASON_CHAIN_GAP_RECOVERY,
+    REASON_CORRUPTED_PIN,
+    REASON_INITIAL_ANCHOR,
+    REASON_LOST_PIN,
+    PinCeremonyRecord,
+    advance_pin,
+    classify_verification,
+    reanchor_pin,
+    verify_ceremony_record,
+)
 from .attestation import (
     ATTESTATION_DOMAIN,
     PURPOSE_ATTESTATION,
@@ -127,4 +139,14 @@ __all__ = [
     "state_snapshot_payload",
     "verify_signed_snapshot",
     "verify_snapshot_for_state",
+    "PIN_CEREMONY_DOMAIN",
+    "REASON_CHAIN_GAP_RECOVERY",
+    "REASON_CORRUPTED_PIN",
+    "REASON_INITIAL_ANCHOR",
+    "REASON_LOST_PIN",
+    "PinCeremonyRecord",
+    "advance_pin",
+    "classify_verification",
+    "reanchor_pin",
+    "verify_ceremony_record",
 ]
