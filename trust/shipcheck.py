@@ -401,7 +401,7 @@ def record_ship(loop, *, root, manifest, signed, signing_key, ledger,
 
 
 def recover_ship_tx(ledger, loop, *, recorded_at="", root=None,
-                    anchor_path=None) -> list:
+                    anchor_path=None, tx_anchor_path=None) -> list:
     """Settle every non-terminal ship transaction in the ship
     ledger's tx journal (see trust.shiptx for the full design).
 
@@ -440,6 +440,14 @@ def recover_ship_tx(ledger, loop, *, recorded_at="", root=None,
     later run, and only chain-mismatch reasons
     (anchor_head_not_in_chain, anchor_ahead_of_journal,
     anchor_kind_mismatch) park the transactions at ANOMALY.
+    ``tx_anchor_path``, when provided, additionally pins the
+    tx journal's own head (kind="ship-tx") under the same
+    classification, combined park-over-error with the ship
+    anchor; the same file passed for both paths is an
+    operator error, and a tx-anchor chain mismatch with no
+    transaction at all to park (the deleted-journal case)
+    raises AnchorError (see trust.shiptx). Recovery never
+    advances either anchor.
     Recovery NEVER re-burns and NEVER re-runs a cycle, and it
     is idempotent for settled transactions: a second run
     changes nothing for them. One transaction's failure is
@@ -449,4 +457,5 @@ def recover_ship_tx(ledger, loop, *, recorded_at="", root=None,
     journal = ShipTxJournal(ledger.journal_dir)
     return journal.recover(ledger, loop,
                            recorded_at=recorded_at or _now(),
-                           root=root, anchor_path=anchor_path)
+                           root=root, anchor_path=anchor_path,
+                           tx_anchor_path=tx_anchor_path)

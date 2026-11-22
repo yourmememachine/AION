@@ -159,8 +159,22 @@ hash chains with separate heads. It subclasses
 :class:`trust.ledger.HashChainJournal`: same hash chain, same
 atomic replace, same tamper-evidence, same stated limit (a
 deleted journal loads as empty; only an externally pinned head
-detects that — pinning the tx journal's head is future work
-under mandate item 7, not claimed here). One difference: this
+detects that). Cycle 17: the tx journal's head CAN be pinned —
+trust.anchoring kind="ship-tx", at a path outside this directory
+(the directory shared with the ship ledger) and distinct from
+the ship ledger's anchor — and recovery verifies that pin when
+the caller supplies ``tx_anchor_path`` (see the Anchor bullet
+below). The pin is unkeyed, like the journals: an attacker who
+can rewrite both this journal and its anchor can roll both back
+to a matching earlier pair and verification passes; it detects
+rollback only against an anchor location the journal's writer
+cannot rewrite, and only for the prefix up to the last
+update_anchor. Two anchors in the same external directory are
+one trust location, not two: the tx anchor adds a second head,
+not a second boundary. Initial anchoring of an established tx
+journal requires the nonempty ceremony
+(allow_nonempty_ceremony=True) and therefore cannot detect any
+rollback that predates it. One difference: this
 journal's appends are serialised by an exclusive flock on the
 journal directory held across the read-head + append (the
 trust/budgets.py pattern), so concurrent appends through
@@ -190,6 +204,28 @@ and applies these rules in order:
   evidence, and only those park every non-terminal transaction
   at ANOMALY. Recovery does not proceed silently on an
   unanchored or rolled-back ledger either way.
+* Tx anchor (cycle 17): when ``tx_anchor_path`` is given, THIS
+  journal's anchor (kind="ship-tx") is verified at the same
+  time, before any settlement, under the same classification,
+  and the two anchors combine park-over-error. Passing the
+  same file for both paths is reported as an operator error
+  (a wiring mistake recovery can prove in-process); passing a
+  DIFFERENT wrong-kind file as ``tx_anchor_path`` — e.g. the
+  ship anchor — is ``anchor_kind_mismatch`` and parks every
+  non-terminal transaction at ANOMALY, terminally: on disk it
+  is indistinguishable from a substituted anchor. If the tx
+  anchor carries chain-mismatch reasons but no non-terminal
+  transaction exists to park — the deleted-journal case —
+  recovery raises AnchorError rather than reporting a clean,
+  empty recovery. Recovery verifies the tx anchor once and
+  never advances it; the caller must call update_anchor(...,
+  kind="ship-tx") after recovery, and until it does, rolling
+  this journal back to the anchored prefix erases recovery's
+  settlements undetectably. Restoring this journal and its
+  anchor from different backup points, or restoring the
+  journal without a force_reanchor, will park live
+  transactions at ANOMALY; restoring an older anchor than the
+  journal will not be detected.
 * Ambiguous or contradictory evidence -> ANOMALY. That
   includes: an item-only cycle candidate that could belong to
   another transaction; a burn whose manifest_hash disagrees
@@ -674,7 +710,7 @@ class ShipTxJournal(HashChainJournal):
     # -- recovery --------------------------------------------------------
 
     def recover(self, ledger, loop, *, recorded_at="", root=None,
-                anchor_path=None) -> list:
+                anchor_path=None, tx_anchor_path=None) -> list:
         """Drive every non-terminal transaction to the one
         terminal outcome its evidence supports (see the module
         docstring for the full rule set).
@@ -691,6 +727,46 @@ class ShipTxJournal(HashChainJournal):
         malformed anchor) yield a non-destructive ``error``
         outcome per transaction with the transaction left in
         place; only chain-mismatch reasons park at ANOMALY.
+        ``tx_anchor_path`` (cycle 17), when given, pins THIS
+        journal's own head (kind="ship-tx") under the identical
+        classification, verified before any transaction is
+        settled. When both anchors are supplied the outcomes
+        combine park-over-error: any chain-mismatch reason from
+        either anchor parks; otherwise any operator-error reason
+        from either yields the non-destructive error outcome
+        (the message labels each reason by its anchor, but only
+        when the tx anchor participates — a ship-only caller's
+        strings keep their bare pre-cycle-17 form). Passing the
+        SAME file for both anchors (by file identity — symlink
+        and hardlink aliases included) is a wiring error this
+        method can prove in-process, so both verifications are
+        suppressed and it is reported as an operator error,
+        never a park; a DIFFERENT file whose kind is wrong is
+        indistinguishable from a substituted anchor and still
+        parks. If the tx anchor carries chain-mismatch reasons
+        but this journal holds no non-terminal transaction to
+        park — the journal file deleted outright and loading
+        empty, or a journal rolled back to a terminal-only
+        prefix — the rollback evidence has nowhere to land, so
+        recover raises AnchorError instead of returning an
+        empty outcome list that would read as "nothing to
+        settle"; the remedy is the correct anchor or an audited
+        force_reanchor. Park outcomes carry an
+        ``anchor_sources`` list naming which anchor produced
+        each park reason. Both anchors are also re-verified
+        after the settlement loop: a park reason appearing only
+        then (a journal swapped mid-recovery) raises
+        AnchorError after the run's settlements, which stand as
+        journaled evidence. Recovery never advances either
+        anchor: transitions it appends leave the tx anchor
+        stale-but-valid (it names an older prefix), and the
+        caller must call update_anchor(..., kind="ship-tx")
+        after recovery — until it does, rolling this journal
+        back to the anchored prefix erases recovery's
+        settlements undetectably. No in-tree caller passes
+        ``tx_anchor_path`` yet: this is operator/library
+        plumbing, and wiring it into the ship flow is a
+        separate cycle.
 
         Returns one outcome dict per transaction that changed
         state or failed to settle ({tx_id, decision_id,
@@ -705,23 +781,100 @@ class ShipTxJournal(HashChainJournal):
         """
         from signing.gate_decision import _now
         stamp = recorded_at or _now()
-        anchor_reasons = ()
-        if anchor_path is not None:
-            from trust.anchoring import verify_anchor
+        # Both anchors are verified BEFORE any transaction is
+        # settled (cycle 17): verifying the tx anchor lazily,
+        # after early transactions have already been settled,
+        # would let settlements land on a journal whose head the
+        # caller asked to have pinned first.
+        # Same-file diagnosis (cycle 17, war-room fix round):
+        # the same file passed for both anchors is a wiring
+        # error provable in-process, whichever of the two files
+        # it is. Identity is by samefile (symlink- and
+        # hardlink-proof when both exist), falling back to
+        # resolved-path equality. On a same-file diagnosis BOTH
+        # verifications are suppressed: running either one
+        # against the shared file would manufacture a kind
+        # mismatch and park every transaction over a typo.
+        same_path_error = False
+        if anchor_path is not None and tx_anchor_path is not None:
             try:
-                anchor_reasons = tuple(verify_anchor(
-                    ledger, anchor_path, kind="ship"))
-            except Exception as exc:
-                anchor_reasons = (f"anchor_error:{exc}",)
-        # N3 classification: only chain-mismatch reasons are
+                same_path_error = os.path.samefile(
+                    anchor_path, tx_anchor_path)
+            except OSError:
+                same_path_error = Path(anchor_path).resolve() \
+                    == Path(tx_anchor_path).resolve()
+        ship_reasons = ()
+        tx_reasons = ()
+        if not same_path_error:
+            if anchor_path is not None:
+                from trust.anchoring import verify_anchor
+                try:
+                    ship_reasons = tuple(verify_anchor(
+                        ledger, anchor_path, kind="ship"))
+                except Exception as exc:
+                    ship_reasons = (f"anchor_error:{exc}",)
+            if tx_anchor_path is not None:
+                from trust.anchoring import verify_anchor
+                try:
+                    tx_reasons = tuple(verify_anchor(
+                        self, tx_anchor_path, kind="ship-tx"))
+                except Exception as exc:
+                    tx_reasons = (f"anchor_error:{exc}",)
+        # N3 classification, applied to each anchor and combined
+        # park-over-error: only chain-mismatch reasons are
         # rollback evidence worth parking over; every other
         # anchor failure is an operator error, reported per
         # transaction below without moving any transaction.
-        anchor_park_reasons = tuple(
-            r for r in anchor_reasons if r in ANCHOR_PARK_REASONS)
+        # Reasons are labelled by anchor only when the tx anchor
+        # participates; a ship-only caller's error strings keep
+        # their pre-cycle-17 bare form exactly.
+        labelled = tx_anchor_path is not None
+
+        def _label(source, reason):
+            return f"{source}: {reason}" if labelled else reason
+
+        ship_park_reasons = tuple(
+            r for r in ship_reasons if r in ANCHOR_PARK_REASONS)
+        tx_park_reasons = tuple(
+            r for r in tx_reasons if r in ANCHOR_PARK_REASONS)
+        anchor_park_reasons = tuple(dict.fromkeys(
+            list(ship_park_reasons) + list(tx_park_reasons)))
+        anchor_park_sources = tuple(dict.fromkeys(
+            [_label("ship", r) for r in ship_park_reasons]
+            + [_label("ship-tx", r) for r in tx_park_reasons]))
         anchor_error_reasons = tuple(
-            r for r in anchor_reasons
-            if r not in ANCHOR_PARK_REASONS)
+            dict.fromkeys(
+                [_label("ship", r) for r in ship_reasons
+                 if r not in ANCHOR_PARK_REASONS]
+                + [_label("ship-tx", r) for r in tx_reasons
+                   if r not in ANCHOR_PARK_REASONS]
+                + (["ship-tx: tx_anchor_path is the same file as "
+                    "anchor_path; the two anchors must be "
+                    "distinct files"] if same_path_error else [])))
+        if tx_park_reasons and not any(
+                s["state"] not in TERMINAL_STATES
+                for s in self.transactions()):
+            # The tx journal's rollback evidence has no
+            # non-terminal transaction to park: the journal file
+            # itself is the pinned object, so its deletion loads
+            # as an empty journal, and a journal rolled back to
+            # a terminal-only prefix presents nothing to park
+            # either — returning [] would read as a clean
+            # recovery in both cases (cycle 17). Surface it as
+            # a refusal instead; the remedy is to supply the
+            # correct anchor or force_reanchor with a recorded
+            # reason. The ship anchor has no equivalent raise:
+            # the ledger it pins is a different file from this
+            # journal, an empty/terminal-only journal means no
+            # transaction is at risk from it, and the ledger's
+            # anchor is verified by the ledger's own consumers.
+            from trust.anchoring import AnchorError
+            raise AnchorError(
+                "ship-tx anchor verification failed with "
+                "chain-mismatch reasons and no non-terminal "
+                "transaction to park: "
+                + ", ".join(tx_park_reasons))
+        anchor_reasons = ()
         if anchor_park_reasons:
             anchor_reasons = anchor_park_reasons
         outcomes = []
@@ -747,7 +900,8 @@ class ShipTxJournal(HashChainJournal):
                 try:
                     outcome = self._recover_one(
                         ledger, loop, tx_id, stamp, root=root,
-                        anchor_reasons=anchor_reasons)
+                        anchor_reasons=anchor_reasons,
+                        anchor_park_sources=anchor_park_sources)
                     error = None
                     break
                 except Exception as exc:  # per-tx isolation
@@ -796,10 +950,51 @@ class ShipTxJournal(HashChainJournal):
                     "error": str(error)})
             elif outcome is not None:
                 outcomes.append(outcome)
+        if not same_path_error and (anchor_path is not None
+                                    or tx_anchor_path is not None):
+            # Post-settlement re-verification (cycle 17 fix
+            # round): the anchor verdicts above are a snapshot
+            # taken before the loop, and no lock is held across
+            # verify+settle. If a journal was swapped or rolled
+            # back mid-recovery, the re-check surfaces a park
+            # reason the run did not act on; settlements already
+            # journaled stand (they are evidence too), and the
+            # new mismatch is raised for the operator rather
+            # than silently passing on the stale verdict.
+            from trust.anchoring import AnchorError, verify_anchor
+            new_park = []
+            if anchor_path is not None:
+                try:
+                    for r in verify_anchor(
+                            ledger, anchor_path, kind="ship"):
+                        if r in ANCHOR_PARK_REASONS \
+                                and r not in ship_park_reasons:
+                            new_park.append(f"ship: {r}")
+                except Exception as exc:
+                    # An exception identical to the one the
+                    # initial verification already classified is
+                    # not a change; only a NEW failure is.
+                    if f"anchor_error:{exc}" not in ship_reasons:
+                        new_park.append(f"ship: anchor_error:{exc}")
+            if tx_anchor_path is not None:
+                try:
+                    for r in verify_anchor(
+                            self, tx_anchor_path, kind="ship-tx"):
+                        if r in ANCHOR_PARK_REASONS \
+                                and r not in tx_park_reasons:
+                            new_park.append(f"ship-tx: {r}")
+                except Exception as exc:
+                    if f"anchor_error:{exc}" not in tx_reasons:
+                        new_park.append(f"ship-tx: anchor_error:{exc}")
+            if new_park:
+                raise AnchorError(
+                    "anchor verification changed during "
+                    "recovery; a journal was swapped or rolled "
+                    "back mid-run: " + ", ".join(new_park))
         return outcomes
 
     def _recover_one(self, ledger, loop, tx_id, stamp, *, root,
-                     anchor_reasons):
+                     anchor_reasons, anchor_park_sources=()):
         """Settle one transaction from fresh evidence. Returns
         its outcome dict, or None when it is already terminal."""
         self._reload()
@@ -820,7 +1015,8 @@ class ShipTxJournal(HashChainJournal):
             return outcome
 
         if anchor_reasons:
-            return park(ANOMALY, reasons=list(anchor_reasons))
+            return park(ANOMALY, reasons=list(anchor_reasons),
+                        anchor_sources=list(anchor_park_sources))
 
         ledger._reload()
         ledger_entries = ledger.entries()
