@@ -226,5 +226,186 @@ class ReanchorTests(unittest.TestCase):
                       verify_ceremony_record(bad2, signing_key=KEY))
 
 
+LATER = "2026-11-20T13:00:00+00:00"
+
+
+def snap_at(seq, prev="", when=LATER):
+    return sign_state_snapshot(state_bytes(seq), signing_key=KEY,
+                               signer_id=SIGNER, calibration_bytes=CAL,
+                               prev_snapshot_hash=prev, now=when)
+
+
+class Cycle16HardeningTests(unittest.TestCase):
+    def _first_ceremony(self):
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        new_pin, rec = reanchor(pin_of(a), cand)
+        return a, cand, new_pin, rec
+
+    def test_forged_strict_reasons_wrong_pin_binding_refused(self):
+        # The caller-supplied ("chain_gap",) is not trusted: with a
+        # pin carrying a different signer binding, the recomputed
+        # strict result is not a sole chain_gap and the ceremony
+        # refuses, where cycle 15 would have proceeded.
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        bad_pin = pin_of(a)
+        bad_pin["signer_id"] = "evil-9"
+        with self.assertRaises(SigningError):
+            reanchor(bad_pin, cand)
+
+    def test_gap_prev_is_pin_refused(self):
+        a = snap(1)
+        cand = snap(4, prev=a.payload_hash)
+        with self.assertRaises(SigningError):
+            reanchor(pin_of(a), cand)
+
+    def test_strict_reasons_corpus_never_typeerror(self):
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        for bad in ["chain_gap", 42, ("chain_gap", "chain_gap"),
+                    ("chain_gap", "expired")]:
+            with self.assertRaises(SigningError, msg=repr(bad)):
+                reanchor(pin_of(a), cand, strict_reasons=bad)
+
+    def test_history_evidence_reuse_refused_fresh_accepted(self):
+        _a, cand, new_pin, rec = self._first_ceremony()
+        nxt = snap_at(7, prev="f" * 64)
+        with self.assertRaises(SigningError):
+            reanchor(new_pin, nxt, now=LATER,
+                     ceremony_history=[rec])
+        pin2, rec2 = reanchor(new_pin, nxt, now=LATER,
+                              evidence_hash="d" * 64,
+                              ceremony_history=[rec])
+        self.assertEqual(pin2, pin_of(nxt))
+        self.assertEqual(verify_ceremony_record(rec2, signing_key=KEY),
+                         ())
+
+    def test_history_tampered_and_duplicate_evidence_refused(self):
+        _a, _c, new_pin, rec = self._first_ceremony()
+        nxt = snap_at(7, prev="f" * 64)
+        tampered = replace(rec, operator_id="operator-2")
+        with self.assertRaises(SigningError):
+            reanchor(new_pin, nxt, now=LATER, evidence_hash="d" * 64,
+                     ceremony_history=[tampered])
+        with self.assertRaises(SigningError):
+            reanchor(new_pin, nxt, now=LATER, evidence_hash="d" * 64,
+                     ceremony_history=[rec, rec])
+        with self.assertRaises(SigningError):
+            reanchor(new_pin, nxt, now=LATER, evidence_hash="d" * 64,
+                     ceremony_history="not-a-history")
+        with self.assertRaises(SigningError):
+            reanchor(new_pin, nxt, now=LATER, evidence_hash="d" * 64,
+                     ceremony_history=[object()])
+
+    def test_history_replayed_target_and_behind_head_refused(self):
+        a, cand, _pin, rec = self._first_ceremony()
+        with self.assertRaises(SigningError):
+            reanchor(pin_of(a), cand, evidence_hash="d" * 64,
+                     ceremony_history=[rec])
+        behind = snap_at(3, prev="f" * 64)
+        with self.assertRaises(SigningError):
+            reanchor(pin_of(a), behind, now=LATER,
+                     evidence_hash="d" * 64, ceremony_history=[rec])
+
+    def test_history_empty_and_absent_unchanged(self):
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        _, rec = reanchor(pin_of(a), cand, ceremony_history=[])
+        self.assertEqual(verify_ceremony_record(rec, signing_key=KEY),
+                         ())
+
+    def test_one_step_record_never_verifies_clean(self):
+        _a, _c, _p, rec = self._first_ceremony()
+        one_step = replace(rec, new_cycle_seq=rec.old_cycle_seq + 1)
+        self.assertIn("not_a_gap_reanchor",
+                      verify_ceremony_record(one_step, signing_key=KEY))
+
+    def test_record_pin_context(self):
+        a, cand, _p, rec = self._first_ceremony()
+        self.assertEqual(
+            verify_ceremony_record(
+                rec, signing_key=KEY, expected_old_pin=pin_of(a),
+                expected_new_pin=pin_of(cand)), ())
+        other = snap(5, prev="f" * 64)
+        self.assertIn(
+            "pin_context_mismatch",
+            verify_ceremony_record(
+                rec, signing_key=KEY, expected_old_pin=pin_of(a),
+                expected_new_pin=pin_of(other)))
+
+    def test_fix_round_cycle16(self):
+        from signing.pin_ceremony import _mac, _payload_hash
+        a, cand, new_pin, rec = self._first_ceremony()
+        # Replayed target, isolated by its refusal message.
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, evidence_hash="d" * 64,
+                     ceremony_history=[rec])
+        self.assertIn("already a ceremonied target", str(cm.exception))
+        # Stale candidate, isolated: signed before the history's
+        # latest ceremony, refused by the predates check itself.
+        stale = snap_at(7, prev="f" * 64,
+                        when="2026-11-20T11:55:00+00:00")
+        with self.assertRaises(SigningError) as cm:
+            reanchor(new_pin, stale, evidence_hash="d" * 64,
+                     ceremony_history=[rec])
+        self.assertIn("predates the latest ceremony",
+                      str(cm.exception))
+        # Equal-seq / different-hash against the history head.
+        rival = snap_at(4, prev="a" * 64)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), rival, now=LATER,
+                     evidence_hash="d" * 64, ceremony_history=[rec])
+        self.assertIn("abandon higher attested work",
+                      str(cm.exception))
+        # Forked history: two verified records, same target seq,
+        # different hashes.
+        _, rec2 = reanchor(None, rival, reason="initial_anchor",
+                           evidence_hash="b" * 64, now=LATER)
+        nxt = snap_at(7, prev="f" * 64)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(new_pin, nxt, now=LATER,
+                     evidence_hash="c" * 64,
+                     ceremony_history=[rec, rec2])
+        self.assertIn("history is forked", str(cm.exception))
+        # A validly MACed one-step record: exactly one reason.
+        one = replace(rec, new_cycle_seq=rec.old_cycle_seq + 1)
+        ph = _payload_hash(one.payload())
+        one = replace(one, payload_hash=ph,
+                      signature=_mac(KEY.key, ph, KEY.key_id))
+        self.assertEqual(verify_ceremony_record(one, signing_key=KEY),
+                         ("not_a_gap_reanchor",))
+        # Context: each side independent; explicit absent-old
+        # assertion; malformed context reports, never raises.
+        self.assertEqual(
+            verify_ceremony_record(rec, signing_key=KEY,
+                                   expected_new_pin=pin_of(cand)), ())
+        self.assertIn(
+            "pin_context_mismatch",
+            verify_ceremony_record(rec, signing_key=KEY,
+                                   expected_old_pin=None))
+        _, rec_init = reanchor(None, snap(2), reason="initial_anchor",
+                               evidence_hash="b" * 64)
+        self.assertEqual(
+            verify_ceremony_record(rec_init, signing_key=KEY,
+                                   expected_old_pin=None), ())
+        self.assertIn(
+            "pin_context_mismatch",
+            verify_ceremony_record(
+                rec, signing_key=KEY,
+                expected_new_pin={"cycle_seq": "x",
+                                  "payload_hash": "z"}))
+        # Binding-absent pin: known, pinned behaviour — a minimal
+        # pin carries no bindings for the recomputation to bind.
+        minimal = {"cycle_seq": a.cycle_seq,
+                   "payload_hash": a.payload_hash}
+        pin3, _ = reanchor(minimal, cand, evidence_hash="c" * 64)
+        self.assertEqual(pin3, pin_of(cand))
+        # strict_reasons must be a list/tuple, captured once.
+        for bad in [{"chain_gap": 1}, {"chain_gap"}]:
+            with self.assertRaises(SigningError, msg=repr(bad)):
+                reanchor(pin_of(a), cand, strict_reasons=bad)
+
+
 if __name__ == "__main__":
     unittest.main()

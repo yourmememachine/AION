@@ -75,6 +75,41 @@ Honest limits:
   unobserved forever. The audit record preserves that gap
   explicitly (``gap_from_seq`` / ``gap_to_seq``) instead of
   laundering it into continuity.
+
+Cycle 16 hardening (external seats' combined cycles 14+15
+review): for ``chain_gap_recovery`` the strict result is
+RECOMPUTED inside ``reanchor_pin`` against the captured pin —
+a caller-supplied ``("chain_gap",)`` that does not match the
+recomputation is refused, so eligibility is bound to this pin
+and this candidate (including the pin's key/signer bindings,
+when the pin carries them — a pin without those optional
+fields has no bindings to bind to). A gap candidate whose
+``prev_snapshot_hash`` names the pin itself is refused as an
+integrity failure. An optional ``ceremony_history`` (verified
+records only) refuses evidence reuse, replayed targets,
+candidates behind the history's attested head, and candidates
+predating the latest ceremony — ONLY under a complete,
+caller-supplied history: the parameter is opt-in, a truncated
+or omitted history silently disables every one of those
+checks, and the records are attested under the same symmetric
+key, so this is a consistency check over caller-supplied
+input, not rollback or replay protection. The no-pin reasons
+(``initial_anchor`` / ``lost_pin`` / ``corrupted_pin``) receive
+no recomputation and no history requirement. Without pin
+context, ``verify_ceremony_record`` proves a record was
+issued, not that it applies to the caller's pin state.
+``verify_ceremony_record`` refuses one-step records (which this
+ceremony can never issue) and, when the caller supplies the
+expected pin context, records replayed against a different pin
+state. What cycle 16 does NOT fix, stated plainly: operator
+authority is still a caller-supplied list (independent authority
+needs a protected source — an owner decision, not a local
+check); evidence is still a bare digest whose provenance this
+module cannot prove (history reuse checks apply only when a
+history is supplied); nothing here persists the pin and the
+record atomically; and the ceremony MAC uses the snapshot
+signing key — key separation is stated as required future work,
+not enforced here.
 """
 
 from __future__ import annotations
@@ -100,6 +135,7 @@ from signing.gate_decision import (
 from signing.state_snapshot import (
     SignedStateSnapshot,
     verify_signed_snapshot,
+    verify_snapshot_for_state,
 )
 
 DOMAIN = "snapshot-pin-ceremony-v1"
@@ -131,6 +167,23 @@ def _payload_hash(payload: dict) -> str:
     return _sha256(_canonical(payload))
 
 
+_REANCHOR_REASONS = ("chain_gap",)
+
+
+def _is_sole_chain_gap(reasons) -> bool:
+    """The one eligibility atom, shared by ``classify_verification``
+    and ``reanchor_pin`` (cycle 16): exactly ``("chain_gap",)``,
+    by exact tuple equality. Never re-encode this as a set
+    membership, an ``in`` check or a length check — each of those
+    diverges on duplicates or mixed reasons."""
+    if reasons is None:
+        return False
+    try:
+        return tuple(reasons) == _REANCHOR_REASONS
+    except TypeError:
+        return False
+
+
 def classify_verification(reasons) -> str:
     """Classify a verification result for callers: ``ok``,
     ``reanchor_required`` or ``integrity_failure``. A sole
@@ -141,9 +194,30 @@ def classify_verification(reasons) -> str:
     reasons = tuple(reasons)
     if reasons == ():
         return "ok"
-    if reasons == ("chain_gap",):
+    if _is_sole_chain_gap(reasons):
         return "reanchor_required"
     return "integrity_failure"
+
+
+def _candidate_relation(old_seq, old_hash, signed) -> str:
+    """The ceremony's only sequence arithmetic (cycle 16): how the
+    candidate stands to the captured pin. ``gap`` is the only
+    relation a ceremony may act on."""
+    if signed.cycle_seq < old_seq:
+        return "backwards"
+    if signed.cycle_seq == old_seq:
+        return "same" if signed.payload_hash == old_hash \
+            else "same_seq_fork"
+    if signed.cycle_seq == old_seq + 1:
+        return "successor" if signed.prev_snapshot_hash == old_hash \
+            else "successor_fork"
+    if signed.prev_snapshot_hash == old_hash:
+        # A candidate more than one step ahead whose prev names
+        # the pin claims the pin as its immediate predecessor,
+        # contradicting its own sequence distance — a relabelled
+        # successor, not an unobserved gap.
+        return "gap_prev_is_pin"
+    return "gap"
 
 
 def _pin_of(signed: SignedStateSnapshot) -> dict:
@@ -252,11 +326,73 @@ class PinCeremonyRecord:
         return self.new_cycle_seq - 1
 
 
+def _check_ceremony_history(ceremony_history, *, signing_key,
+                            evidence_hash, signed):
+    """Validate a caller-supplied ceremony history (cycle 16).
+    History can only refuse, never grant: every record must
+    verify under the ceremony key, evidence must not repeat
+    within the history or against this ceremony, the candidate
+    must not already be a ceremonied target, must not sit behind
+    the history's attested head, and must not predate the latest
+    ceremony in it. Returns the captured history tuple."""
+    if isinstance(ceremony_history, (str, bytes, dict)) \
+            or not isinstance(ceremony_history, (list, tuple)):
+        raise SigningError(
+            "ceremony history must be a list or tuple of records")
+    history = tuple(ceremony_history)
+    seen_evidence = set()
+    for rec in history:
+        if not isinstance(rec, PinCeremonyRecord):
+            raise SigningError(
+                "ceremony history contains a non-record entry")
+        if verify_ceremony_record(rec, signing_key=signing_key) != ():
+            raise SigningError(
+                "ceremony history record does not verify; an "
+                "unverifiable history establishes nothing")
+        if rec.evidence_hash in seen_evidence:
+            raise SigningError(
+                "ceremony history itself reuses an evidence hash")
+        seen_evidence.add(rec.evidence_hash)
+        if (rec.new_cycle_seq, rec.new_payload_hash) \
+                == (signed.cycle_seq, signed.payload_hash):
+            raise SigningError(
+                "candidate is already a ceremonied target; a "
+                "replayed ceremony is refused")
+    if evidence_hash in seen_evidence:
+        raise SigningError(
+            "ceremony evidence has already been used in a prior "
+            "ceremony")
+    targets = {}
+    for rec in history:
+        prior = targets.setdefault(rec.new_cycle_seq,
+                                   rec.new_payload_hash)
+        if prior != rec.new_payload_hash:
+            raise SigningError(
+                "ceremony history is forked: two records attest "
+                "different snapshots at the same sequence")
+    if history:
+        head = max(history, key=lambda r: r.new_cycle_seq)
+        if signed.cycle_seq < head.new_cycle_seq or (
+                signed.cycle_seq == head.new_cycle_seq
+                and signed.payload_hash != head.new_payload_hash):
+            raise SigningError(
+                "candidate would abandon higher attested work in "
+                "the ceremony history")
+        latest = max(_parse_time(r.performed_at, "performed_at")
+                     for r in history)
+        if _parse_time(signed.signed_at, "signed_at") <= latest:
+            raise SigningError(
+                "candidate predates the latest ceremony in the "
+                "history; a stale candidate cannot be the new head")
+    return history
+
+
 def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
                  state_bytes, calibration_bytes, expected_signer_id,
                  operator_id, authorised_operators, reason,
                  evidence_hash, strict_reasons=None,
-                 now=None) -> tuple[dict, PinCeremonyRecord]:
+                 now=None, ceremony_history=None) \
+        -> tuple[dict, PinCeremonyRecord]:
     """Ceremonied re-anchor: returns (new_pin, audit_record).
 
     See the module docstring for the full rule set. Every refusal
@@ -281,9 +417,15 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
             "ceremony evidence must be independent of the candidate; "
             "a pin must never be reconstructed from the snapshot "
             "being verified")
+    # One clock capture for the whole ceremony (cycle 16): the
+    # verifier's freshness check and the record's performed_at
+    # must never straddle an expiry boundary by reading the
+    # clock twice.
+    moment = _now() if now is None else now
     old_seq = old_hash = None
+    old_captured = None
     if old_pin is not None:
-        old_seq, old_hash, _old_captured = _check_pin(old_pin, "old pin")
+        old_seq, old_hash, old_captured = _check_pin(old_pin, "old pin")
         if reason != REASON_CHAIN_GAP_RECOVERY:
             # Gate on state, not label (war-room cycle 15, rev-r2):
             # with a usable pin present, chain_gap_recovery is the
@@ -293,18 +435,16 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
             raise SigningError(
                 "with an existing pin the only ceremony reason is "
                 "chain_gap_recovery")
-        if signed.cycle_seq <= old_seq:
+        relation = _candidate_relation(old_seq, old_hash, signed)
+        if relation in ("backwards", "same", "same_seq_fork"):
             raise SigningError(
                 "re-anchor never moves a pin backwards or replaces "
                 "a pin at the same sequence")
-        if signed.cycle_seq == old_seq + 1 \
-                and signed.prev_snapshot_hash == old_hash \
-                and reason == REASON_CHAIN_GAP_RECOVERY:
+        if relation == "successor":
             raise SigningError(
                 "candidate is the pin's chained successor; use "
                 "advance_pin, not the ceremony")
-        if signed.cycle_seq == old_seq + 1 \
-                and signed.prev_snapshot_hash != old_hash:
+        if relation == "successor_fork":
             # A one-step candidate that does not chain to the pin
             # is a fork/replacement (chain_discontinuity), an
             # integrity failure — never a ceremony trigger
@@ -312,21 +452,49 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
             raise SigningError(
                 "candidate at pin+1 does not chain to the pin; "
                 "that is an integrity failure, not a re-anchor case")
+        if relation == "gap_prev_is_pin":
+            raise SigningError(
+                "candidate claims the pin as its immediate "
+                "predecessor while sitting more than one sequence "
+                "past it; that is an integrity failure, not a "
+                "re-anchor case")
     if reason == REASON_CHAIN_GAP_RECOVERY:
         # The ceremony must be gated on an actual strict
         # verification classified reanchor_required, not invoked
-        # freely (war-room cycle 15, forced-dissent seat).
-        if strict_reasons is None \
-                or classify_verification(strict_reasons) \
-                != "reanchor_required":
-            raise SigningError(
-                "chain_gap_recovery requires a strict verification "
-                "result of exactly ('chain_gap',)")
+        # freely (war-room cycle 15, forced-dissent seat). Cycle
+        # 16: the caller's tuple is no longer trusted on its own —
+        # eligibility is RECOMPUTED here, against the captured pin
+        # and this candidate, through the strict wrapper, and the
+        # supplied tuple must equal the recomputed result exactly.
+        # A forged ("chain_gap",) for a candidate whose real strict
+        # result is anything else (pin_mismatch, expired, …) is
+        # refused, and classify/reanchor can no longer diverge.
         if old_pin is None:
             raise SigningError(
                 "chain_gap_recovery requires an existing pin")
+        if not isinstance(strict_reasons, (list, tuple)) \
+                or not _is_sole_chain_gap(strict_reasons):
+            raise SigningError(
+                "chain_gap_recovery requires a strict verification "
+                "result of exactly ('chain_gap',)")
+        supplied = tuple(strict_reasons)
+        recomputed = verify_snapshot_for_state(
+            signed, signing_key=signing_key, state_bytes=state_bytes,
+            calibration_bytes=calibration_bytes,
+            expected_pin=old_captured,
+            expected_signer_id=expected_signer_id, now=moment)
+        if recomputed != _REANCHOR_REASONS \
+                or supplied != recomputed:
+            raise SigningError(
+                "strict verification recomputed against the pin "
+                f"gives {list(recomputed)}, not exactly "
+                "('chain_gap',); the ceremony is refused")
     elif old_pin is None and reason not in _NO_PIN_REASONS:
         raise SigningError(f"reason {reason} requires an existing pin")
+    if ceremony_history is not None:
+        _check_ceremony_history(
+            ceremony_history, signing_key=signing_key,
+            evidence_hash=evidence_hash, signed=signed)
     # The candidate must pass EVERY attestation binding under the
     # bare verifier (which does not enforce the chain gap). Any
     # failure — integrity or freshness — refuses the ceremony.
@@ -335,12 +503,11 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
         expected_state_bytes=state_bytes,
         expected_calibration_bytes=calibration_bytes,
         require_calibration=True, expected_signer_id=expected_signer_id,
-        now=now)
+        now=moment)
     if reasons != ():
         raise SigningError(
             f"candidate fails attestation bindings: {list(reasons)}")
-    performed_at = _normalise_time(_now() if now is None else now,
-                                    "performed_at")
+    performed_at = _normalise_time(moment, "performed_at")
     _parse_time(performed_at, "performed_at")
     payload = {
         "v": "snapshot-pin-ceremony/1", "alg": ALG,
@@ -365,14 +532,49 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     return _pin_of(signed), record
 
 
-def verify_ceremony_record(record, *, signing_key: SigningKey) -> tuple:
+_CONTEXT_UNSPECIFIED = object()
+
+
+def verify_ceremony_record(record, *, signing_key: SigningKey,
+                           expected_old_pin=_CONTEXT_UNSPECIFIED,
+                           expected_new_pin=_CONTEXT_UNSPECIFIED) -> tuple:
     """Failure reasons for a ceremony audit record; () means the
-    record is exactly the one the key holder issued."""
+    record is exactly the one the key holder issued. Without pin
+    context this proves ISSUANCE only, not applicability to any
+    pin state. Cycle 16: each context argument is independent —
+    omitting it asserts nothing about that side; passing
+    ``expected_old_pin=None`` explicitly asserts the record's
+    old pin is absent; passing a pin dict asserts an exact
+    (sequence, hash) match on that side. A genuine record
+    replayed against a different pin state reports
+    ``pin_context_mismatch`` instead of verifying clean, and a
+    malformed context pin reports that reason rather than
+    raising."""
     if not isinstance(record, PinCeremonyRecord):
         raise SigningError("record must be a PinCeremonyRecord")
     if not isinstance(signing_key, SigningKey):
         raise SigningError("signing_key must be a SigningKey")
     reasons = []
+    if expected_old_pin is not _CONTEXT_UNSPECIFIED \
+            or expected_new_pin is not _CONTEXT_UNSPECIFIED:
+        ctx_ok = True
+        try:
+            if expected_old_pin is None:
+                ctx_ok = record.old_cycle_seq is None
+            elif expected_old_pin is not _CONTEXT_UNSPECIFIED:
+                o_seq, o_hash, _o = _check_pin(expected_old_pin,
+                                               "expected old pin")
+                ctx_ok = (record.old_cycle_seq,
+                          record.old_payload_hash) == (o_seq, o_hash)
+            if ctx_ok and expected_new_pin is not _CONTEXT_UNSPECIFIED:
+                n_seq, n_hash, _n = _check_pin(expected_new_pin,
+                                               "expected new pin")
+                ctx_ok = (record.new_cycle_seq,
+                          record.new_payload_hash) == (n_seq, n_hash)
+        except SigningError:
+            ctx_ok = False
+        if not ctx_ok:
+            reasons.append("pin_context_mismatch")
     if record.key_id != signing_key.key_id:
         reasons.append("unknown_key")
     # Re-validate the ceremony invariants, not only the MAC
@@ -393,6 +595,13 @@ def verify_ceremony_record(record, *, signing_key: SigningKey) -> tuple:
     elif record.old_cycle_seq is not None \
             and record.new_cycle_seq <= record.old_cycle_seq:
         reasons.append("backwards_reanchor")
+    elif record.old_cycle_seq is not None \
+            and record.new_cycle_seq == record.old_cycle_seq + 1:
+        # reanchor_pin can never issue a one-step record (a chained
+        # successor must use advance_pin; an unchained one is an
+        # integrity failure), so a MACed one-step "re-anchor" is
+        # un-issuable and must not verify clean (cycle 16).
+        reasons.append("not_a_gap_reanchor")
     if record.old_cycle_seq is None \
             and record.reason not in _NO_PIN_REASONS:
         reasons.append("invalid_reason")
