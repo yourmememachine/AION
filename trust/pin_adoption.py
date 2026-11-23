@@ -29,12 +29,18 @@ approver key — a third Ed25519 key, distinct from the snapshot
 signing key and the verifier's ceremony seed. This module
 never imports that tool, never sees the approver seed path,
 and contains no route to mint an approval. Independence here
-is at the authorisation-event level — a deliberate separate
-act with its own artefact and key — NOT a claim of a separate
+is at the authorisation-event level: supersession requires a
+separately invoked, cryptographically independent approval
+operation — a standalone tool invocation, with its own
+inputs, producing its own signed artefact under its own
+dedicated key — outside the adopter's automated recovery
+path. The mechanism does not establish that the invocation
+was performed by a human, nor that no other unattended
+automation invoked the tool. It is NOT a claim of a separate
 human or a separate OS user: on this same-user deployment the
 operator and the approver are the same person running a
-second, deliberate command; the guarantee is that supersession
-cannot happen as a side effect of this automated flow.
+second command; the guarantee is that supersession cannot
+happen as a side effect of this automated flow.
 
 Resume (design §6): the refused envelope is retained on the
 pending journal's authorised line. A later attempt for the
@@ -789,9 +795,10 @@ class PinAdopter:
         that entry — it has no access to the verifier's
         journals — so those two fields are written as null:
         the approver completes them from the verifier's
-        consumption journal as part of the deliberate approval
-        act (the approval tool's signing projection refuses
-        nulls, so an uncompleted report cannot be approved by
+        consumption journal as part of the approver's separate
+        approval invocation (the approval tool's signing
+        projection refuses nulls, so an uncompleted report
+        cannot be approved by
         accident), and the verifier re-derives every bound
         fact from its own journals before issuing, so a wrong
         report yields only a refused approval."""

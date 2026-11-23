@@ -296,6 +296,12 @@ never derived from or equal to either other key.
 Independence is at the authorisation-event
 level only — not a claim of a separate human or OS user.
 
+**Operator note (cycle 26).** The approval tool's
+`approve` command requires an interactive typed
+confirmation: type the confirmation code shown in the
+binding summary. A non-interactive invocation refuses,
+and no override flag exists.
+
 **Approver-key rotation and seed loss (cycle 25).** Rotate
 the approver key by generating a new seed with the approval
 tool, updating `AION_SUPERSESSION_APPROVER_PUBLIC_KEY` to

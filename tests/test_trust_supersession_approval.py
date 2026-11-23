@@ -23,10 +23,12 @@ Covered:
 """
 
 import hashlib
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -65,6 +67,21 @@ APPROVER_KEY = _make_approver_key(
 OTHER_KEY = _make_approver_key(
     hashlib.sha256(b"cycle25 approval test other seed").digest())
 APPROVER_PIN = approver_public_key_for(APPROVER_KEY)
+
+class FakeTTY:
+    """A stdin stand-in that reports isatty() -> True and serves
+    readline() from a wrapped StringIO (mirrors
+    tests/test_cycle26_interactive_gate.py)."""
+
+    def __init__(self, text=""):
+        self._buffer = io.StringIO(text)
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return self._buffer.readline()
+
 
 _counter = [0]
 
@@ -390,17 +407,26 @@ class ToolTests(unittest.TestCase):
             self.assertEqual(
                 tool_main(["public-key", "--seed-path",
                            str(seed_path)]), 0)
+            report = self._report(self.env, self.head)
             report_path = Path(tmp) / "pending.json"
             report_path.write_text(
-                __import__("json").dumps(
-                    self._report(self.env, self.head)),
+                __import__("json").dumps(report),
                 encoding="utf-8")
             out_path = Path(tmp) / "approval.json"
-            self.assertEqual(
-                tool_main(["approve", "--seed-path", str(seed_path),
-                           "--approver-id", "approver-1",
-                           "--pending-report", str(report_path),
-                           "--out", str(out_path)]), 0)
+            # Cycle 26: approve requires the interactive gate, so
+            # drive it through a fake TTY serving the confirmation
+            # token — the first 12 chars of the candidate payload
+            # hash in this test's built report.
+            token = report["envelope"]["candidate"][
+                "payload_hash"][:12]
+            with mock.patch.object(
+                    sys, "stdin", FakeTTY(token + "\n")):
+                self.assertEqual(
+                    tool_main(["approve", "--seed-path",
+                               str(seed_path),
+                               "--approver-id", "approver-1",
+                               "--pending-report", str(report_path),
+                               "--out", str(out_path)]), 0)
             artefact = supersession_approval_from_json(
                 out_path.read_text(encoding="utf-8"))
             # The CLI signs on the host clock, so verify on the

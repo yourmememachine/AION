@@ -477,7 +477,7 @@ class PinStoreRestorationTests(ProductionCeremonyFixture):
                 self.home.verifier_home).entries(), [])
         pin, _history = self.read_store()
         self.assertEqual(pin["cycle_seq"], 1)
-        # The approver's deliberate act: complete the pending
+        # The approver's separate approval invocation: complete the pending
         # report's head seq/entry_hash from the verifier's own
         # consumption journal, sign with the real approval
         # tool under the approver key, drop the artefact in
@@ -491,8 +491,8 @@ class PinStoreRestorationTests(ProductionCeremonyFixture):
         # store was rolled back), so its journal holds no
         # unadopted burn to name the head from. The approver
         # completes the whole head block from the verifier's
-        # own consumption journal - the deliberate act's
-        # verification step.
+        # own consumption journal - the separate approval
+        # invocation's verification step.
         self.assertIsNone(report["head"]["authorisation_id"])
         report["head"] = {
             "authorisation_id": head["authorisation_id"],

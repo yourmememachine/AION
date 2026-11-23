@@ -433,3 +433,63 @@ approval path in the same attempt or re-pends, never burns;
 and a consume the verifier certifies as already-consumed is
 journaled `consumed` adopter-side, releasing the movement to
 the ordinary `burned_unadopted` recovery.
+
+## Addendum 6 — cycle 26: claim narrowed to the enforced property
+
+*(Cycle 26, resolving seat-gpt's cycle-25 FIX 0.91 in
+internal/CROSS-CHECK-19.md — claim wording only; every
+mechanism component was SHIP. Option A: narrow the claim.)*
+
+Addendum 5's "deliberate separate act" phrasing (and the
+related "human-paced act" phrasing for the approval TTL) is
+SUPERSEDED as claim wording. The cycle-25 mechanism is
+unchanged; what changes is only what may be claimed for it.
+The word "deliberate" overstated the enforcement: the
+mechanism proves a separately invoked, cryptographically
+independent approval operation outside the adopter's
+automated recovery path, and it cannot prove that no other
+unattended automation invokes the approval tool, nor —
+even with cycle 26's interactive gate — that the invocation
+was an act of human deliberation.
+
+**The canonical claim, verbatim, as of cycle 26:**
+
+Supersession requires a separately invoked, cryptographically independent approval operation — a standalone tool invocation, with its own inputs, producing its own signed artefact under its own dedicated key — outside the adopter's automated recovery path. The mechanism does not establish that the invocation was performed by a human, nor that no other unattended automation invoked the tool.
+
+Every claim site in the tree — exactly the files pinned by
+the banned-phrase scan in
+`tests/test_cycle26_claim_pin.py`:
+`trust/supersession_approval.py`,
+`trust/supersession_approval_tool.py`,
+`trust/pin_adoption.py`,
+`deploy/verifier-identity/README.md`,
+`internal/cycle25-work/design-approval.md`,
+`signing/pin_ceremony.py` and `trust/runner.py` — is
+narrowed to this sentence in substance in cycle 26.
+
+**Interactive gate addition (cycle 26, Option B in
+addition).** The approval tool's `approve` command now
+requires an interactive typed confirmation; no
+non-interactive override exists. This deviates from
+CROSS-CHECK-19's reconciliation, which had contemplated a
+documented override: the war room voted 6/6 against an
+override, none was built, and if one is ever added its
+existence will be disclosed in the claim before it ships.
+This is a friction and accident-resistance property of the
+invocation, not a proof of human deliberation: a TTY can be
+scripted via a pty, so the claim above is not upgraded by
+the gate, and the gate is not described anywhere as
+establishing that a human performed the invocation.
+
+**Claim pin.** The narrowed wording is pinned by
+`tests/test_cycle26_claim_pin.py`: it asserts the
+over-claim phrases ("deliberate separate act", "deliberate
+act", "human-paced act", "deliberate tool invocation",
+"deliberate approval act", "deliberate, separate approval
+act", "make the *act* deliberate", "deliberate
+transcription", "human-paced") do not appear in the
+supersession-claim source files,
+and that this addendum exists and carries the canonical
+narrowing. Earlier addenda in this file are history and
+legitimately quote the superseded phrasing; they are not
+rewritten.

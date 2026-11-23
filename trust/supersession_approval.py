@@ -31,16 +31,26 @@ what makes the authorisation separate:
   it was refused against).
 
 Trust claim, stated precisely (design:
-internal/cycle25-work/design-approval.md section 1):
-independence here is at the AUTHORISATION-EVENT level — a
-deliberate separate act with its own artefact and key — NOT a
-claim of a separate human or a separate OS user. On the
-same-user deployment the operator and the approver are the
-same person running a second command. The guarantee is that
-supersession cannot happen as a side effect of an automated
-recovery flow; a fully malicious same-user process remains
-outside the claim, exactly as in trust/verifier_main.py's
-honesty statement.
+internal/cycle25-work/design-approval.md section 1, as
+narrowed in cycle 26 — see
+internal/DECISION-CONSUMPTION-HEAD.md Addendum 6):
+supersession requires a separately invoked,
+cryptographically independent approval operation — a
+standalone tool invocation, with its own inputs, producing
+its own signed artefact under its own dedicated key —
+outside the adopter's automated recovery path. The
+mechanism does not establish that the invocation was
+performed by a human, nor that no other unattended
+automation invoked the tool. The approval tool's approve
+command requires an interactive typed confirmation; no
+non-interactive override exists. It is NOT a claim of a
+separate human or a
+separate OS user. On the same-user deployment the operator
+and the approver are the same person running a second
+command. The guarantee is that supersession cannot happen
+as a side effect of an automated recovery flow; a fully
+malicious same-user process remains outside the claim,
+exactly as in trust/verifier_main.py's honesty statement.
 
 Construction mirrors signing/ceremony_authorisation.py: an
 allowlisted payload projection, canonical JSON, a payload
@@ -98,9 +108,10 @@ PURPOSE_SUPERSESSION_APPROVAL = "pin-ceremony-supersession-approval"
 REFUSAL_CODE_SUPERSESSION_REQUIRED = "ceremony_supersede_required"
 
 APPROVAL_TTL_DEFAULT_SECONDS = 900
-# Deliberate deviation from the ceremony envelope's 900 s hard
-# cap (design section 6): an approval is a human-paced act —
-# report, deliberate tool invocation, adopter re-run — and the
+# Documented deviation from the ceremony envelope's 900 s hard
+# cap (design section 6): an approval is a separately
+# invoked operation — report, separate tool
+# invocation, adopter re-run — and the
 # exposure from the longer window is bounded by single-use,
 # full binding, and head staleness (any head movement after the
 # refusal invalidates the approval's failed-attempt binding).

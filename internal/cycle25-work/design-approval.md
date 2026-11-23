@@ -1,5 +1,20 @@
 # Cycle 25 — Design A (Seat A): Independent supersession authorisation
 
+> **Cycle 26 claim-narrowing note.** This design record's
+> over-claim phrasing (including §1's claim block and
+> §6's pacing line, fixed in place below, and §§2, 3
+> and 7, also narrowed in place in the cycle-26 fix
+> round) is superseded as claim wording by the canonical
+> cycle-26 sentence — the mechanism described here is unchanged:
+>
+> "Supersession requires a separately invoked, cryptographically independent approval operation — a standalone tool invocation, with its own inputs, producing its own signed artefact under its own dedicated key — outside the adopter's automated recovery path. The mechanism does not establish that the invocation was performed by a human, nor that no other unattended automation invoked the tool."
+>
+> Cycle 26 also adds an interactive confirmation gate to
+> the approval tool's `approve` command (typed confirmation
+> required; no non-interactive override exists); that gate
+> does not prove human deliberation either. See
+> `internal/DECISION-CONSUMPTION-HEAD.md` Addendum 6.
+
 **Mandate:** `internal/CROSS-CHECK-18.md` — seat-gpt FIX on Q1, the
 sole remaining blocker for cycles 14–16. Cycle 24 built a
 separately *signed/journaled* supersession decision, but
@@ -50,16 +65,20 @@ build against).
 >
 > **What is NOT claimed:** the approver is not a separate human
 > and not a separate OS user. On this same-user VM the operator
-> and the approver are the same person running a second,
-> deliberate command. The guarantee is that supersession cannot
-> happen as a *side effect* of an automated recovery flow: it
-> requires a distinct, signed, single-use, expiring artefact
-> created by an act that no running service performs on its own
-> behalf. A fully malicious same-user process remains outside
-> the prototype's claim, exactly as in `trust/verifier_main.py`'s
-> honesty statement — such a process could read the approver
-> seed file directly; the control is that no *code path* short
-> of that deliberate act mints an approval.
+> and the approver are the same person running a second command,
+> via a separately invoked approval operation. The guarantee is
+> that supersession cannot happen as a *side effect* of an
+> automated recovery flow: it requires a distinct, signed,
+> single-use, expiring artefact created by an operation that no
+> running service performs on its own behalf. A fully malicious
+> same-user process remains outside the prototype's claim,
+> exactly as in `trust/verifier_main.py`'s honesty statement —
+> such a process could read the approver seed file directly; the
+> control is that no *code path* short of that separately
+> invoked approval operation mints an approval. (Cycle 26: the
+> mechanism does not establish that the invocation was performed
+> by a human, nor that no other unattended automation invoked
+> the tool — see the claim-narrowing note at the top.)
 
 Every doc seat B/C touches (mode docstring, adopter docstring,
 decision addendum) must carry this claim in substance and must
@@ -79,7 +98,7 @@ becomes three-stage: (1) the adopter's consume attempt refuses
 pre-commit with `ceremony_supersede_required`; the adopter
 **stops**, writes a *pending-supersession report* (§7) and
 surfaces it — it does not call `ceremony_supersede`; (2) the
-operator, as a deliberate separate act, runs the approval tool
+operator, via a separate approval invocation, runs the approval tool
 against the pending report; the tool signs an approval artefact
 into the adopter's approval inbox (§6); (3) on its next run the
 adopter finds the approval in its inbox and presents it —
@@ -112,7 +131,7 @@ approve       --seed-path <abs path> --approver-id <id>
   the binding projection **from the report's fields**, signs,
   and writes the approval artefact JSON to `--out` with mode
   0600, refusing to overwrite an existing file (a second
-  approval for the same report is a new deliberate act: delete
+  approval for the same report is a new separate approval invocation: delete
   or use a new `--out` name; the verifier's single-use rule
   makes a stale duplicate inert anyway).
 - The tool performs **no network, verifier or journal access**.
@@ -120,7 +139,7 @@ approve       --seed-path <abs path> --approver-id <id>
   need to: the verifier re-derives every bound fact from its
   own journals (§8), so a fabricated or stale report yields an
   approval that simply does not match and is refused. The
-  tool's job is to make the *act* deliberate and signed, not to
+  tool's job is to make the approval a separate, signed operation, not to
   be a second verifier.
 - The tool refuses (exit 2, `SigningError` text on stderr): a
   seed in `REFUSED_TEST_SEEDS` (imported from
@@ -362,9 +381,10 @@ into the single shape code.
   recorded" is discharged by this journal record plus the
   existing anchored signing-ledger mirror of the decision.
 - **Expiry:** `approved_at`/`expires_at` in the projection;
-  TTL default 900 s, hard cap 3600 s (the one deliberate
+  TTL default 900 s, hard cap 3600 s (the one documented
   deviation from the ceremony envelope's 900 s cap: an approval
-  is a human-paced act — report, deliberate invocation, adopter
+  is a separately invoked operation — report, separate tool
+  invocation, adopter
   re-run — and 900 s would make the honest path racy; the
   exposure is bounded by single-use + full binding + head
   staleness, §5.2(d)). Effective window, stated honestly
@@ -414,15 +434,15 @@ verifier's re-derivation (§8) is what makes a wrong report
 harmless. The report is also the operator's human-readable
 surface: it names the envelope, the head movement to be
 abandoned and the candidate to be favoured — the three things
-the deliberate act is *about* — before any signature exists.
+the separate approval invocation is *about* — before any signature exists.
 
 Completion step, disclosed precisely (cycle-25 fix round,
 r6): the adopter cannot know the verifier journal's `seq` /
 `entry_hash` for the head entry, so the report it writes
 carries those two `head` fields as null. The approver
 completes them by copying them from the verifier's
-consumption journal — a deliberate transcription step inside
-the approval act itself (the tool performs no journal access
+consumption journal — a transcription step inside
+the separate approval invocation itself (the tool performs no journal access
 by design, so the approver is the data bus for exactly these
 two fields). A wrong transcription is inert, never a
 misapproval: the approval tool's signing projection refuses

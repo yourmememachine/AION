@@ -3,8 +3,8 @@
 This module is the ONLY place in the repo that signs a
 supersession approval (trust/supersession_approval.py carries
 the verify-side primitives and deliberately no signing path).
-It is a standalone CLI, invoked deliberately by the operator
-as a separate act:
+It is a standalone CLI, invoked as a separate operation
+outside the adopter's automated recovery path:
 
     python -m trust.supersession_approval_tool generate-key \
         --seed-path /path/to/approver.seed
@@ -55,8 +55,29 @@ test seed, or a TTL outside [60, 3600].
 
 Trust claim (verbatim in substance from the design): the
 independence this creates is at the authorisation-event
-level — a deliberate separate act with its own artefact and
-key — NOT a claim of a separate human or separate OS user.
+level — a separately invoked, cryptographically independent
+approval operation outside the adopter's automated recovery
+path, with its own artefact and key — NOT a claim of
+enforced human deliberation, a separate human, or a separate
+OS user.
+
+Cycle 26: approve requires an interactive typed
+confirmation; no non-interactive override exists. Before
+anything is signed or written, approve requires that
+confirmation: stdin must be a TTY, a binding summary of the
+pending report (the abandoned movement, the replacement
+candidate, and the failed attempt) is printed, and the
+operator must type the first 12 hex characters of the
+candidate payload hash exactly. A non-interactive invocation
+(piped, redirected, or otherwise not a TTY), a wrong token,
+or EOF refuses and mints nothing. There is deliberately no
+non-interactive override flag — no non-interactive override
+exists — and if one is ever added its existence must be
+disclosed in this claim. The interactive gate is a property
+of the CLI main() approve path only; this module's
+in-process signing functions (build_approval_for_report /
+sign_supersession_approval) are deliberately ungated, since
+the security boundary is approver-seed custody.
 """
 
 from __future__ import annotations
@@ -399,6 +420,103 @@ def build_approval_for_report(
         now=now)
 
 
+# -- interactive confirmation gate (cycle 26) ---------------------------------
+
+_CONFIRMATION_TOKEN_CHARS = 12
+
+
+def _short_id(value) -> str:
+    """Short form of a hex authorisation id for the binding
+    summary: the first 12 characters."""
+    if not isinstance(value, str) or len(value) < 12:
+        raise SigningError(
+            "pending report is malformed: an authorisation id "
+            "needed for the confirmation summary is missing or "
+            "not a string")
+    return value[:12]
+
+
+def _confirmation_summary(report) -> tuple[str, str]:
+    """Build the binding summary for the interactive gate from
+    the pending report dict, and return (summary_text,
+    confirmation_token). Defensive extraction only: any
+    missing or ill-typed field the summary needs raises
+    SigningError, so a malformed report refuses here (or at
+    build_approval_for_report) before anything is signed."""
+    if not isinstance(report, dict):
+        raise SigningError(
+            "pending report is malformed: not an object; cannot "
+            "build the confirmation summary")
+    try:
+        head = report["head"]
+        envelope = report["envelope"]
+        candidate = envelope["candidate"]
+        old_cycle_seq = head["old_cycle_seq"]
+        new_cycle_seq = head["new_cycle_seq"]
+        head_authorisation_id = head["authorisation_id"]
+        candidate_cycle_seq = candidate["cycle_seq"]
+        candidate_payload_hash = candidate["payload_hash"]
+        attempted_authorisation_id = envelope["authorisation_id"]
+        refusal_code = report["refusal_code"]
+    except (KeyError, TypeError) as exc:
+        raise SigningError(
+            "pending report is malformed: a field needed for "
+            "the confirmation summary is missing") from exc
+    if not isinstance(candidate_payload_hash, str) \
+            or len(candidate_payload_hash) \
+            < _CONFIRMATION_TOKEN_CHARS:
+        raise SigningError(
+            "pending report is malformed: the candidate payload "
+            "hash needed for the confirmation summary is missing "
+            "or not a string")
+    token = candidate_payload_hash[:_CONFIRMATION_TOKEN_CHARS]
+    summary = (
+        "Supersession approval — interactive confirmation "
+        "required.\n"
+        f"Abandoned movement: cycle {old_cycle_seq} -> "
+        f"{new_cycle_seq} "
+        f"(authorisation {_short_id(head_authorisation_id)}…)\n"
+        f"Replacement candidate: cycle {candidate_cycle_seq}, "
+        f"payload hash {candidate_payload_hash}\n"
+        f"Failed attempt: authorisation "
+        f"{_short_id(attempted_authorisation_id)}…, "
+        f"refusal code {refusal_code}\n"
+        f"Confirmation code (first "
+        f"{_CONFIRMATION_TOKEN_CHARS} hex characters of the "
+        f"candidate payload hash): {token}")
+    return summary, token
+
+
+def _require_interactive_confirmation(report, *, stream=None) -> None:
+    """Cycle 26 gate on `approve`: refuse unless an operator
+    at a TTY confirms the binding summary by typing the
+    confirmation token exactly.
+
+    `stream` defaults to sys.stdin resolved AT CALL TIME (not
+    import time) so tests can substitute a fake TTY. Raises
+    SigningError — minting and writing nothing — when stdin
+    is not a TTY, when the typed line is empty/EOF, or when it
+    does not match the token."""
+    if stream is None:
+        stream = sys.stdin
+    summary, token = _confirmation_summary(report)
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty) or not isatty():
+        raise SigningError(
+            "approve requires an interactive confirmation: "
+            "stdin is not a TTY; refusing to sign "
+            "non-interactively")
+    print(summary)
+    print("Type the confirmation code exactly to approve: ",
+          end="", flush=True)
+    line = stream.readline()
+    if not line or line.strip() != token:
+        raise SigningError(
+            "interactive confirmation failed: the typed "
+            "confirmation code does not match; refusing to sign")
+    print("Confirmation accepted.")
+
+
 # -- CLI ------------------------------------------------------------------------
 
 
@@ -414,8 +532,12 @@ def _seed_path(args) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="supersession_approval_tool",
-        description="Mint supersession approvals (cycle 25) as a "
-                    "deliberate, separate approval act.")
+        description="Mint supersession approvals (cycle 25) via "
+                    "a separately invoked, cryptographically "
+                    "independent approval operation outside the "
+                    "adopter's automated recovery path; approve "
+                    "requires an interactive typed confirmation; "
+                    "no non-interactive override exists.")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("generate-key", "public-key", "approve"):
         p = sub.add_parser(name)
@@ -444,6 +566,16 @@ def main(argv=None) -> int:
         except (OSError, ValueError) as exc:
             raise SigningError(
                 f"pending report is unreadable: {exc}") from exc
+        # Cycle 26: the interactive confirmation gate runs
+        # BEFORE any signing or output file creation, so an
+        # interrupt at the prompt mints nothing.
+        try:
+            _require_interactive_confirmation(report)
+        except KeyboardInterrupt:
+            print("supersession_approval_tool: interactive "
+                  "confirmation interrupted; refusing to sign",
+                  file=sys.stderr)
+            return 2
         approval = build_approval_for_report(
             approver_key=key, approver_id=args.approver_id,
             report=report, ttl_seconds=args.ttl_seconds)

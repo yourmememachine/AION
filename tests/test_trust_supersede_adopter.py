@@ -19,7 +19,7 @@ internal/cycle25-work/design-approval.md):
   3. a later attempt with still no inbox approval raises
      pending again WITHOUT a new ceremony (no authorise, no
      consume), so the retained envelope stays approvable;
-  4. the approver's deliberate act (in these tests: the real
+  4. the approver's separate approval invocation (in these tests: the real
      approval tool's signing function in-process, per design
      criterion (v)) completes the report's head seq/entry_hash
      from the verifier's consumption journal, signs an
@@ -259,7 +259,7 @@ class SupersedeAdopterTests(CrashFixture):
         return adopter, cm.exception, head_at_decision
 
     def mint_approval_into_inbox(self, adopter):
-        """The approver's deliberate act (design criterion
+        """The approver's separate approval invocation (design criterion
         (v): the REAL tool signing function in-process):
         complete the pending report's head seq/entry_hash
         from the verifier's own consumption journal, sign the
