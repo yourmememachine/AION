@@ -94,6 +94,13 @@ ALLOWLIST = {
            "commit_signed"),
     ("trust/shipcheck.py", "run_one_cycle"): (
         1, "THE sanctioned ship path"),
+    ("trust/pin_adoption.py", "run_one_cycle"): (
+        1, "cycle 22: the pin adopter's loop driver "
+           "(run_one_cycle_and_pin) runs one CoreLoop cycle and "
+           "then pins the resulting snapshot through the "
+           "production-wired adopter; it constructs no client or "
+           "store itself — the client comes only from "
+           "trust.wiring.production_client"),
     ("trust/wiring.py", "verifier_client_ctor"): (
         1, "THE sanctioned production construction site "
            "(production signed-path wiring): production_client "

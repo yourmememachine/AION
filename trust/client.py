@@ -471,7 +471,11 @@ class VerifierClient:
         list, ceremony_seed_unconfigured,
         ceremony_evidence_unconfigured, unlisted operator,
         replay, evidence reuse, ceremony_evidence_unresolvable,
-        ceremony_evidence_too_large) surface as
+        ceremony_evidence_too_large, and — for reason
+        burned_unadopted only, cycle 22 — the state refusal
+        ceremony_recovery_unproven, raised when no recorded
+        consumption at the consumption journal's head proves
+        the recovery) surface as
         VerifierConfigError; exit-2 malformed requests
         (including ceremony_evidence_hash_mismatch) as
         VerifierProtocolError — via _run, as with every mode."""

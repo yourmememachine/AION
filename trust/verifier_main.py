@@ -171,6 +171,31 @@ silently ignored field:
                             back budget store into a fresh pin —
                             recovery of a non-genesis store goes
                             through an audited path only
+  AION_CEREMONY_CONSUMPTION_ANCHOR_PATH
+                            optional: external anchor file for
+                            the ceremony consumption journal
+                            (kind "ceremony-consumption", cycle
+                            22); must live OUTSIDE
+                            AION_VERIFIER_HOME and be distinct
+                            from the signing and budgets anchor
+                            paths. When set, startup verifies the
+                            anchor on every invocation and every
+                            consumption advances it BEFORE the
+                            signing-ledger mirror write.
+                            Production mode with the ceremony
+                            seed configured REQUIRES the path and
+                            refuses the INIT flag below; research
+                            mode with the path unconfigured makes
+                            NO rollback claim for consumptions.
+  AION_CEREMONY_CONSUMPTION_ANCHOR_INIT
+                            optional: "1" allows ONE bootstrap
+                            invocation to create the consumption
+                            anchor for an EMPTY consumption
+                            journal; a non-empty journal with a
+                            missing anchor is NOT silently blessed
+                            (anchor_refused) — recovery is the
+                            audited force_reanchor path, exactly
+                            as for signing
   AION_VERIFIER_HOME        REQUIRED: signing-ledger directory;
                             the service refuses to run without it
 
@@ -227,8 +252,10 @@ OPERATOR RECOVERY from a post-commit ledger failure: the
 envelope was returned — retry the ceremony under a NEW
 ceremony_id with a NEW evidence bundle (a re-issued evidence
 artefact, hence a new hash); there is no idempotent re-issue.
-The ceremony journal is NOT externally anchored (follow-up:
-ceremony-journal-anchoring): its evidence-reuse guarantee is
+The ceremony ISSUANCE journal is NOT externally anchored
+(follow-up: ceremony-journal-anchoring, narrowed in cycle
+22 to this issuance journal only — the consumption journal
+is separately anchored, see above): its evidence-reuse guarantee is
 prevented against an intact journal; after a journal rollback,
 only same-ceremony_id reuse leaves a detectable trace in the
 anchored signing ledger — evidence reuse under a NEW
@@ -270,6 +297,8 @@ from signing import ed25519 as _ed25519
 from signing.ceremony_authorisation import (
     CEREMONY_AUTHORISATION_TTL_MAX_SECONDS,
     REASONS as _CEREMONY_REASONS,
+    REASON_BURNED_UNADOPTED as _CEREMONY_REASON_BURNED_UNADOPTED,
+    _EITHER_PIN_REASONS as _CEREMONY_EITHER_PIN_REASONS,
     _NO_PIN_REASONS as _CEREMONY_NO_PIN_REASONS,
     REFUSED_TEST_SEEDS as _REFUSED_TEST_SEEDS,
     ceremony_authorisation_envelope_from_dict,
@@ -371,6 +400,8 @@ class _Config:
                  identity_budget=DEFAULT_PER_IDENTITY_CAP,
                  anchor_path=None, anchor_init=False,
                  budgets_anchor_path=None, budgets_anchor_init=False,
+                 ceremony_consumption_anchor_path=None,
+                 ceremony_consumption_anchor_init=False,
                  ceremony_operators=(), ceremony_evidence_dir=None,
                  ceremony_signing_key=None, *, deployment_mode):
         self.signing_key = signing_key
@@ -386,6 +417,10 @@ class _Config:
         self.anchor_init = anchor_init
         self.budgets_anchor_path = budgets_anchor_path
         self.budgets_anchor_init = budgets_anchor_init
+        self.ceremony_consumption_anchor_path = \
+            ceremony_consumption_anchor_path
+        self.ceremony_consumption_anchor_init = \
+            ceremony_consumption_anchor_init
         self.ceremony_operators = tuple(ceremony_operators)
         # Resolved evidence root (Path) or None; resolved ONCE
         # in _load_config (cycle 20, R5(b)).
@@ -776,6 +811,105 @@ def _load_config() -> _Config:
                 "anchor_missing_established_budgets"
                 if budgets_head != GENESIS_CHAIN_HASH
                 else "anchor_missing")
+    ceremony_consumption_anchor_path = env.get(
+        "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH", "")
+    consumption_init_raw = env.get(
+        "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT", "")
+    if consumption_init_raw not in ("", "0", "1"):
+        raise _config(
+            "verifier_misconfigured",
+            "bad AION_CEREMONY_CONSUMPTION_ANCHOR_INIT")
+    ceremony_consumption_anchor_init = consumption_init_raw == "1"
+    if deployment_mode == "production" and ceremony_seed_raw:
+        # Production + ceremony seed configured: the consumption
+        # journal's anchor is REQUIRED at startup and its INIT
+        # flag is refused (mirroring AION_ANCHOR_PATH's
+        # production discipline, cycle 22 R2).
+        if not ceremony_consumption_anchor_path:
+            raise _config(
+                "verifier_misconfigured",
+                "production mode with the ceremony seed "
+                "configured requires "
+                "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH")
+        if ceremony_consumption_anchor_init:
+            raise _config(
+                "verifier_misconfigured",
+                "production mode refuses "
+                "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT; anchor "
+                "ceremonies run outside production")
+    if ceremony_consumption_anchor_path and not Path(
+            ceremony_consumption_anchor_path).is_absolute():
+        raise _config(
+            "verifier_misconfigured",
+            "the ceremony consumption anchor path must be "
+            "absolute")
+    if ceremony_consumption_anchor_init \
+            and not ceremony_consumption_anchor_path:
+        raise _config(
+            "verifier_misconfigured",
+            "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT requires "
+            "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH")
+    if ceremony_consumption_anchor_path:
+        # Placement + distinctness (budgets-style): the anchor
+        # must live outside the verifier home and must not be
+        # either of the other two anchor files — one file
+        # cannot anchor two journals.
+        home_resolved = Path(home).resolve()
+        consumption_anchor_resolved = Path(
+            ceremony_consumption_anchor_path).resolve()
+        if consumption_anchor_resolved == home_resolved \
+                or home_resolved in consumption_anchor_resolved.parents:
+            raise _config(
+                "verifier_misconfigured",
+                "the ceremony consumption anchor must live "
+                "outside the verifier home")
+        for other_name, other_path in (
+                ("AION_ANCHOR_PATH", anchor_path),
+                ("AION_BUDGETS_ANCHOR_PATH", budgets_anchor_path)):
+            if other_path and consumption_anchor_resolved \
+                    == Path(other_path).resolve():
+                raise _config(
+                    "verifier_misconfigured",
+                    "the ceremony consumption anchor path must "
+                    f"be distinct from {other_name}")
+        # Startup anchor verification (per request — this
+        # process is one-per-request, so this runs before
+        # EVERY mode): a consumption journal whose external
+        # anchor is missing on an established journal, ahead
+        # of the journal, or names no prefix refuses startup.
+        try:
+            consumption_ledger = CeremonyConsumptionLedger(home)
+        except Exception:
+            raise _config(
+                "ledger_failed",
+                "the ceremony consumption journal could not be "
+                "opened for anchor verification")
+        try:
+            consumption_reasons = verify_anchor(
+                consumption_ledger,
+                ceremony_consumption_anchor_path,
+                kind="ceremony-consumption")
+        except AnchorError:
+            raise _config(
+                "anchor_refused",
+                "the ceremony consumption anchor path is invalid "
+                "for this journal")
+        if consumption_reasons == ("anchor_missing",) \
+                and ceremony_consumption_anchor_init:
+            try:
+                initialise_anchor(
+                    consumption_ledger,
+                    ceremony_consumption_anchor_path,
+                    kind="ceremony-consumption",
+                    recorded_at=_now())
+            except AnchorError:
+                raise _config(
+                    "anchor_refused",
+                    "ceremony consumption anchor bootstrap failed")
+            consumption_reasons = ()
+        if consumption_reasons:
+            raise _config("anchor_refused",
+                          ",".join(consumption_reasons))
     return _Config(signing_key, signer_id, actor, registry_dir, ttl,
                    purpose, home,
                    proposal_budget=proposal_budget,
@@ -784,6 +918,10 @@ def _load_config() -> _Config:
                    anchor_init=anchor_init,
                    budgets_anchor_path=budgets_anchor_path or None,
                    budgets_anchor_init=budgets_anchor_init,
+                   ceremony_consumption_anchor_path=(
+                       ceremony_consumption_anchor_path or None),
+                   ceremony_consumption_anchor_init=(
+                       ceremony_consumption_anchor_init),
                    ceremony_operators=ceremony_operators,
                    ceremony_evidence_dir=ceremony_evidence_dir,
                    ceremony_signing_key=ceremony_signing_key,
@@ -805,6 +943,30 @@ def _update_anchor(config: _Config) -> None:
             "ledger_failed",
             "the signature was ledgered but its anchor update "
             "failed; refusing to return it")
+
+
+def _update_ceremony_consumption_anchor(config: _Config) -> None:
+    """Advance the ceremony consumption journal's external
+    anchor after a consumption append (cycle 22, R2). A no-op
+    when the anchor is unconfigured (research mode — no
+    rollback claim is made there). A failed update is
+    ledger_failed: the burn stands in the journal, and the
+    verifier says so rather than returning a success whose
+    rollback protection was never pinned."""
+    if not config.ceremony_consumption_anchor_path:
+        return
+    try:
+        update_anchor(
+            CeremonyConsumptionLedger(config.home),
+            config.ceremony_consumption_anchor_path,
+            kind="ceremony-consumption", recorded_at=_now())
+    except AnchorError:
+        raise _config(
+            "ledger_failed",
+            "the consumption was committed in the consumption "
+            "journal but its anchor update failed; the "
+            "authorisation stays burned and no success is "
+            "returned — recovery is a new ceremony")
 
 
 def _read_budgets_anchor(path):
@@ -2110,7 +2272,11 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
     amplification); (4) evidence resolution: fd-walk below the
     resolved root, verifier-computed SHA-256, the supplied
     evidence_hash cross-checked against it; (5) anti-replay
-    scan keyed on ceremony_id and the COMPUTED hash; (6) sign
+    scan keyed on ceremony_id and the COMPUTED hash; (5b) for
+    reason burned_unadopted ONLY, the burn proof against the
+    consumption journal's head entry (cycle 22, WS1 — one
+    refusal code, ceremony_recovery_unproven, for every
+    predicate failure); (6) sign
     with the CeremonySigningKey (TTL min(config, 900));
     (7) retention write of the hashed bytes under the
     authorisation id; (8) ceremony-journal append — the
@@ -2255,15 +2421,22 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
                          "candidate is ill-formed")
     # Reason/pin coherence (the payload projection re-checks this
     # at signing time — defence in depth, as in attestation).
-    if old_pin is None and reason not in _CEREMONY_NO_PIN_REASONS:
+    # Ternary rule (cycle 22, WS1): no-pin reasons require no
+    # pin; chain_gap_recovery requires a pin; burned_unadopted
+    # (in _CEREMONY_EITHER_PIN_REASONS) is coherent with either
+    # shape — whichever pin shape it carries must EXACTLY equal
+    # the burned entry's old pin, proven at step (5b) below.
+    if old_pin is None and reason not in (
+            _CEREMONY_NO_PIN_REASONS | _CEREMONY_EITHER_PIN_REASONS):
         raise _malformed(
             "malformed_request",
             "a no-pin ceremony requires a no-pin reason")
-    if old_pin is not None and reason != "chain_gap_recovery":
+    if old_pin is not None and reason not in (
+            {"chain_gap_recovery"} | _CEREMONY_EITHER_PIN_REASONS):
         raise _malformed(
             "malformed_request",
             "a ceremony carrying an old pin requires reason "
-            "chain_gap_recovery")
+            "chain_gap_recovery or burned_unadopted")
     if old_pin is not None \
             and candidate["cycle_seq"] < old_pin["cycle_seq"] + 2:
         raise _malformed(
@@ -2340,6 +2513,36 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
                 "this evidence_hash was already authorised for "
                 "another ceremony; evidence is single-use per "
                 "event at issuance")
+    # (5b) Burn proof for burned_unadopted recoveries ONLY
+    # (cycle 22, WS1): the recovery's candidate and old pin
+    # must exactly equal the consumption journal's HEAD
+    # entry's recorded target and old pin, and the recovery
+    # ceremony must not be the burned ceremony itself. This
+    # runs only for reason == burned_unadopted — ordinary
+    # issuance gains no new failure dependency on the
+    # consumption journal. The journal read here runs AFTER
+    # _load_config's per-request anchor verification of that
+    # journal (when its anchor is configured), which is what
+    # makes the read trustworthy. ONE refusal code for every
+    # predicate failure, with no sub-case detail: distinguishing
+    # "no burn", "burn for a different target" and "old-pin
+    # mismatch" would hand a presenter a journal-state oracle.
+    if reason == _CEREMONY_REASON_BURNED_UNADOPTED:
+        try:
+            consumption_entries = CeremonyConsumptionLedger(
+                config.home).entries()
+        except Exception:
+            raise _config(
+                "ledger_failed",
+                "the consumption journal could not be read; "
+                "refusing to authorise a recovery without it")
+        burn = CeremonyConsumptionLedger.match_head_burn(
+            consumption_entries, candidate=candidate,
+            old_pin=old_pin)
+        if burn is None or burn["ceremony_id"] == ceremony_id:
+            raise _config(
+                "ceremony_recovery_unproven",
+                "no recorded consumption proves this recovery")
     # (6) Sign with the ceremony seed, with the ceremony TTL
     # hard cap applied over the configured verifier TTL. The
     # COMPUTED hash is signed, never the body value.
@@ -2409,6 +2612,16 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     is a new ceremony (new ceremony_id, new evidence), never an
     un-consume.
 
+    Rollback claim (cycle 22, R2, replacing cycle 21's R10
+    residual): with the consumption anchor configured, a burn
+    whose anchor update completed survives a verifier-home
+    rollback (detected at startup, anchor_refused); the
+    append→anchor-update window (burn in journal, anchor at
+    pre-burn prefix) is protected against an intact home but
+    NOT against a full rollback inside that window — the same
+    window every anchored append in this system carries;
+    research mode / anchor unconfigured: no rollback claim.
+
     The head enforced here is a CEREMONY head — it sees
     consumptions only; advance_pin movements never pass through
     the verifier, so a pin advanced outside ceremonies is
@@ -2423,12 +2636,20 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     plus a new evidence artefact; the client never retries a
     consume automatically.
 
-    Commit order: (1) consumption-journal append — THE commit
-    point; (2) signing-ledger mirror (kind "consume",
-    format "ceremony-consumption"); (3) anchor update. A mirror
-    failure after the commit is ledger_failed and the envelope
-    stays burned, with no success response. The shared
-    directory flock serialises the three steps against the
+    Commit order (cycle 22, R2): (1) consumption-journal
+    append — THE commit point; (2) consumption-anchor update
+    (_update_ceremony_consumption_anchor — a no-op when the
+    anchor is unconfigured; AnchorError is ledger_failed and
+    the burn stands); (3) signing-ledger mirror (kind
+    "consume", format "ceremony-consumption"); (4) signing
+    anchor update. The consumption anchor advances BEFORE the
+    mirror write, so a mirror failure followed by a
+    verifier-home rollback leaves the consumption anchor
+    ahead of the rolled-back journal and the replay is
+    refused at startup (anchor_refused). A mirror failure
+    after the commit is ledger_failed and the envelope stays
+    burned, with no success response. The shared
+    directory flock serialises the steps against the
     other verifier-home journals but is NOT cross-ledger
     atomicity: a concurrent ceremony_authorise may interleave
     between the steps, which is benign (the journals are
@@ -2441,10 +2662,24 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     strict body key set, exactly {"signed_authorisation"};
     (3) envelope parse; (4) verifier-side signature
     verification + expiry under the public key derived from
-    the configured ceremony seed — ONE failure code
-    (ceremony_authorisation_invalid) for all non-temporal
-    failures, so there is no per-reason forger oracle, and
-    ceremony_authorisation_expired for expiry; (5)
+    the configured ceremony seed. One refusal code,
+    ceremony_authorisation_invalid, for all verification-
+    failure classes — signature, signer, payload structure
+    and binding failures returned by
+    verify_ceremony_authorisation — with byte-identical
+    stdout and stderr across those classes: within
+    verification failure there is no per-reason forger
+    oracle. The no-oracle claim covers verification failures
+    only. By design, and outside that claim: temporal
+    failure (reasons ⊆ {expired, signed_in_future}) returns
+    ceremony_authorisation_expired — which therefore
+    certifies an envelope valid in every non-temporal
+    respect; post-verification state refusals return
+    ceremony_already_consumed, ceremony_not_issued and
+    ceremony_head_regression, reachable only by an envelope
+    that passed verification; and infrastructure failure
+    returns ledger_failed, the same code on both sides of
+    the commit point; (5)
     already-consumed (consumption journal, plus the signing
     ledger scoped to kind="consume" +
     format="ceremony-consumption" — the issuance mirror's
@@ -2488,7 +2723,8 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
         # client embeds stderr excerpts in its exception
         # messages, so a reason tuple printed here would reach
         # the caller and defeat R2's single-code rule
-        # (ceremony_authorisation_invalid, no forger oracle).
+        # (ceremony_authorisation_invalid; within verification
+        # failure there is no per-reason forger oracle).
         if set(reasons) <= {"expired", "signed_in_future"}:
             raise _config(
                 "ceremony_authorisation_expired",
@@ -2548,8 +2784,9 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
             "this authorisation's target was already consumed")
     except HeadRegressionError as exc:
         raise _config("ceremony_head_regression", str(exc))
-    # (8) Commit: consumption append, then the signing-ledger
-    # mirror, then the anchor.
+    # (8) Commit (cycle 22, R2 order): consumption append —
+    # the commit point; then the consumption-anchor update;
+    # then the signing-ledger mirror; then the signing anchor.
     recorded_at = _now()
     try:
         entry = consumption_ledger.append_consumption(
@@ -2564,6 +2801,7 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
         raise _config(
             "ledger_failed",
             "the consumption could not be committed")
+    _update_ceremony_consumption_anchor(config)
     try:
         SigningLedger(config.home).append_ceremony_consumption(
             signed, recorded_at=recorded_at)

@@ -104,6 +104,14 @@ AION_ANCHOR_PATH=/var/lib/aion-verifier/anchors/signing.anchor.json
 AION_ANCHOR_INIT=
 AION_BUDGETS_ANCHOR_PATH=/var/lib/aion-verifier/anchors/budgets.anchor.json
 AION_BUDGETS_ANCHOR_INIT=
+# Ceremony consumption anchor (cycle 22): external anchor for
+# the ceremony consumption journal (kind
+# "ceremony-consumption"); must live OUTSIDE
+# AION_VERIFIER_HOME and be distinct from the signing and
+# budgets anchors. Production (with the ceremony seed
+# configured) requires the path and refuses the INIT flag.
+AION_CEREMONY_CONSUMPTION_ANCHOR_PATH=/var/lib/aion-verifier/anchors/ceremony-consumption.anchor.json
+AION_CEREMONY_CONSUMPTION_ANCHOR_INIT=
 # Ceremony operator allowlist (cycle 19): comma-separated
 # operator ids allowlisted to be named as the operator id in
 # ceremony authorisations (mode ceremony_authorise). The list

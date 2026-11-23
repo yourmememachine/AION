@@ -85,11 +85,11 @@ Production client rules (production_client): the env mapping
 is copied and the copy is validated BEFORE any client exists
 and before anything can be spawned. Keys are restricted to the
 wrapper's allowlist as shipped in
-deploy/verifier-identity/run-verifier.sh (ALLOWED_KEYS, 17
+deploy/verifier-identity/run-verifier.sh (ALLOWED_KEYS, 19
 names — the shipped wrapper governs). An unknown key
 refuses, including AION_SHIP_ANCHOR_PATH, which does not exist
 anywhere in the verifier's configuration. The five core names,
-the deployment mode and both anchor paths are required
+the deployment mode and all three anchor paths are required
 non-empty; the mode must be exactly "production" (the verifier
 refuses an absent mode too, and a wiring layer that let
 "research" through would be a one-string downgrade of every
@@ -171,7 +171,7 @@ __all__ = [
 ]
 
 # The wrapper's allowlist, copied from ALLOWED_KEYS in
-# deploy/verifier-identity/run-verifier.sh as shipped (17
+# deploy/verifier-identity/run-verifier.sh as shipped (19
 # names). A key outside this set is not verifier configuration
 # and refuses; the verifier itself would ignore or reject it,
 # and a wiring layer that passed it through would be smuggling
@@ -194,11 +194,13 @@ ALLOWED_ENV_KEYS = frozenset({
     "AION_CEREMONY_OPERATORS",
     "AION_CEREMONY_EVIDENCE_DIR",
     "AION_CEREMONY_SIGNING_SEED_PATH",
+    "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH",
+    "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT",
 })
 
 # Required non-empty for a production client: the five core
 # names the verifier itself requires, the deployment mode, and
-# both anchor paths (production makes anchoring mandatory and
+# all three anchor paths (production makes anchoring mandatory and
 # fail-closed, so an unanchored production client is a
 # misconfiguration, not a weaker-but-valid one).
 # AION_CEREMONY_OPERATORS, AION_CEREMONY_EVIDENCE_DIR and
@@ -219,10 +221,13 @@ REQUIRED_ENV_KEYS = (
     "AION_DEPLOYMENT_MODE",
     "AION_ANCHOR_PATH",
     "AION_BUDGETS_ANCHOR_PATH",
+    "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH",
 )
 
-_INIT_ENV_KEYS = ("AION_ANCHOR_INIT", "AION_BUDGETS_ANCHOR_INIT")
-_ANCHOR_ENV_KEYS = ("AION_ANCHOR_PATH", "AION_BUDGETS_ANCHOR_PATH")
+_INIT_ENV_KEYS = ("AION_ANCHOR_INIT", "AION_BUDGETS_ANCHOR_INIT",
+                  "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT")
+_ANCHOR_ENV_KEYS = ("AION_ANCHOR_PATH", "AION_BUDGETS_ANCHOR_PATH",
+                    "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH")
 _KEY_ID_RE = re.compile(r"key-[0-9a-f]{16}")
 
 # The only launch mode this factory performs: the client's
@@ -355,12 +360,14 @@ def production_client(verifier_env, *, expected_signer_id,
                 "anchor path must not be an existing "
                 "directory; an anchor must name a file")
         resolved_anchors[name] = resolved
-    if resolved_anchors["AION_ANCHOR_PATH"] \
-            == resolved_anchors["AION_BUDGETS_ANCHOR_PATH"]:
-        _config_refusal(
-            "AION_ANCHOR_PATH / AION_BUDGETS_ANCHOR_PATH",
-            "the two anchor paths must be distinct; one file "
-            "cannot anchor both ledgers")
+    anchor_names = list(resolved_anchors)
+    for index, first in enumerate(anchor_names):
+        for second in anchor_names[index + 1:]:
+            if resolved_anchors[first] == resolved_anchors[second]:
+                _config_refusal(
+                    f"{first} / {second}",
+                    "the anchor paths must be distinct; one file "
+                    "cannot anchor two ledgers")
 
     # Pins are mandatory and are checked without ever reading
     # the key file: the key id's provenance is the caller's

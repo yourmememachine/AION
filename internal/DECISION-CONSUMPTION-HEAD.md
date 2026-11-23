@@ -100,3 +100,78 @@ introduced; the deploy wrapper allowlist is unchanged.
   step after cycle 21 reconciles with the external seats,
   and this head is the precondition those cycles were held
   on.
+
+## Addendum — 2026-11-23 (cycle 22): consumption journal anchored
+
+The consumption journal is now externally anchored in its
+own right: `trust/anchoring.py` gains the anchor kind
+`"ceremony-consumption"`, configured by
+`AION_CEREMONY_CONSUMPTION_ANCHOR_PATH` /
+`AION_CEREMONY_CONSUMPTION_ANCHOR_INIT` (allowlist 17 → 19).
+The anchor lives outside the verifier home and is distinct
+from the signing and budgets anchors. `_load_config`
+verifies it on every invocation (the verifier is one
+process per request), before any mode runs; production mode
+with the ceremony seed configured requires the path and
+refuses the INIT flag.
+
+The consume commit order is now: (1) consumption-journal
+append (the commit point, unchanged — the journal remains
+the head authority); (2) consumption-anchor update;
+(3) signing-ledger mirror; (4) signing-anchor update.
+Advancing the consumption anchor BEFORE the mirror write is
+the load-bearing ordering: a burn whose mirror write failed
+(`ledger_failed`, envelope burned) followed by a
+verifier-home rollback leaves the external consumption
+anchor ahead of the rolled-back journal, so the replay is
+refused at startup (`anchor_refused`) instead of consuming
+a second time. This supersedes the cycle-21 "Accepted
+residuals" bullet above for consumptions whose anchor
+update completed, and the R10 residual wording in
+`CeremonyConsumptionLedger`'s docstring is rewritten to
+match: with the consumption anchor configured, a burn whose
+anchor update completed survives a verifier-home rollback
+(detected at startup); the append→anchor-update window
+(burn in journal, anchor at pre-burn prefix) is protected
+against an intact home but NOT against a full rollback
+inside that window — the same window every anchored append
+in this system carries; research mode / anchor
+unconfigured: no rollback claim.
+
+The follow-up `ceremony-journal-anchoring` is NARROWED to
+the issuance journal (`ceremony-authorisations.json`) only:
+the defect closed here was consumption-specific, and a
+resurrected issuance pair yields an envelope that must
+still pass consumption, where single-use and the head live.
+The earlier decision text above is unchanged history; the
+"no new environment variable" and "deferred anchoring"
+statements there record cycle 21's position, superseded by
+this addendum for the consumption journal only.
+
+## Addendum 2 — 2026-11-23, cycle-22 war-room fix round: recovery is one-shot
+
+The cycle-22 war room (forced-dissent seat rev-r6, finding
+F1) established that the recovery exception as first built
+was self-perpetuating: a recovery consumption writes a
+journal entry indistinguishable from the original burn
+(same old→new pair; the strict entry schema carries no
+reason field), so the head entry a later recovery matches
+could itself be a recovery, waiving target-level single-use
+for the head target indefinitely. Ruling: recovery is
+ONE-SHOT per burned movement. `match_head_burn` now returns
+None when any earlier journal entry carries the same
+(old, new) pair as the head; the rule binds at both gates
+(authorise step 5b and consume-side `check_head`) through
+the shared predicate. This SUPERSEDES two cycle-22 design
+positions recorded earlier: design-A §6.2 (iterated recovery
+as a chain, one head at a time) and §4.4.5's race outcome
+(both pre-authorised recoveries consume and land) — under
+one-shot, both race authorisations may be issued against
+the original burn, the first consumption lands, and the
+second is refused AlreadyConsumedError. Consequence,
+accepted by the room: a recovery that itself burns
+unadopted is terminal for that movement; liveness resumes
+at the next snapshot sequence. The primary burned-but-
+unmoved path is unaffected: an adopter holding the returned
+pair completes adoption via `adopt_returned` with no new
+consumption at all.

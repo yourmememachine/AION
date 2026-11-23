@@ -9,7 +9,8 @@ increasing sequence number.
 
 Anchor format (exact key set, versioned)::
 
-    {"v": "ledger-anchor/1", "kind": "signing" | "ship" | "ship-tx",
+    {"v": "ledger-anchor/1", "kind": "signing" | "ship" | "ship-tx"
+     | "ceremony-consumption",
      "head": <hex64>, "seq": <int>, "anchored_at": <iso timestamp>}
 
 The "ship-tx" kind (cycle 17) pins the ship-transaction journal
@@ -116,7 +117,7 @@ from signing.gate_decision import SigningError, _canonical, \
 from trust.ledger import GENESIS_HASH
 
 ANCHOR_VERSION = "ledger-anchor/1"
-ANCHOR_KINDS = ("signing", "ship", "ship-tx")
+ANCHOR_KINDS = ("signing", "ship", "ship-tx", "ceremony-consumption")
 _ANCHOR_KEYS = {"v", "kind", "head", "seq", "anchored_at"}
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
 MAX_ANCHOR_BYTES = 4096

@@ -70,7 +70,7 @@ from trust import protocol
 from trust.anchoring import initialise_anchor, load_anchor, verify_anchor
 from trust.attestation import verify_eval_attestation
 from trust.budgets import BudgetStore, GENESIS_CHAIN_HASH
-from trust.ledger import SigningLedger
+from trust.ledger import CeremonyConsumptionLedger, SigningLedger
 
 REPO = Path(__file__).resolve().parents[1]
 WRAPPER = REPO / "deploy" / "verifier-identity" / "run-verifier.sh"
@@ -547,6 +547,8 @@ class LiveDeploymentTests(unittest.TestCase):
             "AION_CEREMONY_OPERATORS",
             "AION_CEREMONY_EVIDENCE_DIR",
             "AION_CEREMONY_SIGNING_SEED_PATH",
+            "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH",
+            "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT",
         }
         # LC_CTYPE is injected by runuser/PAM itself, after the
         # wrapper's env -i scrub: it is not caller-controlled and
@@ -938,12 +940,23 @@ class ProductionModeSpecTests(unittest.TestCase):
         # mode is proven from inside the process, not assumed.
         anchor = self.bootstrap_signing_anchor()
         budgets_anchor = self.bootstrap_budgets_anchor()
+        # Cycle 22: production with the ceremony seed configured
+        # also requires the ceremony consumption anchor — a valid
+        # one pinning the (empty) consumption journal's genesis.
+        consumption_anchor = (Path(self.tmp.name) / "anchors"
+                              / "ceremony-consumption.anchor.json")
+        initialise_anchor(
+            CeremonyConsumptionLedger(self.home / "ledger"),
+            consumption_anchor, kind="ceremony-consumption",
+            recorded_at="2026-11-20T12:00:00+00:00")
         seed_path = Path(self.tmp.name) / "ceremony.seed"
         generate_ceremony_key_file(seed_path)
         result, request_id = self.run_verifier({
             "AION_DEPLOYMENT_MODE": "production",
             "AION_ANCHOR_PATH": str(anchor),
             "AION_BUDGETS_ANCHOR_PATH": str(budgets_anchor),
+            "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH":
+                str(consumption_anchor),
             # Cycle 19: production also requires the ceremony
             # operator list at startup (the 15th allowlisted
             # name); cycle 20 adds the evidence dir and the

@@ -32,7 +32,8 @@ from signing.ceremony_authorisation import (
 from signing.pin_ceremony import reanchor_pin, verify_ceremony_record
 from signing.state_snapshot import sign_state_snapshot
 from trust.client import VerifierClient
-from trust.ledger import SigningLedger
+from trust.errors import VerifierConfigError
+from trust.ledger import CeremonyConsumptionLedger, SigningLedger
 
 ACTOR = "verifier-actor"
 SIGNER = "verifier-svc"
@@ -264,6 +265,170 @@ class CeremonyConsumptionIntegrationTests(CeremonyConsumptionFixture):
         self.assertIn(("consume", "ceremony-consumption"), kinds)
         with self.assertRaises(SigningError) as cm:
             self.reanchor(pin_of(a), cand, auth)
+        self.assertIn("already_consumed", str(cm.exception))
+
+
+class CeremonyRecoveryIntegrationTests(CeremonyConsumptionFixture):
+    """WS1 (cycle 22): honest recovery under reason
+    burned_unadopted, end-to-end against the real verifier.
+    A burn is produced by a consume that commits at the
+    verifier while the caller then "crashes" without adopting
+    (the commit-then-raise harness shape); recovery is a NEW
+    ceremony (new ceremony_id, NEW evidence artefact) whose
+    authorise must be proven against the consumption
+    journal's head entry (verifier step 5b)."""
+
+    def add_evidence(self, name, data):
+        (self.evidence_dir / name).write_bytes(data)
+        return hashlib.sha256(data).hexdigest(), name
+
+    def burn_via_reanchor_crash(self, old_pin, cand, auth,
+                                evidence_hash):
+        """Consume auth inside reanchor_pin, then raise as if
+        the caller crashed after the commit: reanchor_pin
+        returns nothing and the pin stays unmoved."""
+        real_consumer = self.client.ceremony_consumer()
+
+        def crashing_consumer(signed):
+            real_consumer(signed)
+            raise SigningError("simulated crash after commit")
+
+        with self.assertRaises(SigningError):
+            self.reanchor(
+                old_pin, cand, auth, evidence_hash=evidence_hash,
+                reason=auth.reason,
+                consume_authorisation=crashing_consumer)
+
+    def consumption_entries(self):
+        ledger_home = self.home / "ledger"
+        if not (ledger_home / "ceremony-consumptions.json").exists():
+            return []
+        return CeremonyConsumptionLedger(ledger_home).entries()
+
+    def recovery_authorise(self, old_pin, cand, name, data):
+        ev_hash, ev_ref = self.add_evidence(name, data)
+        envelope = self.authorise(
+            old_pin, cand, reason="burned_unadopted",
+            evidence_hash=ev_hash, evidence_ref=ev_ref)
+        return envelope, ev_hash
+
+    def test_recovery_happy_path_had_a_pin(self):
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = self.authorise(pin_of(a), cand)
+        self.burn_via_reanchor_crash(pin_of(a), cand, auth, EVIDENCE)
+        recovery, ev_hash = self.recovery_authorise(
+            pin_of(a), cand, "evidence-recovery-1",
+            b"recovery evidence bundle one\n")
+        new_pin, rec = self.reanchor(
+            pin_of(a), cand, recovery, reason="burned_unadopted",
+            evidence_hash=ev_hash)
+        self.assertEqual(new_pin, pin_of(cand))
+        self.assertEqual(rec.reason, "burned_unadopted")
+        self.assertEqual(
+            verify_ceremony_record(rec, signing_key=SNAP_KEY), ())
+
+    def test_recovery_happy_path_no_pin(self):
+        cand = snap(4, prev="f" * 64)
+        auth = self.authorise(None, cand)
+        # Burn the no-pin envelope directly at the verifier.
+        self.client.ceremony_consumer()(auth)
+        recovery, ev_hash = self.recovery_authorise(
+            None, cand, "evidence-recovery-nopin",
+            b"recovery evidence bundle no-pin\n")
+        new_pin, rec = self.reanchor(
+            None, cand, recovery, reason="burned_unadopted",
+            evidence_hash=ev_hash, strict_reasons=())
+        self.assertEqual(new_pin, pin_of(cand))
+        self.assertEqual(rec.reason, "burned_unadopted")
+        self.assertEqual(
+            verify_ceremony_record(rec, signing_key=SNAP_KEY), ())
+
+    def test_recovery_forgery_no_burn_unproven(self):
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        with self.assertRaises(VerifierConfigError) as cm:
+            self.recovery_authorise(
+                pin_of(a), cand, "evidence-forgery-1",
+                b"forgery evidence bundle\n")
+        self.assertIn("ceremony_recovery_unproven",
+                      str(cm.exception))
+
+    def test_recovery_forgery_different_target_same_code(self):
+        # Burn target T1; a recovery aimed at a DIFFERENT
+        # target, and one aimed at T1 with a DIFFERENT old
+        # pin, both refuse with the SAME code — no oracle
+        # distinguishing the sub-cases.
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = self.authorise(pin_of(a), cand)
+        self.burn_via_reanchor_crash(pin_of(a), cand, auth, EVIDENCE)
+        other = snap(5, prev="e" * 64)
+        with self.assertRaises(VerifierConfigError) as cm1:
+            self.recovery_authorise(
+                pin_of(a), other, "evidence-forgery-2",
+                b"forgery evidence bundle two\n")
+        b = snap(2)
+        with self.assertRaises(VerifierConfigError) as cm2:
+            self.recovery_authorise(
+                pin_of(b), cand, "evidence-forgery-3",
+                b"forgery evidence bundle three\n")
+        self.assertIn("ceremony_recovery_unproven",
+                      str(cm1.exception))
+        self.assertIn("ceremony_recovery_unproven",
+                      str(cm2.exception))
+
+    def test_recovery_is_one_shot_second_recovery_refused(self):
+        """One-shot recovery (cycle-22 war-room fix round,
+        rev-r6 F1): a burned_unadopted recovery is one-shot
+        per burned movement — the first recovery authorises,
+        consumes, and succeeds, but a SECOND burned_unadopted
+        ceremony for the same target/old-pin pair is refused
+        at authorise with the single code
+        ceremony_recovery_unproven, because a recovery
+        consumption cannot ground another recovery. This
+        supersedes the iterated-chain semantics (design-A
+        §6.2) this test previously pinned, under which a
+        second recovery recovering the first recovery's head
+        entry succeeded."""
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = self.authorise(pin_of(a), cand)
+        self.burn_via_reanchor_crash(pin_of(a), cand, auth, EVIDENCE)
+        recovery1, ev1 = self.recovery_authorise(
+            pin_of(a), cand, "evidence-one-shot-1",
+            b"one-shot evidence bundle one\n")
+        new_pin, rec = self.reanchor(
+            pin_of(a), cand, recovery1, reason="burned_unadopted",
+            evidence_hash=ev1)
+        self.assertEqual(new_pin, pin_of(cand))
+        self.assertEqual(rec.authorisation_id,
+                         recovery1.authorisation_id)
+        self.assertEqual(rec.reason, "burned_unadopted")
+        self.assertEqual(
+            verify_ceremony_record(rec, signing_key=SNAP_KEY), ())
+        consumed_before = len(self.consumption_entries())
+        self.assertEqual(consumed_before, 2)
+        with self.assertRaises(VerifierConfigError) as cm:
+            self.recovery_authorise(
+                pin_of(a), cand, "evidence-one-shot-2",
+                b"one-shot evidence bundle two\n")
+        self.assertIn("ceremony_recovery_unproven",
+                      str(cm.exception))
+        self.assertEqual(
+            str(cm.exception).count("ceremony_recovery_unproven"),
+            1)
+        self.assertEqual(len(self.consumption_entries()),
+                         consumed_before)
+
+    def test_recovery_envelope_consumed_twice_refused(self):
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = self.authorise(pin_of(a), cand)
+        self.burn_via_reanchor_crash(pin_of(a), cand, auth, EVIDENCE)
+        recovery, ev_hash = self.recovery_authorise(
+            pin_of(a), cand, "evidence-twice-1",
+            b"twice evidence bundle\n")
+        self.reanchor(
+            pin_of(a), cand, recovery, reason="burned_unadopted",
+            evidence_hash=ev_hash)
+        with self.assertRaises(SigningError) as cm:
+            self.client.ceremony_consumer()(recovery)
         self.assertIn("already_consumed", str(cm.exception))
 
 

@@ -57,7 +57,10 @@ class AlreadyConsumedError(LedgerError):
     the ``reason`` attribute (cycle 21): the consume mode maps
     this subclass to ``ceremony_already_consumed`` and
     HeadRegressionError to ``ceremony_head_regression``; any
-    other LedgerError maps to ``ledger_failed``."""
+    other LedgerError maps to ``ledger_failed``. These
+    distinctions are state oracles by design (see the consume
+    mode's docstring); the no-oracle claim covers verification
+    failures only."""
 
     reason = "already_consumed"
 
@@ -430,8 +433,10 @@ class SigningLedger(HashChainJournal):
         journal format migration. This is an audit mirror, NOT
         a second commit: it is invoked only after
         CeremonyConsumptionLedger.append_consumption has
-        committed, and it puts the consumption fact into the
-        one journal that is externally anchored in production.
+        committed, and it puts the consumption fact into
+        the signing ledger as an anchored audit trace (since
+        cycle 22 the consumption journal carries its own
+        external anchor, advanced before this mirror write).
         Column reuse follows append_ceremony_authorisation /
         try_consume_eval_records' eval-consumption entries:
         kind "consume", format "ceremony-consumption",
@@ -709,19 +714,23 @@ class CeremonyConsumptionLedger(HashChainJournal):
     written only after this commit; it is never the
     authority and must never be appended first.
 
-    Anchoring residual (cycle 21, R10, stated precisely):
-    this journal is NOT externally anchored this cycle. A
-    rollback of the verifier home cannot resurrect a
-    consumed envelope whose consumption is mirrored in the
-    anchored signing ledger (production), but can lower the
-    enforced head for never-consumed envelopes. The
-    follow-up ceremony-journal-anchoring covers both
-    journals (issuance + consumption) jointly. In research
-    mode (anchoring unconfigured) the mirror itself is
-    unanchored and this journal carries the same
-    research-mode residual as the ceremony journal: it can
-    be deleted or rolled back undetectably, and research
-    mode must never be described as rollback-protected.
+    Anchoring (cycle 22, R2, replacing cycle 21's R10
+    residual): this journal IS externally anchored in its
+    own right (anchor kind "ceremony-consumption", verified
+    by the verifier at startup on every invocation when
+    configured; required in production when the ceremony
+    seed is configured). With the consumption anchor
+    configured, a burn whose anchor update completed
+    survives a verifier-home rollback (detected at startup,
+    anchor_refused); the append→anchor-update window (burn
+    in journal, anchor at pre-burn prefix) is protected
+    against an intact home but NOT against a full rollback
+    inside that window — the same window every anchored
+    append in this system carries; research mode / anchor
+    unconfigured: no rollback claim, and this journal can
+    be deleted or rolled back undetectably. The follow-up
+    ceremony-journal-anchoring is narrowed to the issuance
+    journal only.
 
     Note on head(): this class does NOT override the base
     class's head() — head() returns the hash-chain head hash
@@ -780,6 +789,51 @@ class CeremonyConsumptionLedger(HashChainJournal):
     # -- head rules (DESIGN-FINAL R3, merged final form) ------------
 
     @staticmethod
+    def match_head_burn(entries, *, candidate, old_pin):
+        """Return the head entry iff it is exactly the burn a
+        burned_unadopted recovery re-anchors to, else None.
+        candidate / old_pin are the projected shapes
+        (old_pin None or {cycle_seq, payload_hash}).
+
+        One-shot rule (cycle 22, rev-r6 F1): the head entry
+        is returned ONLY IF no earlier journal entry carries
+        the same (old_cycle_seq, old_payload_hash,
+        new_cycle_seq, new_payload_hash) pair. A recovery
+        consumption writes an entry indistinguishable from
+        the original burn (same old->new pair; the strict
+        entry schema carries no reason field), so the
+        original burn is the FIRST consumption of that
+        movement and any later identical-pair head entry is
+        itself a recovery consumption — it cannot ground
+        another recovery. Recovery is therefore one-shot per
+        burned movement at both the authorise step (5b) and
+        consume (check_head), which both go through here."""
+        if not entries:
+            return None
+        head = entries[-1]
+        if (candidate["cycle_seq"], candidate["payload_hash"]) \
+                != (head["new_cycle_seq"], head["new_payload_hash"]):
+            return None
+        if old_pin is None:
+            if head["old_cycle_seq"] is not None \
+                    or head["old_payload_hash"] != "":
+                return None
+        elif (old_pin["cycle_seq"], old_pin["payload_hash"]) \
+                != (head["old_cycle_seq"], head["old_payload_hash"]):
+            return None
+        head_pair = (head["old_cycle_seq"],
+                     head["old_payload_hash"],
+                     head["new_cycle_seq"],
+                     head["new_payload_hash"])
+        for earlier in entries[:-1]:
+            if (earlier["old_cycle_seq"],
+                    earlier["old_payload_hash"],
+                    earlier["new_cycle_seq"],
+                    earlier["new_payload_hash"]) == head_pair:
+                return None
+        return head
+
+    @staticmethod
     def check_head(entries, signed) -> None:
         """Raise AlreadyConsumedError / HeadRegressionError if
         consuming ``signed`` against ``entries`` (a consumption
@@ -803,12 +857,26 @@ class CeremonyConsumptionLedger(HashChainJournal):
           old-pin check.
         * initial_anchor against a non-empty journal ->
           head regression (a first-ever anchor claim after
-          recorded consumptions is a contradiction)."""
+          recorded consumptions is a contradiction).
+        * burned_unadopted recovery is ONE-SHOT per burned
+          movement (rev-r6 F1): the scoped exception below
+          applies only when match_head_burn returns the head
+          entry, which it does only for the first consumption
+          of an old->new movement; once a recovery consumption
+          of that same pair has landed (it becomes the head,
+          with an identical earlier entry behind it), a
+          further burned_unadopted envelope for the same
+          target raises AlreadyConsumedError here instead of
+          riding the exception again."""
         if not entries:
             return
         last = entries[-1]
         head_seq = last["new_cycle_seq"]
         head_hash = last["new_payload_hash"]
+        recovery = signed.reason == "burned_unadopted" and \
+            CeremonyConsumptionLedger.match_head_burn(
+                entries, candidate=signed.candidate,
+                old_pin=signed.old_pin) is not None
         if signed.reason == "initial_anchor":
             raise HeadRegressionError(
                 "initial_anchor against a non-empty consumption "
@@ -820,13 +888,15 @@ class CeremonyConsumptionLedger(HashChainJournal):
                 "candidate is behind the consumed head")
         if cand_seq == head_seq:
             if cand_hash == head_hash:
-                raise AlreadyConsumedError(
-                    "candidate target already consumed: "
-                    f"{cand_seq}")
-            raise HeadRegressionError(
-                "candidate forks the consumed head at its "
-                "sequence")
-        if signed.old_pin is not None:
+                if not recovery:
+                    raise AlreadyConsumedError(
+                        "candidate target already consumed: "
+                        f"{cand_seq}")
+            else:
+                raise HeadRegressionError(
+                    "candidate forks the consumed head at its "
+                    "sequence")
+        if not recovery and signed.old_pin is not None:
             old_seq = signed.old_pin["cycle_seq"]
             old_hash = signed.old_pin["payload_hash"]
             if old_seq < head_seq:

@@ -32,6 +32,7 @@ from signing.ceremony_authorisation import (
     CEREMONY_AUTHORISATION_TTL_MAX_SECONDS,
     REASONS,
     CeremonyPublicKey,
+    _EITHER_PIN_REASONS,
     _NO_PIN_REASONS,
     _make_ceremony_signing_key,
     authorisation_id_for,
@@ -110,6 +111,8 @@ class MirrorDriftTests(unittest.TestCase):
         self.assertEqual(REASONS, pin_ceremony.REASONS)
         self.assertEqual(_NO_PIN_REASONS,
                          pin_ceremony._NO_PIN_REASONS)
+        self.assertEqual(_EITHER_PIN_REASONS,
+                         pin_ceremony._EITHER_PIN_REASONS)
 
 
 class KeyTypeTests(unittest.TestCase):

@@ -121,11 +121,24 @@ through the wrapper's allowlist):
   anchoring is **mandatory and fail-closed**. The verifier
   refuses to start (exit 3) when no anchor path is configured,
   and it refuses to start when an anchor-init flag
-  (`AION_ANCHOR_INIT` / `AION_BUDGETS_ANCHOR_INIT`) is present —
+  (`AION_ANCHOR_INIT` / `AION_BUDGETS_ANCHOR_INIT` /
+  `AION_CEREMONY_CONSUMPTION_ANCHOR_INIT`) is present —
   the bootstrap ceremony is an operator action performed outside
   production configuration, never a flag a production launch
   carries, so the ceremony cannot be silently repeated after
   state loss.
+
+  Production mode with the ceremony seed configured
+  additionally requires
+  `AION_CEREMONY_CONSUMPTION_ANCHOR_PATH` for the
+  ceremony consumption journal. With that anchor
+  configured, a consumption whose anchor update
+  completed survives a verifier-home rollback (detected
+  at startup); a full rollback inside the
+  append→anchor-update window is not protected against;
+  in research mode, or with the consumption anchor
+  unconfigured, no rollback claim is made for
+  consumptions.
 - **Research mode** (`AION_DEPLOYMENT_MODE=research`, set
   explicitly): the verifier runs with whatever anchoring is
   configured, including none. This is the mode for development
@@ -255,19 +268,34 @@ records the single use of an issued envelope in the
 verifier-owned consumption journal
 (`home/ceremony-consumptions.json`), mirrors it into the
 signing ledger, and enforces the monotonic consumption head
-before any pin movement is adopted. Consumption is committed
-at the verifier before the ceremony returns anything, and the
-consumption journal lives in the verifier home alongside the
-other journals — no new configuration is needed for the mode
-beyond the cycle-20 ceremony provisioning above.
+before any pin movement is adopted.
+Consumption is committed at the verifier before the
+ceremony returns anything. Cycle 22 adds one new
+configuration pair for the mode: the consumption journal
+is externally anchored via
+`AION_CEREMONY_CONSUMPTION_ANCHOR_PATH` /
+`AION_CEREMONY_CONSUMPTION_ANCHOR_INIT` (allowlist
+17 → 19); production mode with the ceremony seed
+configured requires the path and refuses the INIT flag.
+With the consumption anchor configured, a burn whose
+anchor update completed survives a verifier-home
+rollback (detected at startup); the
+append→anchor-update window is NOT protected against a
+full rollback inside that window; research mode /
+anchor unconfigured: no rollback claim.
 **Burned-but-unmoved recovery:** because the consumption
 commit precedes pin adoption, a crash or a lost response
-after the commit leaves the authorisation burned and the pin
-unmoved — the consumed target is permanently spent and is
-never re-anchorable. Recovery is a NEW ceremony (new
-`ceremony_id`, new evidence bundle) whose candidate is ahead
-of the consumption head; there is no un-consume, and the
-client never retries a consume automatically.
+after the commit leaves the authorisation burned and
+the pin unmoved. The burned authorisation itself is
+permanently spent and is never re-consumed; recovery is
+a NEW ceremony (new `ceremony_id`, new evidence bundle)
+under reason `burned_unadopted`, whose candidate is the
+consumed head target itself (not ahead of it) and whose
+old pin exactly equals the head entry's recorded old
+pin, proven by the verifier against its consumption
+journal at authorise and again at consume. There is no
+un-consume, and the client never retries a consume
+automatically.
 
 **Flag-day drain procedure (v1 → v2 ceremony authorisations).**
 Cycle 20 replaces the ceremony envelope's HMAC with Ed25519

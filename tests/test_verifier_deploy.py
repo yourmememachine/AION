@@ -86,7 +86,7 @@ class DeployScriptTests(unittest.TestCase):
                           re.S).group(1)
         health_keys = set(re.findall(r"[A-Z][A-Z_]+", block))
         self.assertEqual(health_keys, _allowed_keys())
-        self.assertEqual(len(health_keys), 17)
+        self.assertEqual(len(health_keys), 19)
 
     def test_every_verifier_main_env_var_is_allowlisted(self):
         main_text = (REPO / "trust" / "verifier_main.py").read_text()

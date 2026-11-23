@@ -263,8 +263,27 @@ Cycle 21 — consumption head and the integrated-system claim:
   adoption leaves the authorisation burned and the pin
   unmoved; a lost or ambiguous response is treated as
   burned; the client never retries a consume automatically.
-  Recovery is a new ceremony (new ceremony_id, new
-  evidence), never an un-consume.
+  Recovery is a new ceremony under reason
+  ``burned_unadopted`` (new ceremony_id, new evidence),
+  validated by the verifier against its consumption
+  journal, never an un-consume. ``lost_pin`` is never the
+  recovery path for an unmoved pin — the pin exists and can
+  be read; ``lost_pin`` keeps its true meaning (pin
+  actually lost) only. The verifier cannot observe pin
+  adoption; it proves only that the recovery's candidate
+  and old pin exactly equal its consumption journal's head
+  entry. Under the production wiring (fresh pin, complete
+  history, atomic adoption) an adopted target cannot be
+  recovered, because the recovery envelope cannot bind to
+  the adopted pin and the adopted target is already a
+  ceremonied target in history. Outside that wiring the
+  worst case is a redundant, fully journaled re-consumption
+  of the identical target — never a different, forked or
+  backwards movement. The burn proof inherits the
+  consumption journal's anchoring position: trustworthy
+  under the per-request anchor verification when the
+  consumption anchor is configured; research mode / anchor
+  unconfigured makes no rollback claim.
 - ``ceremony_history`` after the head: the history is an
   audit/consistency input that can only refuse, never
   grant; the verifier's consumption head is authoritative
@@ -283,14 +302,17 @@ rollback-vulnerable until the follow-up
 against an intact issuance journal; after a rollback it is
 detectable only for same-ceremony_id reuse, and otherwise
 only by audit against retained envelopes — not prevented).
-The consumption journal's own rollback residual is
-different (R10, stated precisely in
-``CeremonyConsumptionLedger``'s docstring): a rollback of
-the verifier home cannot resurrect a consumed envelope
-whose consumption is mirrored in the anchored signing
-ledger (production), but can lower the enforced head for
-never-consumed envelopes. Nothing here persists the pin
-and the record atomically
+The consumption journal's own rollback position is
+different (stated precisely in
+``CeremonyConsumptionLedger``'s docstring): since cycle
+22 the consumption journal is externally anchored in
+its own right; with the consumption anchor configured,
+a burn whose anchor update completed survives a
+verifier-home rollback (detected at startup), the
+append→anchor-update window is not protected against
+a full rollback inside that window, and research mode
+/ anchor unconfigured makes no rollback claim. Nothing
+here persists the pin and the record atomically
 (ATOMIC-ADOPTION above is the caller's duty, not a property
 of this function); and the ceremony RECORD's MAC still uses
 the snapshot signing key, symmetric as elsewhere in
@@ -338,14 +360,20 @@ REASON_INITIAL_ANCHOR = "initial_anchor"
 REASON_CHAIN_GAP_RECOVERY = "chain_gap_recovery"
 REASON_LOST_PIN = "lost_pin"
 REASON_CORRUPTED_PIN = "corrupted_pin"
+REASON_BURNED_UNADOPTED = "burned_unadopted"
 REASONS = frozenset({
     REASON_INITIAL_ANCHOR, REASON_CHAIN_GAP_RECOVERY,
     REASON_LOST_PIN, REASON_CORRUPTED_PIN,
+    REASON_BURNED_UNADOPTED,
 })
 # Reasons that are coherent only when there is no usable old pin.
 _NO_PIN_REASONS = frozenset({
     REASON_INITIAL_ANCHOR, REASON_LOST_PIN, REASON_CORRUPTED_PIN,
 })
+# Reasons coherent with either pin shape (cycle 22): the reason
+# asserts something about the previous ceremony (it was consumed;
+# its target was not adopted), not about the pin's existence.
+_EITHER_PIN_REASONS = frozenset({REASON_BURNED_UNADOPTED})
 
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -647,8 +675,27 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     adoption leaves the authorisation burned and the pin
     unmoved; a lost or ambiguous response is treated as
     burned; the client never retries a consume automatically.
-    Recovery is a new ceremony (new ceremony_id, new
-    evidence), never an un-consume.
+    Recovery is a new ceremony under reason
+    ``burned_unadopted`` (new ceremony_id, new evidence),
+    validated by the verifier against its consumption
+    journal, never an un-consume. ``lost_pin`` is never the
+    recovery path for an unmoved pin — the pin exists and can
+    be read; ``lost_pin`` keeps its true meaning (pin
+    actually lost) only. The verifier cannot observe pin
+    adoption; it proves only that the recovery's candidate
+    and old pin exactly equal its consumption journal's head
+    entry. Under the production wiring (fresh pin, complete
+    history, atomic adoption) an adopted target cannot be
+    recovered, because the recovery envelope cannot bind to
+    the adopted pin and the adopted target is already a
+    ceremonied target in history. Outside that wiring the
+    worst case is a redundant, fully journaled re-consumption
+    of the identical target — never a different, forked or
+    backwards movement. The burn proof inherits the
+    consumption journal's anchoring position: trustworthy
+    under the per-request anchor verification when the
+    consumption anchor is configured; research mode / anchor
+    unconfigured makes no rollback claim.
 
     Claim wording: single-use consumption and pin
     non-regression are properties of the INTEGRATED SYSTEM
@@ -795,15 +842,17 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
             "a pin must never be reconstructed from the snapshot "
             "being verified")
     if old_pin is not None:
-        if reason != REASON_CHAIN_GAP_RECOVERY:
+        if reason not in {REASON_CHAIN_GAP_RECOVERY,
+                          REASON_BURNED_UNADOPTED}:
             # Gate on state, not label (war-room cycle 15, rev-r2):
-            # with a usable pin present, chain_gap_recovery is the
-            # only coherent ceremony reason — lost/corrupted/initial
-            # claims with a present, well-formed pin are refused,
-            # so no jump can be laundered by relabelling the reason.
+            # with a usable pin present, chain_gap_recovery and
+            # burned_unadopted are the only coherent ceremony
+            # reasons — lost/corrupted/initial claims with a
+            # present, well-formed pin are refused, so no jump can
+            # be laundered by relabelling the reason.
             raise SigningError(
-                "with an existing pin the only ceremony reason is "
-                "chain_gap_recovery")
+                "with an existing pin the ceremony reason must be "
+                "chain_gap_recovery or burned_unadopted")
         relation = _candidate_relation(old_seq, old_hash, signed)
         if relation in ("backwards", "same", "same_seq_fork"):
             raise SigningError(
@@ -827,7 +876,9 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
                 "predecessor while sitting more than one sequence "
                 "past it; that is an integrity failure, not a "
                 "re-anchor case")
-    if reason == REASON_CHAIN_GAP_RECOVERY:
+    if reason == REASON_CHAIN_GAP_RECOVERY or (
+            reason == REASON_BURNED_UNADOPTED
+            and old_pin is not None):
         # The ceremony must be gated on an actual strict
         # verification classified reanchor_required, not invoked
         # freely (war-room cycle 15, forced-dissent seat). Cycle
@@ -838,6 +889,11 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
         # A forged ("chain_gap",) for a candidate whose real strict
         # result is anything else (pin_mismatch, expired, …) is
         # refused, and classify/reanchor can no longer diverge.
+        # Cycle 22: a with-pin burned_unadopted recovery stands in
+        # exactly the burned ceremony's relation to the unmoved
+        # pin, so the same strict recomputation is required; a
+        # no-pin burned_unadopted recovery has no pin to
+        # recompute against and receives none.
         if old_pin is None:
             raise SigningError(
                 "chain_gap_recovery requires an existing pin")
@@ -858,7 +914,8 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
                 "strict verification recomputed against the pin "
                 f"gives {list(recomputed)}, not exactly "
                 "('chain_gap',); the ceremony is refused")
-    elif old_pin is None and reason not in _NO_PIN_REASONS:
+    elif old_pin is None and reason not in (
+            _NO_PIN_REASONS | _EITHER_PIN_REASONS):
         raise SigningError(f"reason {reason} requires an existing pin")
     # History content checks (cycle 20): the history is required
     # (presence was refused early, step (2)), so these checks now
@@ -958,7 +1015,15 @@ def verify_ceremony_record(record, *, signing_key: SigningKey,
     replayed against a different pin state reports
     ``pin_context_mismatch`` instead of verifying clean, and a
     malformed context pin reports that reason rather than
-    raising."""
+    raising.
+
+    Cycle 22 limit: record verification is offline and MAC-only.
+    For a ``burned_unadopted`` record it proves the key holder
+    issued a record with a coherent reason/pin shape — it does
+    NOT prove a burn existed. Burn linkage at audit time is:
+    record -> ``authorisation_id`` (the recovery's own, bound in
+    the record) -> issuance + consumption journals -> the
+    preceding head entry is the burn the verifier matched."""
     if not isinstance(record, PinCeremonyRecord):
         raise SigningError("record must be a PinCeremonyRecord")
     if not isinstance(signing_key, SigningKey):
@@ -1025,10 +1090,12 @@ def verify_ceremony_record(record, *, signing_key: SigningKey,
         # un-issuable and must not verify clean (cycle 16).
         reasons.append("not_a_gap_reanchor")
     if record.old_cycle_seq is None \
-            and record.reason not in _NO_PIN_REASONS:
+            and record.reason not in (_NO_PIN_REASONS
+                                      | _EITHER_PIN_REASONS):
         reasons.append("invalid_reason")
     if record.old_cycle_seq is not None \
-            and record.reason != REASON_CHAIN_GAP_RECOVERY:
+            and record.reason not in {REASON_CHAIN_GAP_RECOVERY,
+                                      REASON_BURNED_UNADOPTED}:
         reasons.append("invalid_reason")
     for value in (record.operator_id, record.candidate_signer_id,
                   record.candidate_key_id, record.key_id):

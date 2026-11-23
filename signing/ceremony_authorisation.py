@@ -173,19 +173,26 @@ REFUSED_TEST_SEEDS = frozenset({
 # module must not import pin_ceremony (import cycle); the drift
 # test in tests/test_signing_ceremony_authorisation.py pins
 # REASONS == signing.pin_ceremony.REASONS and
-# _NO_PIN_REASONS == signing.pin_ceremony._NO_PIN_REASONS.
+# _NO_PIN_REASONS == signing.pin_ceremony._NO_PIN_REASONS and
+# _EITHER_PIN_REASONS == signing.pin_ceremony._EITHER_PIN_REASONS.
 REASON_INITIAL_ANCHOR = "initial_anchor"
 REASON_CHAIN_GAP_RECOVERY = "chain_gap_recovery"
 REASON_LOST_PIN = "lost_pin"
 REASON_CORRUPTED_PIN = "corrupted_pin"
+REASON_BURNED_UNADOPTED = "burned_unadopted"
 REASONS = frozenset({
     REASON_INITIAL_ANCHOR, REASON_CHAIN_GAP_RECOVERY,
     REASON_LOST_PIN, REASON_CORRUPTED_PIN,
+    REASON_BURNED_UNADOPTED,
 })
 # Reasons that are coherent only when there is no usable old pin.
 _NO_PIN_REASONS = frozenset({
     REASON_INITIAL_ANCHOR, REASON_LOST_PIN, REASON_CORRUPTED_PIN,
 })
+# Reasons coherent with either pin shape (cycle 22): the reason
+# asserts something about the previous ceremony (it was consumed;
+# its target was not adopted), not about the pin's existence.
+_EITHER_PIN_REASONS = frozenset({REASON_BURNED_UNADOPTED})
 
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
 _HEX128_RE = re.compile(r"[0-9a-f]{128}")
@@ -465,15 +472,18 @@ def ceremony_authorisation_payload(
     old_pin = _project_old_pin(old_pin)
     candidate = _project_candidate(candidate)
     # Reason/pin coherence, mirroring reanchor_pin's gate-on-state
-    # rule: a no-pin reason requires no pin; a pin requires the
-    # chain-gap reason.
-    if old_pin is None and reason not in _NO_PIN_REASONS:
+    # rule (ternary, cycle 22): a no-pin reason requires no pin; a
+    # pin requires chain_gap_recovery or burned_unadopted;
+    # burned_unadopted is coherent with either shape.
+    if old_pin is None and reason not in (
+            _NO_PIN_REASONS | _EITHER_PIN_REASONS):
         raise SigningError(
             f"reason {reason!r} requires an old pin")
-    if old_pin is not None and reason != REASON_CHAIN_GAP_RECOVERY:
+    if old_pin is not None and reason not in (
+            {REASON_CHAIN_GAP_RECOVERY} | _EITHER_PIN_REASONS):
         raise SigningError(
             "an authorisation carrying an old pin must use reason "
-            "chain_gap_recovery")
+            "chain_gap_recovery or burned_unadopted")
     if old_pin is not None \
             and candidate["cycle_seq"] < old_pin["cycle_seq"] + 2:
         # Gap-only: +1 is a chained successor (advance_pin's
