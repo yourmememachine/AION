@@ -133,6 +133,131 @@ class AnchorError(Exception):
     signal, non-monotonic update, bad placement, malformed file)."""
 
 
+# The canonical chain-mismatch reasons: rollback / substitution
+# evidence, as classified by every consumer of verify_anchor
+# (trust/shiptx.py's ANCHOR_PARK_REASONS is the same set). A
+# JournalIntegrityError may carry ONLY these — an operator or
+# anchor-load reason (anchor_missing, anchor_malformed, …) in
+# this type would defeat the distinction it exists to make.
+JOURNAL_INTEGRITY_REASONS = frozenset({
+    "anchor_head_not_in_chain", "anchor_ahead_of_journal",
+    "anchor_kind_mismatch"})
+_ANCHOR_SOURCE_NAMES = ("ship", "ship-tx")
+
+
+def _restore_journal_integrity_error(message, reasons,
+                                     anchor_sources, outcomes,
+                                     anchor_errors):
+    return JournalIntegrityError(
+        message, reasons=reasons, anchor_sources=anchor_sources,
+        outcomes=outcomes, anchor_errors=anchor_errors)
+
+
+class JournalIntegrityError(AnchorError):
+    """A journal-level integrity failure (cycle 18): chain-mismatch
+    evidence (rollback / substitution) about a journal itself, where
+    no per-transaction outcome exists to carry it — so recovery
+    raises instead of returning a list that would read as a clean
+    recovery. It is NEVER raised for an anchor-load or operator
+    error (missing, malformed, unreadable, misplaced or same-file
+    anchors stay plain AnchorError / per-transaction error outcomes):
+    that distinction is the whole point of the type, reconciling the
+    cycle-17 external split (a journal-level raise is correct, but a
+    generic AnchorError conflates it with anchor-load failures).
+
+    Structured attributes, so callers never parse the message:
+    ``reasons`` is a tuple of bare canonical chain-mismatch reasons
+    (validated against JOURNAL_INTEGRITY_REASONS, deduped, in
+    order); ``anchor_sources`` is a tuple of labelled reasons
+    (``"ship: …"`` / ``"ship-tx: …"``) whose suffixes are exactly
+    the reasons, naming which anchor produced each one;
+    ``anchor_source`` is the single source when there is exactly
+    one, else ``"combined"``. ``anchor_errors`` carries any
+    labelled NEW anchor-load failures that accompanied the
+    integrity evidence (post-settlement mixed case) — they are
+    never in ``reasons``. ``outcomes`` optionally carries the
+    recovery outcomes completed before a post-settlement raise
+    (settlements that stand as journaled evidence). The message
+    string is unchanged from the pre-cycle-18 AnchorError messages
+    at the original raise sites.
+
+    Handler order matters: this type IS an AnchorError, so a
+    caller that wants the distinction must catch
+    JournalIntegrityError BEFORE AnchorError — a generic
+    ``except AnchorError`` first makes the specific handler
+    unreachable and silently re-creates the conflation.
+    """
+
+    def __init__(self, message, *, reasons, anchor_sources,
+                 outcomes=(), anchor_errors=()):
+        for name, value in (("reasons", reasons),
+                            ("anchor_sources", anchor_sources),
+                            ("outcomes", outcomes),
+                            ("anchor_errors", anchor_errors)):
+            if isinstance(value, (str, bytes)):
+                raise ValueError(
+                    f"JournalIntegrityError {name} must be a "
+                    "sequence of values, not a bare string")
+        reasons = tuple(dict.fromkeys(reasons))
+        if not reasons:
+            raise ValueError(
+                "JournalIntegrityError requires at least one "
+                "chain-mismatch reason; an empty-reasons raise "
+                "would recreate the silent-clean-recovery problem "
+                "in typed form")
+        if any(not isinstance(r, str) for r in reasons) \
+                or not set(reasons) <= JOURNAL_INTEGRITY_REASONS:
+            raise ValueError(
+                "JournalIntegrityError reasons must be canonical "
+                "chain-mismatch reasons "
+                f"({sorted(JOURNAL_INTEGRITY_REASONS)}); an "
+                "operator or anchor-load reason in this type "
+                "would defeat the distinction it exists to make")
+        anchor_sources = tuple(dict.fromkeys(anchor_sources))
+        if not anchor_sources:
+            raise ValueError(
+                "JournalIntegrityError requires at least one "
+                "labelled anchor source; a raise with no source "
+                "fabricates provenance")
+        suffixes = set()
+        for labelled in anchor_sources:
+            if not isinstance(labelled, str) \
+                    or ": " not in labelled:
+                raise ValueError(
+                    "JournalIntegrityError anchor_sources must be "
+                    "labelled 'ship: <reason>' / "
+                    "'ship-tx: <reason>' strings")
+            source, suffix = labelled.split(": ", 1)
+            if source not in _ANCHOR_SOURCE_NAMES:
+                raise ValueError(
+                    f"unknown anchor source in {labelled!r}; "
+                    f"expected one of {_ANCHOR_SOURCE_NAMES}")
+            suffixes.add(suffix)
+        if suffixes != set(reasons):
+            raise ValueError(
+                "JournalIntegrityError anchor_sources must name "
+                "every reason exactly: the labelled suffixes "
+                f"{sorted(suffixes)} do not match the reasons "
+                f"{sorted(set(reasons))}")
+        super().__init__(message)
+        self.reasons = reasons
+        self.anchor_sources = anchor_sources
+        sources = tuple(dict.fromkeys(
+            s.split(":", 1)[0] for s in self.anchor_sources))
+        self.anchor_source = sources[0] if len(sources) == 1 \
+            else "combined"
+        self.outcomes = tuple(outcomes)
+        self.anchor_errors = tuple(anchor_errors)
+
+    def __reduce__(self):
+        # The keyword-only constructor cannot be replayed from
+        # args alone, so pickle/deepcopy go through the module
+        # restore helper with the full structured state.
+        return (_restore_journal_integrity_error,
+                (str(self), self.reasons, self.anchor_sources,
+                 self.outcomes, self.anchor_errors))
+
+
 # Strict parsing (Trust Boundary v3.1, parser inventory): anchor
 # and reanchor-audit documents are parsed under the same contract
 # as every other security-relevant consumer — duplicate keys and

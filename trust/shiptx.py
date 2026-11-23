@@ -216,8 +216,9 @@ and applies these rules in order:
   is indistinguishable from a substituted anchor. If the tx
   anchor carries chain-mismatch reasons but no non-terminal
   transaction exists to park — the deleted-journal case —
-  recovery raises AnchorError rather than reporting a clean,
-  empty recovery. Recovery verifies the tx anchor once and
+  recovery raises JournalIntegrityError (the distinct
+  AnchorError subclass for journal-level integrity failures,
+  cycle 18) rather than reporting a clean, empty recovery. Recovery verifies the tx anchor once and
   never advances it; the caller must call update_anchor(...,
   kind="ship-tx") after recovery, and until it does, rolling
   this journal back to the anchored prefix erases recovery's
@@ -748,7 +749,9 @@ class ShipTxJournal(HashChainJournal):
         park — the journal file deleted outright and loading
         empty, or a journal rolled back to a terminal-only
         prefix — the rollback evidence has nowhere to land, so
-        recover raises AnchorError instead of returning an
+        recover raises JournalIntegrityError (a distinct
+        AnchorError subclass, cycle 18, carrying the bare
+        reasons and their sources) instead of returning an
         empty outcome list that would read as "nothing to
         settle"; the remedy is the correct anchor or an audited
         force_reanchor. Park outcomes carry an
@@ -756,8 +759,10 @@ class ShipTxJournal(HashChainJournal):
         each park reason. Both anchors are also re-verified
         after the settlement loop: a park reason appearing only
         then (a journal swapped mid-recovery) raises
-        AnchorError after the run's settlements, which stand as
-        journaled evidence. Recovery never advances either
+        JournalIntegrityError after the run's settlements,
+        which stand as journaled evidence and ride on the
+        exception as ``outcomes``; a NEW anchor-load failure
+        appearing only then stays plain AnchorError. Recovery never advances either
         anchor: transitions it appends leave the tx anchor
         stale-but-valid (it names an older prefix), and the
         caller must call update_anchor(..., kind="ship-tx")
@@ -868,12 +873,33 @@ class ShipTxJournal(HashChainJournal):
             # journal, an empty/terminal-only journal means no
             # transaction is at risk from it, and the ledger's
             # anchor is verified by the ledger's own consumers.
-            from trust.anchoring import AnchorError
-            raise AnchorError(
+            from trust.anchoring import JournalIntegrityError
+            # If the ship anchor ALSO carries park reasons in
+            # this call, they are part of the same integrity
+            # failure and ride on the raise (labelled, cycle 18
+            # fix round) instead of vanishing: the caller
+            # supplied both anchors to this call. The raise
+            # still FIRES on the tx reasons alone — the ship
+            # anchor has no equivalent raise of its own (above).
+            all_reasons = list(dict.fromkeys(
+                list(tx_park_reasons) + list(ship_park_reasons)))
+            all_sources = (
+                [f"ship: {r}" for r in ship_park_reasons]
+                + [f"ship-tx: {r}" for r in tx_park_reasons])
+            message = (
                 "ship-tx anchor verification failed with "
                 "chain-mismatch reasons and no non-terminal "
                 "transaction to park: "
                 + ", ".join(tx_park_reasons))
+            if ship_park_reasons:
+                message += (
+                    "; ship anchor also failed with "
+                    "chain-mismatch reasons: "
+                    + ", ".join(ship_park_reasons))
+            raise JournalIntegrityError(
+                message,
+                reasons=all_reasons,
+                anchor_sources=all_sources)
         anchor_reasons = ()
         if anchor_park_reasons:
             anchor_reasons = anchor_park_reasons
@@ -961,7 +987,12 @@ class ShipTxJournal(HashChainJournal):
             # journaled stand (they are evidence too), and the
             # new mismatch is raised for the operator rather
             # than silently passing on the stale verdict.
-            from trust.anchoring import AnchorError, verify_anchor
+            from trust.anchoring import AnchorError, \
+                JournalIntegrityError, verify_anchor
+            # (labelled entry, bare park reason or None) pairs:
+            # a bare reason marks chain-mismatch evidence; an
+            # anchor_error: entry (reason None) is a NEW anchor
+            # failure, not integrity evidence (cycle 18).
             new_park = []
             if anchor_path is not None:
                 try:
@@ -969,28 +1000,57 @@ class ShipTxJournal(HashChainJournal):
                             ledger, anchor_path, kind="ship"):
                         if r in ANCHOR_PARK_REASONS \
                                 and r not in ship_park_reasons:
-                            new_park.append(f"ship: {r}")
+                            new_park.append((f"ship: {r}", r))
                 except Exception as exc:
                     # An exception identical to the one the
                     # initial verification already classified is
                     # not a change; only a NEW failure is.
                     if f"anchor_error:{exc}" not in ship_reasons:
-                        new_park.append(f"ship: anchor_error:{exc}")
+                        new_park.append(
+                            (f"ship: anchor_error:{exc}", None))
             if tx_anchor_path is not None:
                 try:
                     for r in verify_anchor(
                             self, tx_anchor_path, kind="ship-tx"):
                         if r in ANCHOR_PARK_REASONS \
                                 and r not in tx_park_reasons:
-                            new_park.append(f"ship-tx: {r}")
+                            new_park.append((f"ship-tx: {r}", r))
                 except Exception as exc:
                     if f"anchor_error:{exc}" not in tx_reasons:
-                        new_park.append(f"ship-tx: anchor_error:{exc}")
+                        new_park.append(
+                            (f"ship-tx: anchor_error:{exc}", None))
             if new_park:
-                raise AnchorError(
+                message = (
                     "anchor verification changed during "
                     "recovery; a journal was swapped or rolled "
-                    "back mid-run: " + ", ".join(new_park))
+                    "back mid-run: "
+                    + ", ".join(label for label, _ in new_park))
+                park_pairs = [(label, r) for label, r in new_park
+                              if r is not None]
+                if park_pairs:
+                    # Journal-level integrity failure (cycle 18):
+                    # the distinct type, carrying the bare reasons
+                    # and their sources; any anchor_error: entries
+                    # are carried in .anchor_errors, never in
+                    # .reasons. Settlements already journaled
+                    # stand, and the completed outcomes ride on
+                    # the exception because the raise discards the
+                    # return value.
+                    raise JournalIntegrityError(
+                        message,
+                        reasons=[r for _, r in park_pairs],
+                        anchor_sources=[label for label, _
+                                        in park_pairs],
+                        outcomes=outcomes,
+                        anchor_errors=[label for label, r
+                                       in new_park if r is None])
+                # Error-only change: plain AnchorError, but the
+                # completed outcomes are attached so settlements
+                # are not silently discarded with the return
+                # value on this branch either (fix round).
+                plain = AnchorError(message)
+                plain.outcomes = tuple(outcomes)
+                raise plain
         return outcomes
 
     def _recover_one(self, ledger, loop, tx_id, stamp, *, root,

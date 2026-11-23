@@ -50,6 +50,7 @@ from .release import (
 )
 from .anchoring import (
     AnchorError,
+    JournalIntegrityError,
     force_reanchor,
     initialise_anchor,
     load_anchor,
@@ -108,6 +109,7 @@ __all__ = [
     "build_release_record",
     "release_from_dict",
     "release_from_json",
+    "JournalIntegrityError",
     "check_ship",
     "record_ship",
     "commit_production",

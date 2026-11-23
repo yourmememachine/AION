@@ -622,5 +622,377 @@ class FixRoundTests(TxAnchorFixture):
                          ["ship: anchor_head_not_in_chain"])
 
 
+class JournalIntegrityErrorTests(TxAnchorFixture):
+    """Cycle 18: the journal-level raises are a DISTINCT type
+    (JournalIntegrityError, an AnchorError subclass carrying
+    bare reasons + labelled sources), so a journal-level
+    integrity failure cannot be conflated with an anchor-load
+    error; hardlink aliases of the same-file guard are pinned."""
+
+    def test_deleted_journal_raises_distinct_type_with_reasons(self):
+        from trust.anchoring import JournalIntegrityError
+        self.post_record_tx()
+        self.init_tx_anchor()
+        (self.home / "ship-tx.json").unlink()
+        fresh = ShipTxJournal(self.home)
+        with self.assertRaises(JournalIntegrityError) as ctx:
+            fresh.recover(self.ledger, self.loop3(), recorded_at=NOW,
+                          tx_anchor_path=self.tx_anchor_path())
+        exc = ctx.exception
+        self.assertIs(type(exc), JournalIntegrityError)
+        self.assertIsInstance(exc, AnchorError)
+        self.assertEqual(exc.reasons, ("anchor_ahead_of_journal",))
+        self.assertEqual(exc.anchor_sources,
+                         ("ship-tx: anchor_ahead_of_journal",))
+        self.assertEqual(exc.anchor_source, "ship-tx")
+        self.assertIn("anchor_ahead_of_journal", str(exc))
+
+    def test_all_terminal_forged_anchor_raises_distinct_type(self):
+        from trust.anchoring import JournalIntegrityError
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        outcomes = self.journal.recover(
+            self.ledger, self.loop3(), recorded_at=NOW,
+            tx_anchor_path=self.tx_anchor_path())
+        self.assertEqual([o["to_state"] for o in outcomes], [COMMITTED])
+        self.tx_anchor_path().write_text(json.dumps({
+            "v": "ledger-anchor/1", "kind": "ship-tx",
+            "head": "f" * 64, "seq": 1, "anchored_at": NOW}))
+        with self.assertRaises(JournalIntegrityError) as ctx:
+            self.journal.recover(
+                self.ledger, self.loop3(), recorded_at=NOW,
+                tx_anchor_path=self.tx_anchor_path())
+        self.assertEqual(ctx.exception.reasons,
+                         ("anchor_head_not_in_chain",))
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+
+    def test_second_run_after_park_raises_distinct_type(self):
+        from trust.anchoring import JournalIntegrityError
+        self.post_record_tx()
+        self.tx_anchor_path().parent.mkdir(parents=True, exist_ok=True)
+        self.tx_anchor_path().write_text(json.dumps({
+            "v": "ledger-anchor/1", "kind": "ship-tx",
+            "head": "f" * 64, "seq": 1, "anchored_at": NOW}))
+        outcomes = self.journal.recover(
+            self.ledger, self.loop3(), recorded_at=NOW,
+            tx_anchor_path=self.tx_anchor_path())
+        self.assertEqual([o["to_state"] for o in outcomes], [ANOMALY])
+        with self.assertRaises(JournalIntegrityError) as ctx:
+            self.journal.recover(
+                self.ledger, self.loop3(), recorded_at=NOW,
+                tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), JournalIntegrityError)
+
+    def test_wrapper_propagates_distinct_type_unwrapped(self):
+        from trust.anchoring import JournalIntegrityError
+        self.post_record_tx()
+        self.init_tx_anchor()
+        (self.home / "ship-tx.json").unlink()
+        with self.assertRaises(JournalIntegrityError) as ctx:
+            recover_ship_tx(
+                ShipLedger(self.home), self.loop3(), recorded_at=NOW,
+                tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), JournalIntegrityError)
+
+    def test_constructor_contract(self):
+        from trust.anchoring import JournalIntegrityError
+        exc = JournalIntegrityError(
+            "m: anchor_head_not_in_chain",
+            reasons=["anchor_head_not_in_chain",
+                     "anchor_head_not_in_chain"],
+            anchor_sources=["ship-tx: anchor_head_not_in_chain"])
+        self.assertEqual(exc.reasons, ("anchor_head_not_in_chain",))
+        self.assertEqual(exc.anchor_source, "ship-tx")
+        combined = JournalIntegrityError(
+            "m", reasons=["anchor_head_not_in_chain"],
+            anchor_sources=["ship: anchor_head_not_in_chain",
+                            "ship-tx: anchor_head_not_in_chain"])
+        self.assertEqual(combined.anchor_source, "combined")
+        with self.assertRaises(ValueError):
+            JournalIntegrityError("m", reasons=[],
+                                  anchor_sources=[])
+
+    def test_anchor_primitives_stay_plain_anchor_error(self):
+        from trust.anchoring import JournalIntegrityError
+        self.init_tx_anchor()
+        with self.assertRaises(AnchorError) as ctx:
+            self.init_tx_anchor()
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertNotIsInstance(ctx.exception, JournalIntegrityError)
+
+    def test_ship_anchor_only_park_with_nothing_to_park_no_raise(self):
+        # The deliberate asymmetry stands (cycle 17): the ship
+        # anchor pins a DIFFERENT file, so its park reasons with
+        # no non-terminal transaction do not raise.
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        outcomes = self.journal.recover(
+            self.ledger, self.loop3(), recorded_at=NOW,
+            tx_anchor_path=self.tx_anchor_path())
+        self.assertEqual([o["to_state"] for o in outcomes], [COMMITTED])
+        self.ship_anchor_path().parent.mkdir(parents=True,
+                                             exist_ok=True)
+        self.ship_anchor_path().write_text(json.dumps({
+            "v": "ledger-anchor/1", "kind": "ship",
+            "head": "f" * 64, "seq": 1, "anchored_at": NOW}))
+        outcomes = self.journal.recover(
+            self.ledger, self.loop3(), recorded_at=NOW,
+            anchor_path=self.ship_anchor_path())
+        self.assertEqual(outcomes, [])
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+
+    def test_same_file_hardlink_alias_of_ship_anchor(self):
+        import os
+        tx_id = self.post_record_tx()
+        initialise_anchor(self.ledger, self.ship_anchor_path(),
+                          kind="ship", recorded_at=NOW,
+                          allow_nonempty_ceremony=True)
+        alias = Path(self.tmp.name) / "anchors" / "hardlink.anchor.json"
+        os.link(self.ship_anchor_path(), alias)
+        outcomes = self.journal.recover(
+            self.ledger, self.loop3(), recorded_at=NOW,
+            anchor_path=self.ship_anchor_path(),
+            tx_anchor_path=alias)
+        self.assertEqual(len(outcomes), 1)
+        self.assertIn("same file", outcomes[0]["error"])
+        self.assertEqual(self.journal.state(tx_id),
+                         POST_RECORD_VERIFIED)
+
+    def test_same_file_hardlink_alias_of_tx_anchor(self):
+        import os
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        alias = Path(self.tmp.name) / "anchors" / "hardlink2.anchor.json"
+        os.link(self.tx_anchor_path(), alias)
+        outcomes = self.journal.recover(
+            self.ledger, self.loop3(), recorded_at=NOW,
+            anchor_path=alias,
+            tx_anchor_path=self.tx_anchor_path())
+        self.assertEqual(len(outcomes), 1)
+        self.assertIn("same file", outcomes[0]["error"])
+        self.assertEqual(self.journal.state(tx_id),
+                         POST_RECORD_VERIFIED)
+
+    def test_byte_copy_distinct_inode_still_parks(self):
+        # A byte-identical COPY is a different file (distinct
+        # inode): file identity, not content, is the guard, so
+        # a copied ship anchor passed as the tx anchor parks on
+        # kind mismatch like any substituted anchor.
+        tx_id = self.post_record_tx()
+        initialise_anchor(self.ledger, self.ship_anchor_path(),
+                          kind="ship", recorded_at=NOW,
+                          allow_nonempty_ceremony=True)
+        copy_path = Path(self.tmp.name) / "anchors" / "copy.anchor.json"
+        copy_path.write_bytes(self.ship_anchor_path().read_bytes())
+        outcomes = self.journal.recover(
+            self.ledger, self.loop3(), recorded_at=NOW,
+            tx_anchor_path=copy_path)
+        self.assertEqual([o["to_state"] for o in outcomes], [ANOMALY])
+        self.assertIn("anchor_kind_mismatch", outcomes[0]["reasons"])
+        self.assertEqual(self.journal.state(tx_id), ANOMALY)
+
+    def test_post_settlement_park_reason_raises_distinct_type(self):
+        from unittest import mock
+        from trust.anchoring import JournalIntegrityError
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        calls = {"n": 0}
+
+        def fake_verify(journal, path, *, kind, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ()
+            return ("anchor_head_not_in_chain",)
+
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake_verify):
+            with self.assertRaises(JournalIntegrityError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    tx_anchor_path=self.tx_anchor_path())
+        exc = ctx.exception
+        self.assertIs(type(exc), JournalIntegrityError)
+        self.assertEqual(exc.reasons, ("anchor_head_not_in_chain",))
+        self.assertEqual(exc.anchor_source, "ship-tx")
+        # Settlements stand and ride on the exception.
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+        self.assertEqual([o["to_state"] for o in exc.outcomes],
+                         [COMMITTED])
+
+    def test_constructor_validation_fix_round(self):
+        from trust.anchoring import JournalIntegrityError
+        # An operator reason can never mint the distinct type.
+        with self.assertRaises(ValueError):
+            JournalIntegrityError(
+                "m", reasons=["anchor_malformed"],
+                anchor_sources=["ship-tx: anchor_malformed"])
+        # Empty sources fabricate provenance: refused.
+        with self.assertRaises(ValueError):
+            JournalIntegrityError(
+                "m", reasons=["anchor_ahead_of_journal"],
+                anchor_sources=[])
+        # A reason with no matching labelled source: refused.
+        with self.assertRaises(ValueError):
+            JournalIntegrityError(
+                "m", reasons=["anchor_ahead_of_journal",
+                              "anchor_head_not_in_chain"],
+                anchor_sources=["ship-tx: anchor_ahead_of_journal"])
+        # Bare strings are not sequences of reasons.
+        with self.assertRaises(ValueError):
+            JournalIntegrityError(
+                "m", reasons="anchor_ahead_of_journal",
+                anchor_sources=["ship-tx: anchor_ahead_of_journal"])
+        # Duplicate sources dedupe; pickle/deepcopy round-trip.
+        import copy
+        import pickle
+        exc = JournalIntegrityError(
+            "m", reasons=["anchor_head_not_in_chain"],
+            anchor_sources=["ship-tx: anchor_head_not_in_chain",
+                            "ship-tx: anchor_head_not_in_chain"],
+            outcomes=[{"to_state": "COMMITTED"}])
+        self.assertEqual(exc.anchor_sources,
+                         ("ship-tx: anchor_head_not_in_chain",))
+        for clone in (pickle.loads(pickle.dumps(exc)),
+                      copy.deepcopy(exc)):
+            self.assertIs(type(clone), JournalIntegrityError)
+            self.assertEqual(clone.reasons, exc.reasons)
+            self.assertEqual(clone.anchor_sources, exc.anchor_sources)
+            self.assertEqual(clone.outcomes, exc.outcomes)
+
+    def test_pre_settlement_combined_anchors_carry_both_sources(self):
+        from trust.anchoring import JournalIntegrityError
+        self.post_record_tx()
+        self.init_tx_anchor()
+        outcomes = self.journal.recover(
+            self.ledger, self.loop3(), recorded_at=NOW,
+            tx_anchor_path=self.tx_anchor_path())
+        self.assertEqual([o["to_state"] for o in outcomes], [COMMITTED])
+        for path, kind in ((self.tx_anchor_path(), "ship-tx"),
+                           (self.ship_anchor_path(), "ship")):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "v": "ledger-anchor/1", "kind": kind,
+                "head": "f" * 64, "seq": 1, "anchored_at": NOW}))
+        with self.assertRaises(JournalIntegrityError) as ctx:
+            self.journal.recover(
+                self.ledger, self.loop3(), recorded_at=NOW,
+                anchor_path=self.ship_anchor_path(),
+                tx_anchor_path=self.tx_anchor_path())
+        exc = ctx.exception
+        self.assertIs(type(exc), JournalIntegrityError)
+        self.assertEqual(exc.anchor_source, "combined")
+        self.assertEqual(
+            set(exc.anchor_sources),
+            {"ship: anchor_head_not_in_chain",
+             "ship-tx: anchor_head_not_in_chain"})
+        self.assertIn("ship anchor also failed", str(exc))
+
+    def test_post_settlement_combined_sources(self):
+        from unittest import mock
+        from trust.anchoring import JournalIntegrityError
+        tx_id = self.post_record_tx()
+        initialise_anchor(self.ledger, self.ship_anchor_path(),
+                          kind="ship", recorded_at=NOW,
+                          allow_nonempty_ceremony=True)
+        self.init_tx_anchor()
+        seen = {}
+
+        def fake_verify(journal, path, *, kind, **kw):
+            seen[kind] = seen.get(kind, 0) + 1
+            if seen[kind] == 1:
+                return ()
+            return ("anchor_head_not_in_chain",)
+
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake_verify):
+            with self.assertRaises(JournalIntegrityError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    anchor_path=self.ship_anchor_path(),
+                    tx_anchor_path=self.tx_anchor_path())
+        exc = ctx.exception
+        self.assertIs(type(exc), JournalIntegrityError)
+        self.assertEqual(exc.anchor_source, "combined")
+        self.assertEqual(exc.anchor_sources,
+                         ("ship: anchor_head_not_in_chain",
+                          "ship-tx: anchor_head_not_in_chain"))
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+
+    def test_post_settlement_mixed_park_and_anchor_error(self):
+        from unittest import mock
+        from trust.anchoring import JournalIntegrityError
+        self.post_record_tx()
+        initialise_anchor(self.ledger, self.ship_anchor_path(),
+                          kind="ship", recorded_at=NOW,
+                          allow_nonempty_ceremony=True)
+        self.init_tx_anchor()
+        seen = {}
+
+        def fake_verify(journal, path, *, kind, **kw):
+            seen[kind] = seen.get(kind, 0) + 1
+            if seen[kind] == 1:
+                return ()
+            if kind == "ship":
+                raise AnchorError("anchor_malformed")
+            return ("anchor_head_not_in_chain",)
+
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake_verify):
+            with self.assertRaises(JournalIntegrityError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    anchor_path=self.ship_anchor_path(),
+                    tx_anchor_path=self.tx_anchor_path())
+        exc = ctx.exception
+        self.assertIs(type(exc), JournalIntegrityError)
+        self.assertEqual(exc.reasons, ("anchor_head_not_in_chain",))
+        self.assertEqual(exc.anchor_sources,
+                         ("ship-tx: anchor_head_not_in_chain",))
+        self.assertEqual(exc.anchor_errors,
+                         ("ship: anchor_error:anchor_malformed",))
+        self.assertIn("anchor_error:anchor_malformed", str(exc))
+
+    def test_post_settlement_no_new_reason_does_not_raise(self):
+        from unittest import mock
+        self.post_record_tx()
+        self.init_tx_anchor()
+
+        def fake_verify(journal, path, *, kind, **kw):
+            return ("anchor_head_not_in_chain",)
+
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake_verify):
+            outcomes = self.journal.recover(
+                self.ledger, self.loop3(), recorded_at=NOW,
+                tx_anchor_path=self.tx_anchor_path())
+        self.assertEqual([o["to_state"] for o in outcomes], [ANOMALY])
+
+    def test_post_settlement_anchor_error_only_stays_plain(self):
+        from unittest import mock
+        from trust.anchoring import JournalIntegrityError
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        calls = {"n": 0}
+
+        def fake_verify(journal, path, *, kind, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ()
+            raise AnchorError("anchor_malformed")
+
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake_verify):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertNotIsInstance(ctx.exception, JournalIntegrityError)
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+        self.assertEqual(
+            [o["to_state"] for o in ctx.exception.outcomes],
+            [COMMITTED])
+
+
 if __name__ == "__main__":
     unittest.main()

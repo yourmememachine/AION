@@ -446,7 +446,9 @@ def recover_ship_tx(ledger, loop, *, recorded_at="", root=None,
     anchor; the same file passed for both paths is an
     operator error, and a tx-anchor chain mismatch with no
     transaction at all to park (the deleted-journal case)
-    raises AnchorError (see trust.shiptx). Recovery never
+    raises JournalIntegrityError, the distinct AnchorError
+    subclass for journal-level integrity failures (see
+    trust.shiptx). Recovery never
     advances either anchor.
     Recovery NEVER re-burns and NEVER re-runs a cycle, and it
     is idempotent for settled transactions: a second run
