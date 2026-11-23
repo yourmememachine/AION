@@ -1,6 +1,7 @@
 """Signing package: MAC-authenticated gate decisions, verifier
 attestations, and signed state snapshots."""
 
+from . import ed25519
 from .gate_decision import (
     ALG,
     CLOCK_SKEW_SECONDS,
@@ -67,10 +68,14 @@ from .pin_ceremony import (
     verify_ceremony_record,
 )
 from .ceremony_authorisation import (
+    ALG_CEREMONY,
     CEREMONY_AUTHORISATION_DOMAIN,
     CEREMONY_AUTHORISATION_TTL_DEFAULT_SECONDS,
     CEREMONY_AUTHORISATION_TTL_MAX_SECONDS,
     PURPOSE_CEREMONY_AUTHORISATION,
+    REFUSED_TEST_SEEDS,
+    CeremonyPublicKey,
+    CeremonySigningKey,
     SignedCeremonyAuthorisation,
     authorisation_id_for,
     ceremony_authorisation_envelope_from_dict,
@@ -78,6 +83,10 @@ from .ceremony_authorisation import (
     ceremony_authorisation_envelope_to_dict,
     ceremony_authorisation_envelope_to_json,
     ceremony_authorisation_payload,
+    ceremony_public_key_for,
+    generate_ceremony_key_file,
+    load_ceremony_seed,
+    public_key_id_for,
     sign_ceremony_authorisation,
     verify_ceremony_authorisation,
 )
@@ -95,6 +104,7 @@ from .attestation import (
 )
 
 __all__ = [
+    "ed25519",
     "ALG",
     "CLOCK_SKEW_SECONDS",
     "DOMAIN",
@@ -154,10 +164,14 @@ __all__ = [
     "state_snapshot_payload",
     "verify_signed_snapshot",
     "verify_snapshot_for_state",
+    "ALG_CEREMONY",
     "CEREMONY_AUTHORISATION_DOMAIN",
     "CEREMONY_AUTHORISATION_TTL_DEFAULT_SECONDS",
     "CEREMONY_AUTHORISATION_TTL_MAX_SECONDS",
     "PURPOSE_CEREMONY_AUTHORISATION",
+    "REFUSED_TEST_SEEDS",
+    "CeremonyPublicKey",
+    "CeremonySigningKey",
     "SignedCeremonyAuthorisation",
     "authorisation_id_for",
     "ceremony_authorisation_envelope_from_dict",
@@ -165,6 +179,10 @@ __all__ = [
     "ceremony_authorisation_envelope_to_dict",
     "ceremony_authorisation_envelope_to_json",
     "ceremony_authorisation_payload",
+    "ceremony_public_key_for",
+    "generate_ceremony_key_file",
+    "load_ceremony_seed",
+    "public_key_id_for",
     "sign_ceremony_authorisation",
     "verify_ceremony_authorisation",
     "PIN_CEREMONY_DOMAIN",

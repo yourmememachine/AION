@@ -591,6 +591,29 @@ class CeremonyAuthorisationLedger(HashChainJournal):
             raise LedgerError(
                 "can only ledger a SignedCeremonyAuthorisation")
         self._reload()
+        # Duplicate re-check against the FRESHLY loaded entries
+        # (cycle 20 fix round): the mode's anti-replay scan ran
+        # earlier on its own snapshot, so a competitor commit
+        # landing between that scan and this append must be
+        # caught here, at the commit point — otherwise two
+        # envelopes are handed out for one (ceremony_id,
+        # evidence_hash) pair. This check composes with
+        # HashChainJournal._save's under-flock freshness check:
+        # a commit landing before this reload is seen by the
+        # check below; a commit landing after it trips the
+        # freshness check in _save instead. Either way the
+        # loser raises (LedgerError here, CorruptLedgerError —
+        # a LedgerError subclass — from _save) and its envelope
+        # is withheld by the mode as ledger_failed.
+        for entry in self._entries:
+            if entry["ceremony_id"] == signed.ceremony_id:
+                raise LedgerError(
+                    "ceremony_id already authorised: "
+                    f"{signed.ceremony_id}")
+            if entry["evidence_hash"] == signed.evidence_hash:
+                raise LedgerError(
+                    "evidence_hash already authorised for another "
+                    "ceremony")
         return self._append(
             "authorise", recorded_at,
             authorisation_id=signed.authorisation_id,

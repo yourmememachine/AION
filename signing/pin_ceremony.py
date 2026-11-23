@@ -3,7 +3,7 @@
 Cycle 15 (backlog item ``snapshot-pin-ceremony``). Cycle 14 made
 the strict snapshot wrapper refuse any candidate more than one
 sequence past the caller's pin (``chain_gap``). That refusal is
-fail-closed by design, but without a recovery path it is also a
+refuse-on-gap by design, but without a recovery path it is also a
 liveness trap: a missed or expired intermediate deadlocks strict
 catch-up forever. Both external war-room seats (cycle 14) and the
 internal forced-dissent seat named the same fix — build the
@@ -16,9 +16,10 @@ This module is that ceremony, and nothing else:
   same-hash is an idempotent no-op; everything else is refused.
 - ``reanchor_pin`` is the exceptional movement. It requires ALL
   of: a verifier-issued ceremony authorisation envelope (cycle
-  19 — operator authority comes from the verifier's own
-  protected operator list, never from the caller; there is no
-  caller-supplied list and no fallback path); an allowlisted
+  19, made asymmetric in cycle 20 — operator-id allowlist
+  eligibility comes from the verifier's own protected operator
+  list, never from the caller; there is no caller-supplied list
+  and no fallback path); an allowlisted
   reason; independent evidence (a hex64 hash that is NOT derived
   from the candidate itself — a pin must never be
   reconstructed from the snapshot being verified); and a candidate
@@ -42,6 +43,31 @@ and ``integrity_failure`` (anything else). Callers must handle
 ``reanchor_required`` through this ceremony and must treat
 ``integrity_failure`` as a stop, never as a ceremony trigger.
 
+Caller preconditions (cycle 20) — obligations of the caller (the
+future loop/storage layer) that this function CANNOT verify;
+they are documented here so a caller can be audited against
+them, not because naming them enforces them:
+
+- FRESH-PIN: ``old_pin`` must be read from the caller's pin
+  store at the start of this ceremony attempt, not cached,
+  reconstructed, or replayed from an earlier attempt.
+- COMPLETE-HISTORY: ``ceremony_history`` must contain every
+  ceremony record the caller has ever accepted, in particular
+  including the record of any prior consumption of this same
+  envelope.
+- ATOMIC-ADOPTION: on success the caller must persist the
+  returned pin and append the returned record to its history
+  as one step, before any further ceremony or advance; on
+  refusal it must persist neither.
+- EVIDENCE-INTENT: ``evidence_hash`` must come from the
+  caller's own record of the evidence it reviewed, never
+  copied from the presented envelope; copying it converts the
+  binding check into an echo.
+
+None of the four is verifiable in-process; they are the
+loop/storage layer's obligations, stated here so a caller can
+be audited against them.
+
 Honest limits:
 
 - The step-observation check is NOT a cryptographic continuity
@@ -54,40 +80,81 @@ Honest limits:
   per cycle) belongs to the loop/storage layer, not this module,
   and is not proven here. Where emission is not dense, gaps are
   expected and each one costs a ceremony — that cost is the
-  stated price of fail-closed step-observation, not a defect
+  stated price of refuse-on-gap step-observation, not a defect
   this module hides.
-- Authorisation (cycle 19) comes from a verifier-issued,
-  event-bound ceremony authorisation envelope: the operator list
-  lives in the verifier's protected config, and the envelope —
-  MACed under the verifier's key, in its own domain, under key
-  separation from the snapshot key (enforced in-process) —
-  binds the operator, the ceremony id, the reason, the old pin,
-  the candidate and the evidence hash. This module verifies the
-  envelope's MAC and expiry on the ceremony's single captured
-  clock and checks EXACT binding against the ceremony's captured
-  parameters; an envelope for any other operator, pin, candidate
-  or evidence is refused, and an envelope failure never falls
-  back to any other authority path. Operator identity is list
-  membership via the verifier's launch channel, not
-  authentication of a human, and the MAC is symmetric (any
-  holder of the verifier key can forge an envelope), exactly as
-  elsewhere in ``signing/``.
-- Evidence provenance (cycle 19) is attribution + event binding
-  + issuance-side single-use + a signed binding — NOT artefact
-  inspection. The verifier never inspects the evidence artefact
-  the hash names; a random hex64 presented by a LISTED operator
-  is still issuable. What the envelope proves is that a listed
-  operator presented this evidence hash bound to this exact
-  event, that the presentation was ledgered single-use at
-  issuance, and that the binding is signed by the verifier's
-  key. In-process, evidence independence is additionally
-  enforced as non-equality with the candidate's own hashes
-  (war-room cycle 15, forced-dissent seat): a re-hash of the
-  candidate is refused at the ceremony as defence in depth.
-  The envelope's ``evidence_ref`` is not (and cannot be)
-  equality-checked in-process — the caller has no independent
-  value for it; it is bound transitively through the audit
-  record's ``authorisation_id``.
+- Authorisation (cycle 19; asymmetric since cycle 20) comes
+  from a verifier-issued, event-bound ceremony authorisation
+  envelope: the operator list lives in the verifier's protected
+  config, and the envelope — signed under the verifier's
+  Ed25519 key, in its own domain — binds the operator, the
+  ceremony id, the reason, the old pin, the candidate and the
+  evidence hash. This module verifies the envelope's signature
+  and expiry on the ceremony's single captured clock and checks
+  EXACT binding against the ceremony's captured parameters; an
+  envelope for any other operator, pin, candidate or evidence
+  is refused, and an envelope failure never falls back to any
+  other authority path. The authorisation is asymmetric:
+  forgery requires the verifier's seed, which never leaves the
+  verifier process; this module holds only the pinned public
+  key (a ``CeremonyPublicKey``, a type that cannot hold secret
+  material), so possession of everything ``reanchor_pin``
+  receives no longer confers the ability to mint an envelope,
+  and a forged envelope fails verification IN PROCESS, not
+  merely on audit. Key separation is type separation (a
+  ``SigningKey`` passed as the authorisation public key is a
+  type refusal) plus role separation (minting material is
+  absent from the ceremony process). There is no in-process
+  id-inequality check: the cycle-19 check compared key ids
+  from disjoint derivation namespaces (``pub-…`` for the
+  authorisation public key, ``key-…`` for the snapshot key),
+  so it could never fire for any key material, and cycle 20
+  deleted it rather than keep a guard that guards nothing;
+  the real seed-reuse defence is provisioning-side, in the
+  verifier's configuration.
+  Operator identity is operator-id allowlist eligibility via
+  the verifier's launch channel, not authentication: the
+  verifier checks that the presented operator_id was on its
+  configured allowlist at issuance; it does not and cannot
+  verify that the presenter *is* that operator — no
+  per-operator credential exists in this system, and any caller
+  able to launch the verifier can present any listed id. The
+  envelope proves a presentation under an allowlisted id,
+  ledgered at issuance and bound to this event — workflow
+  provenance, not cryptographic attribution: nothing in the
+  envelope is evidence *by* the operator, only *about* them,
+  and it does not prove which human or process made the
+  presentation.
+- Evidence provenance (cycle 19; resolution added cycle 20) is
+  workflow attribution + event binding + issuance-side single-use + a
+  signed binding. At issuance the verifier resolves the
+  evidence artefact itself under its configured evidence root
+  and hashes the bytes it read; the hash carried in the
+  envelope is the verifier-computed hash, cross-checked
+  against the hash the presenter supplied, and the verifier
+  retains a copy of the resolved bytes. What the envelope
+  proves is that an allowlisted operator id presented this
+  evidence bound to this exact event, that the presentation
+  was ledgered single-use at issuance, and that the binding is
+  signed by the verifier's key. NO consumption path reads
+  retained copies: retention is an audit artefact for a future
+  audit process, ``reanchor_pin`` neither consults nor can
+  consult the retained bytes, and the signed envelope hash is
+  the commitment to them. In-process, evidence independence is
+  additionally enforced as non-equality with the candidate's
+  own hashes (war-room cycle 15, forced-dissent seat): a
+  re-hash of the candidate is refused at the ceremony as
+  defence in depth. The envelope's ``evidence_ref`` is not
+  (and cannot be) equality-checked in-process — the caller has
+  no independent value for it; it is bound transitively
+  through the audit record's ``authorisation_id``.
+  Issuance accounting, consumption enforcement and anchored
+  provenance are three separate claims: issuance-side
+  single-use is accounting at the verifier (it proves the pair
+  was burned when the envelope was minted); it is NOT
+  consumption enforcement (nothing burns when ``reanchor_pin``
+  runs — see the consumption limit below) and NOT anchored
+  provenance (the anchored store carries neither the evidence
+  hash nor the operator id).
 - The returned pin is the ordinary pin shape, so downstream
   continuity looks clean unless the caller retains and checks
   the ceremony record; nothing in the pin itself marks the jump.
@@ -108,47 +175,85 @@ and this candidate (including the pin's key/signer bindings,
 when the pin carries them — a pin without those optional
 fields has no bindings to bind to). A gap candidate whose
 ``prev_snapshot_hash`` names the pin itself is refused as an
-integrity failure. An optional ``ceremony_history`` (verified
-records only) refuses evidence reuse, replayed targets,
-candidates behind the history's attested head, and candidates
-predating the latest ceremony — ONLY under a complete,
-caller-supplied history: the parameter is opt-in, a truncated
-or omitted history silently disables every one of those
-checks, and the records are attested under the same symmetric
-key, so this is a consistency check over caller-supplied
-input, not rollback or replay protection. The no-pin reasons
-(``initial_anchor`` / ``lost_pin`` / ``corrupted_pin``) receive
-no recomputation and no history requirement. Without pin
-context, ``verify_ceremony_record`` proves a record was
-issued, not that it applies to the caller's pin state.
+integrity failure. A required ``ceremony_history`` (verified
+records only; ``None`` refuses for every reason — cycle 20,
+fail-closed on omission) refuses evidence reuse, replayed
+targets, candidates behind the history's attested ceremony
+head, and candidates predating the latest ceremony — ONLY
+under a complete, caller-supplied history: a truncated or
+stale history silently passes every one of those checks, the
+history records ceremonies only (``advance_pin`` movements
+leave no trace in it, so its head is the ceremony head, not
+the pin head), and the records are attested under the same
+symmetric key, so this is a consistency check over
+caller-supplied input, not rollback or replay protection.
+Fail-closed on omission means exactly that: omission refuses,
+but an explicit empty history is a caller assertion that no
+prior ceremony exists — a claim this module cannot check, not
+verified continuity. ``initial_anchor`` additionally requires
+the history to be empty; ``initial_anchor`` refusing on any
+non-empty history, including unrelated-lineage history, is
+deliberate; the recovery is a ``lost_pin`` authorisation, not
+a history edit. The no-pin reasons (``initial_anchor`` /
+``lost_pin`` / ``corrupted_pin``) receive no recomputation;
+cycle 20 makes the history requirement apply to them as to
+``chain_gap_recovery``, with ``initial_anchor`` requiring an
+empty history. Without pin context,
+``verify_ceremony_record`` proves a record was issued, not
+that it applies to the caller's pin state.
 ``verify_ceremony_record`` refuses one-step records (which this
 ceremony can never issue) and, when the caller supplies the
 expected pin context, records replayed against a different pin
 state. What cycle 16 did NOT fix, and cycle 19 now addresses via
-the protected path: (1) operator authority was a caller-supplied
-list — it now comes from a verifier-issued, event-bound
-authorisation whose operator list lives in the verifier's
-protected config; (2) evidence was a bare digest whose
-provenance this module could not prove — it is now bound,
-attributed and issuance-side single-use as described above.
-The REMAINING limits, stated plainly: consumption-side replay —
-the verifier's ledger burns the (ceremony_id, evidence_hash)
-pair at ISSUANCE, not at consumption, so the same envelope
-presented to ``reanchor_pin`` twice within its TTL succeeds if
-``ceremony_history`` is omitted (history stays optional this
-cycle; making it mandatory belongs to the held cycles'
-re-review); no consumption-side ledger-presence check exists
-in-process (the ceremony cannot read the verifier's ledgers —
-limit M5); the ceremony journal's reuse memory is
-rollback-vulnerable until the follow-up
-``ceremony-journal-anchoring`` lands (reuse is prevented against
-an intact journal; after a rollback it is detectable only for
-same-ceremony_id reuse, and otherwise only by audit against
-retained envelopes — not prevented by one); nothing here
-persists the pin and the record atomically; and the ceremony
-RECORD's MAC still uses the snapshot signing key — key
-separation is enforced for the
-AUTHORISATION (cycle 19), the record's own key is unchanged.
+the protected path: (1) operator-id allowlist eligibility was
+a caller-supplied list — it now comes from a verifier-issued,
+event-bound authorisation whose operator list lives in the
+verifier's protected config; (2) evidence was a bare digest
+whose provenance this module could not prove — it is now
+bound, attributed and issuance-side single-use as described
+above, and since cycle 20 the verifier resolves and hashes
+the artefact itself at issuance.
+The REMAINING limits, stated plainly: consumption single-use
+is NOT achieved by this cycle — F1 is narrowed, still open.
+The verifier's ledger burns the (ceremony_id, evidence_hash)
+pair at ISSUANCE, not at consumption. Requiring
+``ceremony_history`` makes omission refuse (fail-closed on
+omission) and makes a second consumption refuse against a
+history the caller has updated with the first consumption's
+record; against a stale history — the same pre-consumption
+history supplied twice, or an honestly-empty history asserted
+twice — the same envelope presented to ``reanchor_pin`` twice
+within its TTL succeeds twice and returns the same pin again,
+and if the caller's real pin has since moved (by ceremony or
+by ``advance_pin``, which leaves no trace in the history at
+all) adopting that return regresses the pin. No in-process
+check can distinguish a stale history from a complete one,
+because the history is caller-supplied input and this module
+has no pin store, no ledger access, and no monotonic counter
+of its own. The real fix is unchanged from cycle 19's F1: a
+protected monotonic consumption head — a store outside the
+ceremony caller's control that records each consumed
+authorisation monotonically and is consulted, or written,
+atomically at consumption; its location remains an
+owner-level store decision. Until it lands, the cycles 14–16
+re-review condition on consumption (duplicate consumption
+fails with no/stale history) is NOT met for the stale-history
+leg — cycle 20 meets it only for the no-history leg — and no
+wording in this module may imply otherwise. No
+consumption-side ledger-presence check exists in-process (the
+ceremony cannot read the verifier's ledgers — limit M5); the
+ceremony journal's reuse memory is rollback-vulnerable until
+the follow-up ``ceremony-journal-anchoring`` lands (reuse is
+prevented against an intact journal; after a rollback it is
+detectable only for same-ceremony_id reuse, and otherwise
+only by audit against retained envelopes — not prevented by
+one); nothing here persists the pin and the record atomically
+(ATOMIC-ADOPTION above is the caller's duty, not a property
+of this function); and the ceremony RECORD's MAC still uses
+the snapshot signing key, symmetric as elsewhere in
+``signing/`` — the asymmetry of cycle 20 covers the
+authorisation envelope only, and the record's own key is
+unchanged.
 """
 
 from __future__ import annotations
@@ -172,7 +277,9 @@ from signing.gate_decision import (
     key_id_for,
 )
 from signing.ceremony_authorisation import (
+    CeremonyPublicKey,
     SignedCeremonyAuthorisation,
+    public_key_id_for,
     verify_ceremony_authorisation,
 )
 from signing.state_snapshot import (
@@ -441,10 +548,11 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
                  state_bytes, calibration_bytes, expected_signer_id,
                  operator_id, reason,
                  evidence_hash, authorisation,
-                 authorisation_key: SigningKey,
+                 authorisation_public_key: CeremonyPublicKey,
                  expected_verifier_signer_id,
+                 ceremony_history,
                  strict_reasons=None,
-                 now=None, ceremony_history=None) \
+                 now=None) \
         -> tuple[dict, PinCeremonyRecord]:
     """Ceremonied re-anchor: returns (new_pin, audit_record).
 
@@ -455,32 +563,64 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
 
     Cycle 19: authority is the ``authorisation`` envelope — a
     ``SignedCeremonyAuthorisation`` object (a raw dict is
-    refused) issued by the verifier under ``authorisation_key``
-    for the verifier identity ``expected_verifier_signer_id``.
-    There is no caller-supplied operator list and no fallback:
+    refused) issued by the verifier for the verifier identity
+    ``expected_verifier_signer_id``. Cycle 20: the envelope is
+    verified asymmetrically under ``authorisation_public_key`` —
+    a pinned ``CeremonyPublicKey`` holding public bytes only;
+    the verifier's seed never leaves the verifier process, and
+    there is no caller-supplied operator list and no fallback:
     an envelope that fails verification or exact binding refuses
-    the ceremony outright."""
+    the ceremony outright. ``ceremony_history`` is a REQUIRED
+    keyword (cycle 20): omitting it is a TypeError at the call
+    site, and an explicit ``None`` refuses early, before
+    envelope verification, for every reason — fail-closed on
+    omission."""
     if not isinstance(signing_key, SigningKey) \
             or signing_key.key_id != key_id_for(signing_key.key):
         raise SigningError("signing key is inconsistent")
     if not isinstance(signed, SignedStateSnapshot):
         raise SigningError("signed must be a SignedStateSnapshot")
-    # (1) Type checks (cycle 19): the authorisation must be the
-    # typed envelope object, never a raw dict a caller assembled.
+    # (1) Type checks (cycle 19; key gate cycle 20): the
+    # authorisation must be the typed envelope object, never a
+    # raw dict a caller assembled, and the authorisation verify
+    # key must be a CeremonyPublicKey — a type that cannot hold
+    # secret material. A SigningKey passed in that slot is a
+    # type refusal: this type gate, plus the absence of minting
+    # material from this process, IS the key separation now.
+    # The cycle-19 in-process id-inequality check is DELETED:
+    # ``pub-…`` and ``key-…`` ids are disjoint namespaces over
+    # different hash inputs, so the comparison could never fire
+    # (DESIGN-FINAL R3). What remains checkable in-process is
+    # that the verify object does not lie about its own derived
+    # id (``key_id_inconsistent`` in the envelope verifier's
+    # vocabulary, refused here before envelope verification).
     if not isinstance(authorisation, SignedCeremonyAuthorisation):
         raise SigningError(
             "authorisation must be a SignedCeremonyAuthorisation")
-    if not isinstance(authorisation_key, SigningKey):
-        raise SigningError("authorisation_key must be a SigningKey")
-    # (2) KEY SEPARATION (cycle 19): the authorisation key must
-    # differ from the snapshot signing key, checked BEFORE
-    # envelope verification so the refusal is unambiguous. Two
-    # keys with the same key_id are the same key for every
-    # purpose this module recognises.
-    if authorisation_key.key_id == signing_key.key_id:
+    if not isinstance(authorisation_public_key, CeremonyPublicKey):
         raise SigningError(
-            "ceremony authorisation key must differ from the "
-            "snapshot signing key (key separation)")
+            "authorisation_public_key must be a CeremonyPublicKey")
+    if authorisation_public_key.key_id \
+            != public_key_id_for(authorisation_public_key.public_key):
+        raise SigningError(
+            "authorisation public key is inconsistent: its key_id "
+            "does not match its public key (key_id_inconsistent)")
+    # (2) HISTORY PRESENCE (cycle 20): an explicit
+    # ceremony_history=None refuses HERE — before envelope
+    # verification, so the fail-closed-on-omission refusal is
+    # never masked by an expired or foreign envelope — for every
+    # reason. (Omitting the keyword entirely is a TypeError:
+    # the parameter has no default.) A supplied history —
+    # including an explicit empty one, which is a caller
+    # assertion that no prior ceremony exists — is content-
+    # checked later, at the history call site.
+    if ceremony_history is None:
+        raise SigningError(
+            "ceremony_history is required: reanchor_pin is "
+            "fail-closed on omission, so ceremony_history=None "
+            "refuses for every reason; supply the complete "
+            "ceremony history (an explicit empty history asserts "
+            "no prior ceremony exists)")
     _check_id(operator_id, "operator id")
     if reason not in REASONS:
         raise SigningError(f"ceremony reason must be one of {sorted(REASONS)}")
@@ -497,11 +637,13 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
         # is compared against these captured values, never a
         # re-read of the caller's dict.
         old_seq, old_hash, old_captured = _check_pin(old_pin, "old pin")
-    # (3) Envelope verification under the verifier's key, pinned
-    # to the expected verifier signer, judged on the ceremony's
-    # single captured clock.
+    # (3) Envelope verification under the verifier's pinned
+    # PUBLIC key (cycle 20: Ed25519, asymmetric — this process
+    # holds no minting material), pinned to the expected
+    # verifier signer, judged on the ceremony's single captured
+    # clock.
     auth_reasons = verify_ceremony_authorisation(
-        authorisation, signing_key=authorisation_key,
+        authorisation, public_key=authorisation_public_key,
         expected_signer_id=expected_verifier_signer_id, now=moment)
     if auth_reasons != ():
         raise SigningError(
@@ -614,10 +756,30 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
                 "('chain_gap',); the ceremony is refused")
     elif old_pin is None and reason not in _NO_PIN_REASONS:
         raise SigningError(f"reason {reason} requires an existing pin")
-    if ceremony_history is not None:
-        _check_ceremony_history(
-            ceremony_history, signing_key=signing_key,
-            evidence_hash=evidence_hash, signed=signed)
+    # History content checks (cycle 20): the history is required
+    # (presence was refused early, step (2)), so these checks now
+    # run on EVERY ceremony — there is no opt-in guard.
+    # initial_anchor additionally requires the history to be
+    # EMPTY, checked immediately before the generic check so a
+    # verified non-empty history gets this message: "initial" is
+    # a claim that no ceremony precedes this one, and a non-empty
+    # history contradicts it on its face (a missing pin after
+    # prior ceremonies is lost_pin, not initial_anchor). The
+    # refusal is deliberate even for unrelated-lineage history —
+    # see the module docstring.
+    if reason == REASON_INITIAL_ANCHOR \
+            and isinstance(ceremony_history, (list, tuple)) \
+            and len(ceremony_history) > 0:
+        raise SigningError(
+            "initial_anchor requires an empty ceremony history: "
+            "a non-empty history shows ceremonies already "
+            "occurred, so a missing pin is lost_pin, not "
+            "initial_anchor; a new authorisation under lost_pin "
+            "(with new evidence) is required — the present "
+            "envelope cannot be re-reasoned")
+    _check_ceremony_history(
+        ceremony_history, signing_key=signing_key,
+        evidence_hash=evidence_hash, signed=signed)
     # The candidate must pass EVERY attestation binding under the
     # bare verifier (which does not enforce the chain gap). Any
     # failure — integrity or freshness — refuses the ceremony.

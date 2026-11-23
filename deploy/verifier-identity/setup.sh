@@ -5,6 +5,10 @@
 #   * system user `aion-verifier` (nologin shell, no password login)
 #   * /var/lib/aion-verifier/{home,keys,anchors,registry}
 #       owned aion-verifier:aion-verifier, mode 0700
+#   * /var/lib/aion-verifier/evidence
+#       owned root:aion-verifier, mode 0750 — the ceremony
+#       evidence SOURCE directory: root provisions artifacts,
+#       the verifier only reads them (cycle 20)
 #   * /etc/aion-verifier/ (root-owned, 0700) and, ONLY if absent,
 #     /etc/aion-verifier/verifier.env (root-owned, 0600) — a
 #     template the operator fills in; an existing env file is
@@ -58,6 +62,14 @@ install -d -o "${VERIFIER_USER}" -g "${VERIFIER_USER}" -m 0700 \
     "${BASE}" "${BASE}/home" "${BASE}/keys" "${BASE}/anchors" \
     "${BASE}/registry"
 
+# Ceremony evidence source (cycle 20): deliberately NOT
+# verifier-owned. Root (the provisioning operator) writes
+# artifacts; the aion-verifier group (sole member: the
+# verifier) reads. The verifier must never be able to rewrite
+# the evidence it later hashes.
+install -d -o root -g "${VERIFIER_USER}" -m 0750 \
+    "${BASE}/evidence"
+
 install -d -o root -g root -m 0700 "${ENV_DIR}"
 if [[ -e "${ENV_FILE}" ]]; then
     echo "setup.sh: ${ENV_FILE} already exists, not overwriting"
@@ -92,14 +104,43 @@ AION_ANCHOR_PATH=/var/lib/aion-verifier/anchors/signing.anchor.json
 AION_ANCHOR_INIT=
 AION_BUDGETS_ANCHOR_PATH=/var/lib/aion-verifier/anchors/budgets.anchor.json
 AION_BUDGETS_ANCHOR_INIT=
-# Ceremony operator authority (cycle 19): comma-separated
-# operator ids authorised to obtain ceremony authorisations
-# (mode ceremony_authorise). The list lives ONLY in this
-# protected env file — a request can never carry it. Production
-# refuses startup while this is empty; research loads with the
-# mode disabled. Fill with the operator ids, e.g.
-# AION_CEREMONY_OPERATORS=operator-uma
+# Ceremony operator allowlist (cycle 19): comma-separated
+# operator ids allowlisted to be named as the operator id in
+# ceremony authorisations (mode ceremony_authorise). The list
+# lives ONLY in this protected env file — a request can never
+# carry it. Production refuses startup while this is empty;
+# research loads with the mode disabled. Fill with the
+# operator ids, e.g. AION_CEREMONY_OPERATORS=operator-uma
 AION_CEREMONY_OPERATORS=
+# Ceremony evidence (cycle 20): directory the verifier reads
+# evidence artifacts FROM at issuance (mode
+# ceremony_authorise). evidence_ref in a request is a relative
+# path under this directory; the verifier resolves it there,
+# hashes the bytes itself, and retains a copy under
+# AION_VERIFIER_HOME/ceremony-evidence/. Provision artifacts
+# as REAL files (no symlinks — the verifier refuses them),
+# owned root, mode 0640 in a root:aion-verifier 0750
+# directory: the verifier reads, it never writes here.
+# Production refuses startup while this is empty.
+AION_CEREMONY_EVIDENCE_DIR=/var/lib/aion-verifier/evidence
+# Ceremony signing seed (cycle 20): the Ed25519 seed the
+# verifier signs ceremony authorisations with — a second,
+# purpose-only secret beside gate.key (never the same bytes).
+# Provisioned by the operator with generate_ceremony_key_file
+# from signing.ceremony_authorisation (never generated
+# silently by setup.sh — a setup script that mints the minting
+# key unattended hides the provisioning act); 0600,
+# aion-verifier-owned, in the existing 0700 keys directory.
+# Record the derived public key id (pub-…) at provisioning
+# time: it is the value every ceremony caller pins.
+# Production refuses startup while this is empty.
+# MIGRATION (cycle 20, combined): existing production
+# deployments must set AION_CEREMONY_OPERATORS +
+# AION_CEREMONY_EVIDENCE_DIR + AION_CEREMONY_SIGNING_SEED_PATH
+# (provisioning the seed and the evidence directory, and
+# distributing the seed's pub-… pin to ceremony callers) or
+# the verifier refuses to start after upgrade.
+AION_CEREMONY_SIGNING_SEED_PATH=/var/lib/aion-verifier/keys/ceremony.seed
 # Production steady state (after the one-time anchor ceremony):
 # anchoring is mandatory and fail-closed, and the INIT flags
 # above are refused. Research deployments must set this variable
@@ -115,4 +156,4 @@ fi
 
 echo "setup.sh: done. Layout:"
 ls -ld "${BASE}" "${BASE}/home" "${BASE}/keys" "${BASE}/anchors" \
-    "${BASE}/registry" "${ENV_FILE}"
+    "${BASE}/registry" "${BASE}/evidence" "${ENV_FILE}"

@@ -8,3 +8,6 @@ Consequences:
 - Cycles 14+15+16 (snapshot chain-gap, pin ceremony, ceremony hardening) are re-reviewed for shipping only AFTER the extended gate lands and passes review. They stay HELD until then — do not ship them on the old gate.
 - The pin ceremony's independent operator authority and authenticated evidence provenance are to be sourced from the extended gate's protected store.
 - Implementation follows the standing process: >=3 coder seats building together, war room >=6 reviewers from other pods + ChatGPT and Gemini as blind external seats, reconciled unanimous verdict before anything ships.
+
+## Ratification (2026-11-23)
+Dilip was presented the as-built substitution (operator list in the verifier's protected env config, not a list inside the gate) with both external seats' positions (Gemini: the placement is the right call, the literal reading would be a security regression; ChatGPT: ratification itself is required). Dilip's answer: "Do the best." Recorded as RATIFIED: the verifier-env authority model stands as the accepted interpretation of this decision.

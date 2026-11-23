@@ -1,27 +1,44 @@
-"""Signed ceremony authorisations (cycle 19).
+"""Signed ceremony authorisations (cycle 20, v2).
 
 The pin ceremony (signing/pin_ceremony.py) re-anchors a snapshot
-pin after a chain gap, a lost pin or a corrupted pin. Before this
-cycle the ceremony took its operator authority from the CALLER:
-``reanchor_pin`` accepted an ``authorised_operators`` list from
-the same code that supplied the evidence — the authority and the
-evidence came from one hand, which is no authority at all. This
-module is the verifier-side replacement: a *ceremony
-authorisation* is an HMAC envelope, issued by the out-of-process
-verifier (trust/verifier_main.py, mode ``ceremony_authorise``)
-under the verifier's key, attesting that an operator named on the
-verifier's OWN protected configuration (the
-``AION_CEREMONY_OPERATORS`` env list, which no request can carry)
-presented a specific evidence hash bound to one exact recovery
-event. The ceremony consumes the envelope; it never sees a list.
+pin after a chain gap, a lost pin or a corrupted pin. Before
+cycle 19 the ceremony took the CALLER's word for who counted
+as an operator: ``reanchor_pin`` accepted an ``authorised_operators``
+list from the same code that supplied the evidence — the
+authority and the evidence came from one hand, which is no
+authority at all. The replacement: a *ceremony authorisation*
+is an Ed25519 envelope, issued by the out-of-process verifier
+(trust/verifier_main.py, mode ``ceremony_authorise``) under a
+ceremony seed that only the verifier holds, attesting that an
+operator id named on the verifier's OWN protected configuration
+(the ``AION_CEREMONY_OPERATORS`` env list, which no request can
+carry) presented a specific evidence hash bound to one exact
+recovery event. The ceremony consumes the envelope; it never
+sees a list, and it never holds minting material — it holds
+only the verifier's 32-byte public key, pinned as a
+``CeremonyPublicKey``.
+
+What "v2" means, as a conjunction: an Ed25519 signature under
+the verifier's ceremony seed, over an ``evidence_hash`` the
+verifier computed itself (below), under the narrowed operator
+claim stated verbatim below. Cycle 19's v1 envelopes were
+HMAC-signed; v2 has NO HMAC path and no dual-verify window —
+the HMAC code is deleted from this module, the domain and
+payload version are bumped, and a v1 envelope is refused at
+parse time when it still carries its HMAC-era markers (a
+``key-…`` id and/or a hex64 signature — see
+``ceremony_authorisation_envelope_from_dict``). There is no
+version field to check: a fully relabelled v1 envelope is
+indistinguishable from a v2 forgery and dies at signature
+verification instead.
 
 Structural divergence from signing/attestation.py, stated
 plainly: there the signer IS the attester. Here the signer (the
 verifier) is NOT the operator — the verifier signs ABOUT the
 operator's presentation. The operator holds no key and signs
-nothing; operator authority is list membership decided at
-issuance time inside the verifier, against configuration the
-request cannot influence.
+nothing.
+
+Operator identity is operator-id allowlist eligibility via the verifier's launch channel, not authentication: the verifier checks that the presented operator_id was on its configured allowlist at issuance; it does not and cannot verify that the presenter *is* that operator — no per-operator credential exists in this system, and any caller able to launch the verifier can present any listed id. The envelope proves a presentation under an allowlisted id, ledgered at issuance and bound to this event — workflow provenance, not cryptographic attribution: nothing in the envelope is evidence *by* the operator, only *about* them, and it does not prove which human or process made the presentation.
 
 The reason allowlist below is a LOCAL MIRROR of
 ``signing.pin_ceremony.REASONS``. This module must NOT import
@@ -29,65 +46,112 @@ pin_ceremony (pin_ceremony imports this module to verify
 envelopes — the import would be circular), so the mirror is a
 copy, and a drift test pins mirror == pin_ceremony.REASONS.
 
-Honest limits (the cycle-19 formulation, carried verbatim in
-substance):
+Honest limits:
 
-* The verifier never opens, fetches or inspects the artefact
-  ``evidence_hash`` names. It does not know the artefact exists,
-  what it contains, or that the hash was computed over it.
-  ``evidence_ref`` is an opaque, caller-supplied locator string
-  (form-checked only). What the envelope proves: a listed
-  operator presented this evidence hash bound to this exact
-  event, the presentation was ledgered single-use at issuance
-  (see trust/ledger.py's CeremonyAuthorisationLedger), and the
-  binding is signed by the verifier's key. A random hex64 from a
-  LISTED operator is still issuable — it is now attributable to
-  that operator, bound to one event, and burned on use.
-* Operator identity is list membership via the launch channel,
-  not authentication of a human.
-* HMAC is symmetric: anyone holding the verifier key (including
-  a verify-only consumer) can forge an envelope; a forged
-  envelope is indistinguishable at consumption (no
-  consumption-side ledger check exists — limit M5) and is
-  discoverable only on an audit comparing presented envelopes
-  against the issuance ledgers. Same-OS-user prototype
-  honesty from gate_decision's docstring applies unchanged.
+* Evidence: in v2, ``evidence_hash`` is DEFINED as the SHA-256
+  the verifier computed over the artefact bytes it resolved
+  itself, under its protected evidence root, at issuance; the
+  supplied hash in the request is a cross-check only, and the
+  computed hash is the one signed. That definition is
+  discharged by the verifier mode, not by this signing module:
+  the payload projection here is a pure function of its
+  arguments and cannot distinguish a computed hash from an
+  asserted one. And verifier-computed is not semantic adequacy:
+  the hash proves which bytes the verifier read; it does not
+  prove the artefact is genuine, complete, or appropriate
+  evidence for the event. ``evidence_ref`` remains an opaque,
+  caller-supplied locator string (form-checked only). What the
+  envelope proves: an allowlisted operator id presented this
+  evidence hash bound to this exact event, the presentation
+  was ledgered single-use at issuance (see trust/ledger.py's
+  CeremonyAuthorisationLedger), and the binding is signed
+  under the verifier's ceremony seed. A random hex64 from a
+  LISTED operator id is still issuable — it is attributable to
+  that operator id as workflow provenance, bound to one event,
+  and burned at issuance.
+* The signature is asymmetric (Ed25519, signing/ed25519.py):
+  forging an envelope requires the verifier's ceremony seed;
+  a forged envelope fails verification in the consuming
+  process itself, not merely on a later audit. The ceremony
+  process holds only public bytes, so a fully compromised
+  ceremony process yields no minting capability. Separation is
+  type separation (a ``CeremonyPublicKey`` cannot hold secret
+  material; a snapshot ``SigningKey`` passed as the verify key
+  is a type refusal) plus role separation (minting material
+  absent from the ceremony process). Seed-reuse across roles
+  (a ceremony seed byte-equal to an HMAC key) is refused at
+  provisioning / verifier config load — the only places both
+  secrets exist; no in-process id comparison can detect it,
+  and none is claimed to.
+* Pure-Python Ed25519 scalar multiplication is not
+  constant-time. The secret-dependent multiplications (the
+  clamped secret scalar AND the deterministic-nonce scalar)
+  happen only inside the verifier process, which deployment
+  runs as a dedicated OS user. Verification multiplies public
+  values only. See signing/ed25519.py's docstring.
+* Issuance accounting is not consumption enforcement, and
+  neither is anchored provenance: the (ceremony_id,
+  evidence_hash) pair is burned at issuance, but a genuine
+  envelope replayed within its TTL against a moved pin is a
+  consumption-side problem this module does not solve; the
+  protected monotonic consumption head remains the fix.
 * ``now=`` parameters exist for tests only; see the warning in
   gate_decision's module docstring.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import math
+import os
 import re
+import secrets
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 
+from signing import ed25519
 from signing.gate_decision import (
-    ALG,
     CLOCK_SKEW_SECONDS,
     TTL_MIN_SECONDS,
     SigningError,
-    SigningKey,
     _canonical,
     _check_hex64,
     _check_id,
+    _check_key_path,
     _check_text,
     _normalise_time,
     _now,
     _parse_time,
     _sha256,
-    key_id_for,
 )
 
-CEREMONY_AUTHORISATION_DOMAIN = "signed-ceremony-authorisation-v1"
+CEREMONY_AUTHORISATION_DOMAIN = "signed-ceremony-authorisation-v2"
 DOMAIN = CEREMONY_AUTHORISATION_DOMAIN
+ALG_CEREMONY = "ed25519"  # payload "alg"; NOT gate_decision.ALG
 PURPOSE_CEREMONY_AUTHORISATION = "pin-ceremony-authorisation"
 CEREMONY_AUTHORISATION_TTL_DEFAULT_SECONDS = 900
 CEREMONY_AUTHORISATION_TTL_MAX_SECONDS = 900  # hard cap, see below
+
+# Ceremony seeds that must never provision a verifier: the four
+# predictable test keys, plus the RFC 8032 section 7.1 TEST 1/2/3
+# seeds (public knowledge, and the exact seeds the signing test
+# fixtures use). This is the single source for the refused-seed
+# list: trust/verifier_main.py imports this set and refuses any
+# seed in it at config load, unioned with its own local list.
+REFUSED_TEST_SEEDS = frozenset({
+    bytes(range(32)), bytes(range(32, 64)),
+    b"\x00" * 32, b"\xff" * 32,
+    bytes.fromhex(
+        "9d61b19deffd5a60ba844af492ec2cc4"
+        "4449c5697b326919703bac031cae7f60"),  # RFC 8032 TEST 1
+    bytes.fromhex(
+        "4ccd089b28ff96da9db6c346ec114e0f"
+        "5b8a319f35aba624da8cf6ed4fb8a6fb"),  # RFC 8032 TEST 2
+    bytes.fromhex(
+        "c5aa8df43f9f837bedb7442f31dcb7b1"
+        "66d38535076f094b85ce3a2e0b4458f7"),  # RFC 8032 TEST 3
+})
 
 # LOCAL MIRROR of signing.pin_ceremony's reason vocabulary. This
 # module must not import pin_ceremony (import cycle); the drift
@@ -108,6 +172,7 @@ _NO_PIN_REASONS = frozenset({
 })
 
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
+_HEX128_RE = re.compile(r"[0-9a-f]{128}")
 
 _OLD_PIN_KEYS = {"cycle_seq", "payload_hash"}
 _CANDIDATE_KEYS = {"cycle_seq", "payload_hash", "signer_id", "key_id"}
@@ -118,6 +183,155 @@ _CANDIDATE_KEYS = {"cycle_seq", "payload_hash", "signer_id", "key_id"}
 # exact equality. (pin_ceremony's _CONTEXT_UNSPECIFIED pattern,
 # re-declared here because importing it would be circular.)
 _CONTEXT_UNSPECIFIED = object()
+
+
+# -- ceremony keys ----------------------------------------------------------
+
+
+def public_key_id_for(public_key: bytes) -> str:
+    """The public key id, derived from public bytes only, so any
+    consumer can recompute it from the pinned key: "pub-" +
+    sha256(public_key)[:16]. The "pub-" prefix and the hash
+    input (public bytes, not secret bytes) put these ids in a
+    namespace disjoint from gate_decision's "key-" ids."""
+    if not isinstance(public_key, (bytes, bytearray)) \
+            or len(public_key) != ed25519.PUBLIC_KEY_BYTES:
+        raise SigningError(
+            f"public key must be exactly "
+            f"{ed25519.PUBLIC_KEY_BYTES} bytes")
+    return "pub-" + _sha256(bytes(public_key))[:16]
+
+
+@dataclass(frozen=True)
+class CeremonySigningKey:
+    """Verifier-side ONLY: the ceremony seed plus its derived
+    public identity. Never logged whole: repr shows only the
+    key id and a fingerprint of the public key."""
+
+    seed: bytes
+    public_key: bytes
+    key_id: str
+
+    def __repr__(self) -> str:  # never leak seed bytes into a log
+        return (f"CeremonySigningKey(key_id={self.key_id!r}, "
+                f"public_fingerprint={_sha256(self.public_key)!r})")
+
+
+@dataclass(frozen=True)
+class CeremonyPublicKey:
+    """Ceremony/client-side pin: public bytes only. This type
+    cannot hold secret material — that is the type separation
+    the v2 key boundary rests on."""
+
+    public_key: bytes
+    key_id: str
+
+    def __repr__(self) -> str:
+        return f"CeremonyPublicKey(key_id={self.key_id!r})"
+
+
+def _make_ceremony_signing_key(seed: bytes) -> CeremonySigningKey:
+    if not isinstance(seed, (bytes, bytearray)) \
+            or len(seed) != ed25519.SEED_BYTES:
+        raise SigningError(
+            f"ceremony seed must be exactly {ed25519.SEED_BYTES} "
+            f"bytes")
+    seed = bytes(seed)
+    public_key = ed25519.public_key_from_seed(seed)
+    return CeremonySigningKey(
+        seed=seed, public_key=public_key,
+        key_id=public_key_id_for(public_key))
+
+
+def ceremony_public_key_for(
+        signing_key: CeremonySigningKey) -> CeremonyPublicKey:
+    """The public pin corresponding to a signing key."""
+    if not isinstance(signing_key, CeremonySigningKey):
+        raise SigningError(
+            "signing_key must be a CeremonySigningKey")
+    return CeremonyPublicKey(public_key=signing_key.public_key,
+                             key_id=signing_key.key_id)
+
+
+_MAX_SEED_FILE_BYTES = 1024
+
+
+def load_ceremony_seed(path, *, forbidden_roots=()) -> CeremonySigningKey:
+    """Load a ceremony seed file under the same discipline as
+    gate_decision.load_signing_key (shared _check_key_path):
+    failing closed on a symlinked path component, a mode other
+    than exactly 0600, an oversize or non-hex file, content that
+    is not exactly 32 bytes, or a location inside this repo or a
+    caller-named forbidden root."""
+    target = _check_key_path(Path(path), forbidden_roots)
+    if not target.is_file():
+        raise SigningError("ceremony seed file is missing")
+    if target.stat().st_mode & 0o777 != 0o600:
+        raise SigningError(
+            "ceremony seed file mode must be exactly 0600")
+    try:
+        if target.stat().st_size > _MAX_SEED_FILE_BYTES:
+            raise SigningError("ceremony seed file exceeds the size cap")
+        raw = target.read_bytes().strip()
+    except OSError as exc:
+        raise SigningError(
+            f"ceremony seed file is unreadable: {exc}") from exc
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise SigningError(
+            "ceremony seed file does not hold hex seed material") from exc
+    # Exactly 64 lowercase hex chars, checked BEFORE decoding:
+    # an odd-length or non-hex file must fail as SigningError,
+    # never as a raw ValueError out of bytes.fromhex.
+    if not _HEX64_RE.fullmatch(text):
+        raise SigningError(
+            "ceremony seed file does not hold lowercase hex seed "
+            "material")
+    seed = bytes.fromhex(text)
+    if len(seed) != ed25519.SEED_BYTES:
+        raise SigningError(
+            f"ceremony seed file must hold exactly "
+            f"{ed25519.SEED_BYTES} bytes")
+    return _make_ceremony_signing_key(seed)
+
+
+def generate_ceremony_key_file(path, *, forbidden_roots=()) -> CeremonySigningKey:
+    """Create a new 0600 ceremony seed file with O_EXCL; refuse
+    to overwrite. The file holds the lowercase hex encoding of
+    exactly 32 random bytes and nothing else. Placement rules
+    are gate_decision's (see _check_key_path): never inside this
+    repo (always) or a caller-named forbidden root, never
+    through a symlink, never in a group/world-writable dir."""
+    target = _check_key_path(Path(path), forbidden_roots)
+    if target.exists():
+        raise SigningError(
+            "ceremony seed file already exists; refusing to "
+            "overwrite")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        raise SigningError(
+            f"cannot create ceremony seed directory: {exc}") from exc
+    seed = secrets.token_bytes(ed25519.SEED_BYTES)
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                     0o600)
+    except OSError as exc:
+        raise SigningError(
+            f"cannot create ceremony seed file: {exc}") from exc
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(seed.hex().encode("ascii") + b"\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        raise
+    return _make_ceremony_signing_key(seed)
 
 
 def _is_seq(value) -> bool:
@@ -164,13 +378,22 @@ def _project_candidate(candidate):
 def ceremony_authorisation_payload(
         *, signer_id, key_id, operator_id, ceremony_id, reason,
         old_pin, candidate, evidence_hash, evidence_ref,
-        signed_at, expires_at) -> dict:
-    """The exact allowlisted projection that gets MACed.
+        signed_at, expires_at, alg=ALG_CEREMONY) -> dict:
+    """The exact allowlisted projection that gets signed.
 
     Validation here is the defence-in-depth copy of the verifier
     mode's pre-checks (the attestation_payload split): an
     authorisation for a non-ceremony movement must be
-    un-issuable, not merely unusable."""
+    un-issuable, not merely unusable.
+
+    ``alg`` is pinned: the projection emits "ed25519" only, and
+    any other alg value is refused here — so an envelope object
+    claiming "hmac-sha256" cannot re-derive its payload at all
+    and dies as malformed_payload at verification, before any
+    signature checking. There is no HMAC fallback branch."""
+    if alg != ALG_CEREMONY:
+        raise SigningError(
+            f"ceremony authorisation alg must be {ALG_CEREMONY!r}")
     _check_id(signer_id, "signer id")
     _check_id(key_id, "key id")
     _check_id(operator_id, "operator id")
@@ -222,8 +445,8 @@ def ceremony_authorisation_payload(
             "signing window outside the ceremony authorisation "
             "TTL bounds")
     return {
-        "v": "signed-ceremony-authorisation/1",
-        "alg": ALG,
+        "v": "signed-ceremony-authorisation/2",
+        "alg": alg,
         "purpose": PURPOSE_CEREMONY_AUTHORISATION,
         "signer_id": signer_id,
         "key_id": key_id,
@@ -246,7 +469,9 @@ def _payload_hash(payload: dict) -> str:
 def authorisation_id_for(payload_hash: str, key_id: str) -> str:
     """Derive an authorisation id from a payload hash and key id
     (the _attestation_id pattern, public because consumers —
-    the client, the ceremony — re-derive it key-free)."""
+    the client, the ceremony — re-derive it key-free). Under v2
+    the domain input is the v2 domain and the key id is the
+    PUBLIC key id, so no secret participates in the id."""
     _check_hex64(payload_hash, "payload hash")
     _check_id(key_id, "key id")
     return _sha256(_canonical(
@@ -254,10 +479,13 @@ def authorisation_id_for(payload_hash: str, key_id: str) -> str:
          "payload_hash": payload_hash, "key_id": key_id}))
 
 
-def _mac(key: bytes, payload_hash: str, key_id: str) -> str:
-    blob = (CEREMONY_AUTHORISATION_DOMAIN + "\n" + ALG + "\n"
-            + key_id + "\n" + payload_hash).encode("utf-8")
-    return hmac.new(key, blob, hashlib.sha256).hexdigest()
+def _signed_blob(payload_hash: str, key_id: str) -> bytes:
+    """The exact bytes signed by Ed25519: the v1 construction
+    carried over unchanged in shape — domain, alg, key_id and
+    payload_hash, newline-joined, utf-8. Only the primitive
+    changed."""
+    return (CEREMONY_AUTHORISATION_DOMAIN + "\n" + ALG_CEREMONY
+            + "\n" + key_id + "\n" + payload_hash).encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -276,6 +504,12 @@ class SignedCeremonyAuthorisation:
     payload_hash: str
     authorisation_id: str
     signature: str
+    # Not a wire field (the envelope dict has no alg key; the
+    # payload projection carries it). It exists so a
+    # hand-constructed typed envelope claiming a different alg
+    # is refused at payload re-derivation (malformed_payload)
+    # rather than silently re-derived as ed25519.
+    alg: str = ALG_CEREMONY
 
     def payload(self) -> dict:
         return ceremony_authorisation_payload(
@@ -285,16 +519,18 @@ class SignedCeremonyAuthorisation:
             old_pin=self.old_pin, candidate=self.candidate,
             evidence_hash=self.evidence_hash,
             evidence_ref=self.evidence_ref,
-            signed_at=self.signed_at, expires_at=self.expires_at)
+            signed_at=self.signed_at, expires_at=self.expires_at,
+            alg=self.alg)
 
 
 def sign_ceremony_authorisation(
-        *, signing_key: SigningKey, signer_id, operator_id,
+        *, signing_key: CeremonySigningKey, signer_id, operator_id,
         ceremony_id, reason, old_pin, candidate, evidence_hash,
         evidence_ref,
         ttl_seconds=CEREMONY_AUTHORISATION_TTL_DEFAULT_SECONDS,
         now=None) -> SignedCeremonyAuthorisation:
-    """MAC one ceremony authorisation under the verifier-side key.
+    """Sign one ceremony authorisation under the verifier-side
+    ceremony seed (Ed25519).
 
     The signer is the VERIFIER, signing about the operator's
     presentation; signer_id is the verifier's id and need NOT
@@ -306,10 +542,15 @@ def sign_ceremony_authorisation(
     verifier TTL does not silently mint longer-lived ceremony
     authorisations. An authorisation is a live operator act;
     nothing in the flow has approval-workflow latency."""
-    if not isinstance(signing_key, SigningKey):
-        raise SigningError("signing_key must be a SigningKey")
-    if signing_key.key_id != key_id_for(signing_key.key):
-        raise SigningError("signing key id does not match its key material")
+    if not isinstance(signing_key, CeremonySigningKey):
+        raise SigningError(
+            "signing_key must be a CeremonySigningKey")
+    if signing_key.key_id != public_key_id_for(signing_key.public_key) \
+            or signing_key.public_key \
+            != ed25519.public_key_from_seed(signing_key.seed):
+        raise SigningError(
+            "ceremony signing key id or public key does not match "
+            "its seed material")
     if not isinstance(ttl_seconds, int) \
             or isinstance(ttl_seconds, bool) \
             or ttl_seconds < TTL_MIN_SECONDS:
@@ -326,6 +567,9 @@ def sign_ceremony_authorisation(
         evidence_hash=evidence_hash, evidence_ref=evidence_ref,
         signed_at=signed_at, expires_at=expires_at)
     payload_hash = _payload_hash(payload)
+    signature = ed25519.sign(
+        signing_key.seed,
+        _signed_blob(payload_hash, signing_key.key_id)).hex()
     return SignedCeremonyAuthorisation(
         operator_id=operator_id, ceremony_id=ceremony_id,
         reason=reason, old_pin=payload["old_pin"],
@@ -335,12 +579,11 @@ def sign_ceremony_authorisation(
         expires_at=expires_at, payload_hash=payload_hash,
         authorisation_id=authorisation_id_for(payload_hash,
                                               signing_key.key_id),
-        signature=_mac(signing_key.key, payload_hash,
-                       signing_key.key_id))
+        signature=signature)
 
 
 def verify_ceremony_authorisation(
-        signed, *, signing_key: SigningKey,
+        signed, *, public_key: CeremonyPublicKey,
         expected_signer_id=None,
         expected_purpose=PURPOSE_CEREMONY_AUTHORISATION,
         expected_operator_id=None, expected_ceremony_id=None,
@@ -361,6 +604,17 @@ def verify_ceremony_authorisation(
     evidence_mismatch, evidence_ref_mismatch, signed_in_future,
     expired.
 
+    Reason meanings under v2: ``key_id_inconsistent`` means the
+    CeremonyPublicKey object lies about its own derived id
+    (public_key_id_for(public_key.public_key) !=
+    public_key.key_id); ``unknown_key`` means signed.key_id !=
+    public_key.key_id (the envelope was not issued under the
+    pinned key); ``signature_mismatch`` means Ed25519
+    verification failed (including a signature that is not
+    hex128 — a typed envelope can be hand-constructed, bypassing
+    from_dict, so the format is re-checked here and folded into
+    this reason, never raised).
+
     ``expected_old_pin`` uses the sentinel pattern: omitted
     asserts nothing; explicit None asserts a no-pin
     authorisation; a dict asserts exact (seq, hash) equality
@@ -370,15 +624,20 @@ def verify_ceremony_authorisation(
     A () result proves issuance + binding; it does NOT prove the
     operator should have been authorised (that was decided at
     issuance against the verifier's protected list) nor that the
-    evidence artefact is genuine (see the module docstring)."""
+    evidence artefact is semantically adequate (see the module
+    docstring)."""
     if not isinstance(signed, SignedCeremonyAuthorisation):
         raise SigningError("signed must be a SignedCeremonyAuthorisation")
-    if not isinstance(signing_key, SigningKey):
-        raise SigningError("signing_key must be a SigningKey")
-    if signing_key.key_id != key_id_for(signing_key.key):
+    if not isinstance(public_key, CeremonyPublicKey):
+        raise SigningError("public_key must be a CeremonyPublicKey")
+    try:
+        derived_id = public_key_id_for(public_key.public_key)
+    except SigningError:
+        return ("key_id_inconsistent",)
+    if public_key.key_id != derived_id:
         return ("key_id_inconsistent",)
     reasons = []
-    if signed.key_id != signing_key.key_id:
+    if signed.key_id != public_key.key_id:
         reasons.append("unknown_key")
     try:
         payload = signed.payload()
@@ -397,11 +656,14 @@ def verify_ceremony_authorisation(
     if signed.authorisation_id != authorisation_id_for(
             recomputed_hash, signed.key_id):
         reasons.append("authorisation_id_mismatch")
-    expected_mac = _mac(signing_key.key, recomputed_hash, signed.key_id)
-    if not isinstance(signed.signature, str) \
-            or not _HEX64_RE.fullmatch(signed.signature) \
-            or not hmac.compare_digest(signed.signature.encode("ascii"),
-                                       expected_mac.encode("ascii")):
+    signature_ok = False
+    if isinstance(signed.signature, str) \
+            and _HEX128_RE.fullmatch(signed.signature):
+        signature_ok = ed25519.verify(
+            public_key.public_key,
+            _signed_blob(recomputed_hash, signed.key_id),
+            bytes.fromhex(signed.signature))
+    if not signature_ok:
         reasons.append("signature_mismatch")
     if expected_signer_id is not None \
             and signed.signer_id != expected_signer_id:
@@ -482,12 +744,38 @@ def ceremony_authorisation_envelope_to_dict(
     }
 
 
+def _looks_like_v1_envelope(data: dict) -> bool:
+    """A cycle-19 (v1) envelope is identifiable by its HMAC-era
+    markers: a "key-…" key id (derived from secret bytes) and/or
+    a hex64 (32-byte HMAC) signature. A v2 envelope always
+    carries a "pub-…" key id and a hex128 signature."""
+    key_id = data.get("key_id")
+    signature = data.get("signature")
+    if isinstance(key_id, str) and key_id.startswith("key-"):
+        return True
+    if isinstance(signature, str) \
+            and _HEX64_RE.fullmatch(signature):
+        return True
+    return False
+
+
 def ceremony_authorisation_envelope_from_dict(
         data) -> SignedCeremonyAuthorisation:
     if not isinstance(data, dict) or set(data) != _ENVELOPE_KEYS:
         raise SigningError(
             "ceremony authorisation envelope has missing or "
             "unknown keys")
+    # VERSION CHECK FIRST (before the hex128 format check
+    # below): a superseded v1 envelope must be refused AS a
+    # superseded version — naming it — not as a generic format
+    # failure a future maintainer might "fix" by re-adding a v1
+    # parse path. There is no v1 fallback in this build.
+    if _looks_like_v1_envelope(data):
+        raise SigningError(
+            "ceremony authorisation version 1 "
+            "(signed-ceremony-authorisation/1) is superseded and "
+            "is not accepted by this build; cycle 20 requires "
+            "signed-ceremony-authorisation/2")
     old_pin = data["old_pin"]
     if old_pin is not None:
         if not isinstance(old_pin, dict) \
@@ -520,10 +808,12 @@ def ceremony_authorisation_envelope_from_dict(
         signature=data["signature"])
     for value, field_name in ((signed.payload_hash, "payload_hash"),
                               (signed.authorisation_id,
-                               "authorisation_id"),
-                              (signed.signature, "signature")):
+                               "authorisation_id")):
         if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
             raise SigningError(f"envelope {field_name} must be hex64")
+    if not isinstance(signed.signature, str) \
+            or not _HEX128_RE.fullmatch(signed.signature):
+        raise SigningError("envelope signature must be hex128")
     # Validate every field the same way attestation's from_dict
     # does: an envelope that parses is an envelope whose fields a
     # signer could actually have emitted.

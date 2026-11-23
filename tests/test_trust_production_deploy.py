@@ -65,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eval.registry import EvalRegistry
 from signing import generate_key_file, load_signing_key
+from signing.ceremony_authorisation import generate_ceremony_key_file
 from trust import protocol
 from trust.anchoring import initialise_anchor, load_anchor, verify_anchor
 from trust.attestation import verify_eval_attestation
@@ -544,6 +545,8 @@ class LiveDeploymentTests(unittest.TestCase):
             "AION_ANCHOR_INIT", "AION_BUDGETS_ANCHOR_PATH",
             "AION_BUDGETS_ANCHOR_INIT", "AION_DEPLOYMENT_MODE",
             "AION_CEREMONY_OPERATORS",
+            "AION_CEREMONY_EVIDENCE_DIR",
+            "AION_CEREMONY_SIGNING_SEED_PATH",
         }
         # LC_CTYPE is injected by runuser/PAM itself, after the
         # wrapper's env -i scrub: it is not caller-controlled and
@@ -935,14 +938,22 @@ class ProductionModeSpecTests(unittest.TestCase):
         # mode is proven from inside the process, not assumed.
         anchor = self.bootstrap_signing_anchor()
         budgets_anchor = self.bootstrap_budgets_anchor()
+        seed_path = Path(self.tmp.name) / "ceremony.seed"
+        generate_ceremony_key_file(seed_path)
         result, request_id = self.run_verifier({
             "AION_DEPLOYMENT_MODE": "production",
             "AION_ANCHOR_PATH": str(anchor),
             "AION_BUDGETS_ANCHOR_PATH": str(budgets_anchor),
             # Cycle 19: production also requires the ceremony
             # operator list at startup (the 15th allowlisted
-            # name); a "full production gate" fixture carries it.
+            # name); cycle 20 adds the evidence dir and the
+            # ceremony signing seed path (16th/17th) — a "full
+            # production gate" fixture carries all three, with
+            # a real seed provisioned through the real generator.
             "AION_CEREMONY_OPERATORS": "operator-uma",
+            "AION_CEREMONY_EVIDENCE_DIR": str(
+                Path(self.tmp.name) / "evidence"),
+            "AION_CEREMONY_SIGNING_SEED_PATH": str(seed_path),
         })
         self.assertEqual(
             result.returncode, 0,

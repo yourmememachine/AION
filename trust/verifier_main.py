@@ -92,22 +92,61 @@ silently ignored field:
   AION_VERIFIER_IDENTITY_BUDGET optional, per-identity sealed_eval
                             query cap (default 500)
   AION_CEREMONY_OPERATORS   comma-separated operator ids
-                            authorised to obtain ceremony
-                            authorisations (mode
-                            ceremony_authorise, cycle 19). Loaded
-                            ONLY here, from the environment — a
-                            request can never carry an operator
-                            list. REQUIRED in production: absent
-                            or empty refuses startup
-                            (verifier_misconfigured), mirroring
-                            the anchor rule. In research mode
-                            absent/empty loads as an empty list
-                            and the MODE refuses every request
+                            allowlisted to be named as the
+                            operator id in ceremony authorisations
+                            (mode ceremony_authorise, cycle 19).
+                            Loaded ONLY here, from the
+                            environment — a request can never
+                            carry an operator list. REQUIRED in
+                            production: absent or empty refuses
+                            startup (verifier_misconfigured),
+                            mirroring the anchor rule. In research
+                            mode absent/empty loads as an empty
+                            list and the MODE refuses every request
                             (ceremony_operators_unconfigured).
                             A malformed list (bad id grammar,
                             whitespace, empty segment, duplicate,
                             more than 64 entries) refuses startup
                             in BOTH modes.
+  AION_CEREMONY_EVIDENCE_DIR
+                            absolute path to the directory
+                            holding ceremony evidence artifacts,
+                            provisioned OUTSIDE the verifier and
+                            read — never written — by the verifier
+                            at issuance (cycle 20). evidence_ref
+                            in a ceremony_authorise request is a
+                            path RELATIVE to this directory. A
+                            malformed spelling refuses startup in
+                            BOTH modes; production + absent refuses
+                            startup; research + absent loads as
+                            None and the mode refuses per-request
+                            (ceremony_evidence_unconfigured).
+                            Filesystem existence is a per-request
+                            check, not a startup one. The root is
+                            resolved ONCE at config load and the
+                            resolved path is stored on the config.
+  AION_CEREMONY_SIGNING_SEED_PATH
+                            absolute path to the ceremony signing
+                            seed file (32-byte Ed25519 seed, 0600,
+                            loaded via load_ceremony_seed — cycle
+                            20). The seed does NOT ride
+                            AION_VERIFIER_KEY_PATH: it is a second,
+                            purpose-only secret, used only by mode
+                            ceremony_authorise; every other mode
+                            keeps the HMAC key. A malformed value
+                            refuses startup in BOTH modes;
+                            production + absent refuses startup
+                            (verifier_misconfigured); research +
+                            absent loads as None and the mode
+                            refuses per-request
+                            (ceremony_seed_unconfigured);
+                            present-but-unloadable refuses startup
+                            in BOTH modes. A seed byte-equal to the
+                            HMAC verifier key, or on the refused
+                            test-seed list, refuses startup. The
+                            seed path is scrubbed from the
+                            environment after load, like the key
+                            path.
   AION_ANCHOR_PATH          optional: external anchor file for the
                             signing ledger (see trust/anchoring.py);
                             when set, startup verifies the anchor
@@ -142,21 +181,47 @@ failure — misconfiguration, unsafe/missing key, untrusted
 registry, signer conflict (unsigned error document). Nothing
 unsigned is ever representable as a decision.
 
-The ceremony_authorise mode (cycle 19) issues signed ceremony
-authorisations for pin re-anchors: the operator authority comes
-from this process's protected AION_CEREMONY_OPERATORS list,
-never from the request, and each issuance is ledgered single-use
-in BOTH the ceremony journal (the commit point) and the signing
-ledger before the envelope is returned. Honest limits, stated
-plainly: the verifier never inspects the evidence artefact an
-evidence_hash names — a random hex64 from a LISTED operator is
-still issuable; what the envelope proves is that a listed
-operator presented this evidence hash bound to this exact event,
-that the presentation was ledgered single-use at issuance, and
-that the binding is signed by the verifier's key. Operator
-identity is list membership via the launch channel, not
-authentication of a human. Refusals of this mode (unconfigured
-list, unlisted operator, replay) are unsigned and unledgered.
+The ceremony_authorise mode (cycle 19, evidence + key boundary
+cycle 20) issues signed ceremony authorisations for pin
+re-anchors: operator-id allowlist eligibility comes from this
+process's protected AION_CEREMONY_OPERATORS list, never from
+the request, and each issuance is ledgered single-use at
+issuance in BOTH the ceremony journal (the commit point) and
+the signing ledger before the envelope is returned. Honest
+limits, stated plainly: The verifier resolves the evidence
+itself: `evidence_ref` is a relative path under the directory
+named only by its own `AION_CEREMONY_EVIDENCE_DIR`
+configuration; the verifier opens the artifact (refusing
+absolute refs, `..` escapes and any symlink on the path),
+reads at most 1 MiB of opaque bytes, computes the SHA-256
+itself, refuses if it differs from the hash the caller
+supplied, and retains a copy of the bytes it hashed under its
+verifier home, named by the authorisation id. What the
+envelope proves: at issuance, an artifact with exactly the
+bound `evidence_hash` existed at the bound `evidence_ref` in
+that protected location and was read by the verifier; the
+presentation was ledgered single-use at issuance; and the
+binding is signed by the verifier's ceremony seed (Ed25519).
+It does NOT prove the artifact's contents are true, relevant
+or adequate as evidence for this recovery, who authored it,
+or when it was created — a caller presenting an allowlisted
+operator id can still obtain an authorisation over a *real
+but worthless* artifact. A random hex64 with no artifact
+behind it is no longer issuable. Operator identity is
+operator-id allowlist eligibility via the verifier's launch
+channel, not authentication: the verifier checks that the
+presented operator_id was on its configured allowlist at
+issuance; it does not and cannot verify that the presenter
+*is* that operator — no per-operator credential exists in
+this system, and any caller able to launch the verifier can
+present any listed id. The envelope proves a presentation
+under an allowlisted id, ledgered at issuance and bound to
+this event — workflow provenance, not cryptographic
+attribution: nothing in the envelope is evidence *by* the
+operator, only *about* them, and it does not prove which
+human or process made the presentation. Refusals of this mode
+(unconfigured list, unlisted operator, replay) are unsigned
+and unledgered.
 OPERATOR RECOVERY from a post-commit ledger failure: the
 (ceremony_id, evidence_hash) pair stays burned even though no
 envelope was returned — retry the ceremony under a NEW
@@ -184,10 +249,12 @@ imply otherwise.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 import os
+import stat
 import sys
 import traceback
 from pathlib import Path
@@ -203,7 +270,9 @@ from signing.ceremony_authorisation import (
     CEREMONY_AUTHORISATION_TTL_MAX_SECONDS,
     REASONS as _CEREMONY_REASONS,
     _NO_PIN_REASONS as _CEREMONY_NO_PIN_REASONS,
+    REFUSED_TEST_SEEDS as _REFUSED_TEST_SEEDS,
     ceremony_authorisation_envelope_to_dict,
+    load_ceremony_seed,
     sign_ceremony_authorisation,
 )
 from signing.gate_decision import (
@@ -243,6 +312,19 @@ _REFUSED_TEST_KEYS = (
     bytes(range(32)), bytes(range(32, 64)),
     b"\x00" * 32, b"\xff" * 32,
 )
+
+# Refused ceremony seeds (cycle 20, critique-b §3.5 / A-1d):
+# signing.ceremony_authorisation.REFUSED_TEST_SEEDS, imported
+# unconditionally above and used directly — the signing module
+# owns the list (the predictable test seeds plus the RFC 8032
+# §7.1 TEST 1–3 vector seeds, public knowledge pinned in its
+# own test vectors, so a production verifier provisioned with
+# one is a verifier anyone can mint for). There is deliberately
+# NO local copy or fallback here: two lists drift, and a drift
+# test (tests/test_trust_ceremony_mode.py) asserts this
+# module's refused seeds == signing's REFUSED_TEST_SEEDS.
+# _REFUSED_TEST_KEYS above is a separate list: it refuses the
+# HMAC verifier key, not ceremony seeds.
 
 _GATE_BODY_KEYS = {"proposal_id", "builder_ids", "reviewer_ids",
                    "baseline_public", "candidate_public",
@@ -284,7 +366,8 @@ class _Config:
                  identity_budget=DEFAULT_PER_IDENTITY_CAP,
                  anchor_path=None, anchor_init=False,
                  budgets_anchor_path=None, budgets_anchor_init=False,
-                 ceremony_operators=(), *, deployment_mode):
+                 ceremony_operators=(), ceremony_evidence_dir=None,
+                 ceremony_signing_key=None, *, deployment_mode):
         self.signing_key = signing_key
         self.signer_id = signer_id
         self.actor = actor
@@ -299,6 +382,11 @@ class _Config:
         self.budgets_anchor_path = budgets_anchor_path
         self.budgets_anchor_init = budgets_anchor_init
         self.ceremony_operators = tuple(ceremony_operators)
+        # Resolved evidence root (Path) or None; resolved ONCE
+        # in _load_config (cycle 20, R5(b)).
+        self.ceremony_evidence_dir = ceremony_evidence_dir
+        # CeremonySigningKey or None (research + unconfigured).
+        self.ceremony_signing_key = ceremony_signing_key
         self.deployment_mode = deployment_mode
 
 
@@ -341,7 +429,7 @@ def _load_config() -> _Config:
                       "to 'production' or 'research'; a missing, "
                       "blank, unknown or malformed mode is refused "
                       "fail-closed")
-    # Ceremony operator authority (cycle 19): parsed ONLY here,
+    # Ceremony operator allowlist (cycle 19): parsed ONLY here,
     # from the environment — never from a request. Grammar per
     # entry is the verifier id grammar; no stripping (mirroring
     # the deployment-mode no-strip philosophy), so whitespace-
@@ -371,6 +459,55 @@ def _load_config() -> _Config:
         raise _config(
             "verifier_misconfigured",
             "production mode requires AION_CEREMONY_OPERATORS")
+    # Ceremony evidence dir (cycle 20, design-b §1.2 as ruled in
+    # R4/R5): form is a startup fact in BOTH modes — a present
+    # value must be a non-empty absolute path with no trailing
+    # slash (except the root spelling) and no `.` / `..`
+    # segment; no stripping, no normalising. Production +
+    # absent refuses startup; research + absent loads None and
+    # the mode refuses per-request. Existence/type are NOT
+    # startup checks. The root is resolved ONCE here and the
+    # resolved path stored (R5(b)): the per-request fd-walk
+    # applies below this resolved root, whose ancestors may
+    # legitimately be symlinks.
+    ceremony_evidence_dir = None
+    evidence_raw = env.get("AION_CEREMONY_EVIDENCE_DIR", "")
+    if evidence_raw:
+        evidence_path = Path(evidence_raw)
+        segments = evidence_raw.split("/")
+        if not evidence_path.is_absolute() \
+                or (evidence_raw.endswith("/")
+                    and evidence_raw != "/") \
+                or any(segment in (".", "..")
+                       for segment in segments):
+            raise _config(
+                "verifier_misconfigured",
+                "AION_CEREMONY_EVIDENCE_DIR is malformed: it "
+                "must be a non-empty absolute path with no "
+                "trailing slash and no '.' or '..' segment")
+        ceremony_evidence_dir = evidence_path.resolve()
+    elif deployment_mode == "production":
+        raise _config(
+            "verifier_misconfigured",
+            "production mode requires AION_CEREMONY_EVIDENCE_DIR")
+    # Ceremony signing seed path FORM (cycle 20, critique-b
+    # §3.5): the load itself happens after the HMAC key load
+    # below (deterministic error precedence, and the
+    # byte-equality check needs both secrets), but a malformed
+    # spelling refuses startup here, in both modes.
+    ceremony_seed_raw = env.get("AION_CEREMONY_SIGNING_SEED_PATH",
+                                "")
+    if ceremony_seed_raw:
+        if not Path(ceremony_seed_raw).is_absolute():
+            raise _config(
+                "verifier_misconfigured",
+                "AION_CEREMONY_SIGNING_SEED_PATH is malformed: "
+                "it must be a non-empty absolute path")
+    elif deployment_mode == "production":
+        raise _config(
+            "verifier_misconfigured",
+            "production mode requires "
+            "AION_CEREMONY_SIGNING_SEED_PATH")
     ttl_raw = env.get("AION_VERIFIER_TTL_SECONDS", "")
     if ttl_raw:
         if not ttl_raw.isdigit():
@@ -392,6 +529,43 @@ def _load_config() -> _Config:
     # Scrub the key path from the environment once loaded; the key
     # bytes live only in the SigningKey object from here.
     env.pop("AION_VERIFIER_KEY_PATH", None)
+    # Ceremony signing seed (cycle 20, critique-b §3.5): loaded
+    # ONLY here, through the disciplined loader, with the
+    # registry dir as a forbidden root. Present-but-unloadable
+    # refuses startup in BOTH modes — a configured but broken
+    # seed is a misdeployment, not a runtime condition.
+    # Research + absent loaded None above (the mode refuses
+    # per-request); production + absent already refused.
+    ceremony_signing_key = None
+    if ceremony_seed_raw:
+        try:
+            ceremony_signing_key = load_ceremony_seed(
+                ceremony_seed_raw,
+                forbidden_roots=(Path(registry_dir),))
+        except SigningError:
+            raise _config("verifier_misconfigured",
+                          "ceremony signing seed is missing or "
+                          "unsafe")
+        # Pair checks, over RAW BYTES in this one place both
+        # secrets exist (critique-b A-1c): a key_id comparison
+        # cannot catch byte-equality — the ids live in disjoint
+        # namespaces ("key-…" over the secret, "pub-…" over the
+        # public key) — so the comparison is over the seed
+        # bytes themselves. Detail names neither value.
+        seed_bytes = getattr(ceremony_signing_key, "seed", None)
+        if seed_bytes is not None \
+                and seed_bytes == signing_key.key:
+            raise _config(
+                "verifier_misconfigured",
+                "ceremony signing seed must differ from the "
+                "verifier signing key")
+        if seed_bytes is not None \
+                and seed_bytes in _REFUSED_TEST_SEEDS:
+            raise _config("verifier_misconfigured",
+                          "refusing a known test ceremony seed")
+        # Scrub the seed path from the environment after load,
+        # like the key path.
+        env.pop("AION_CEREMONY_SIGNING_SEED_PATH", None)
     proposal_budget = DEFAULT_PER_PROPOSAL_CAP
     identity_budget = DEFAULT_PER_IDENTITY_CAP
     for env_name, attr in (("AION_VERIFIER_PROPOSAL_BUDGET",
@@ -554,6 +728,8 @@ def _load_config() -> _Config:
                    budgets_anchor_path=budgets_anchor_path or None,
                    budgets_anchor_init=budgets_anchor_init,
                    ceremony_operators=ceremony_operators,
+                   ceremony_evidence_dir=ceremony_evidence_dir,
+                   ceremony_signing_key=ceremony_signing_key,
                    deployment_mode=deployment_mode)
 
 
@@ -1607,51 +1783,348 @@ def _ceremony_seq(value) -> bool:
         and value >= 0
 
 
+_CEREMONY_EVIDENCE_MAX_BYTES = 1 << 20
+_CEREMONY_EVIDENCE_SEGMENT_RE = re.compile(
+    r"^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*$")
+
+
+def _check_evidence_ref_grammar(evidence_ref) -> None:
+    """evidence_ref grammar (cycle 20, design-b §1.3): a
+    relative path under the configured evidence directory —
+    ≤512 chars, 1–8 canonical lowercase segments, no leading or
+    trailing slash, no backslash, no `.` / `..` / empty
+    segments. Pure string work; violations are exit-2
+    malformed_request and touch no filesystem."""
+    detail = ("evidence_ref must be a relative path under the "
+              "configured evidence directory")
+    if not isinstance(evidence_ref, str) \
+            or len(evidence_ref) > 512 \
+            or evidence_ref.startswith("/") \
+            or evidence_ref.endswith("/") \
+            or "\\" in evidence_ref:
+        raise _malformed("malformed_request", detail)
+    segments = evidence_ref.split("/")
+    if not 1 <= len(segments) <= 8:
+        raise _malformed("malformed_request", detail)
+    for segment in segments:
+        if not segment or segment in (".", "..") \
+                or not _CEREMONY_EVIDENCE_SEGMENT_RE.fullmatch(
+                    segment):
+            raise _malformed("malformed_request", detail)
+
+
+def _evidence_unresolvable(subcase: str):
+    """The SINGLE caller-visible refusal for every existence /
+    type / symlink sub-case (cycle 20, R5(c)): distinct codes
+    would hand a presenter an enumeration oracle over the
+    evidence store. The specific sub-case is logged
+    verifier-side only, on stderr, and never reaches the
+    caller."""
+    print(f"ceremony evidence unresolvable: {subcase}",
+          file=sys.stderr)
+    return _config(
+        "ceremony_evidence_unresolvable",
+        "the named evidence artifact could not be resolved "
+        "under the configured evidence directory")
+
+
+def _resolve_ceremony_evidence(config: _Config, evidence_ref):
+    """Resolve, read and hash one evidence artifact (cycle 20).
+
+    The root was resolved ONCE at config load
+    (config.ceremony_evidence_dir); the fd-walk below applies
+    BELOW that resolved root, with O_NOFOLLOW on every
+    component — any symlink on the path refuses. Residual
+    window, named not hidden (R5(b)): the root itself is the
+    resolved path from config load; ancestors of the root may
+    be symlinks, and a swap OF the root between config load
+    and this walk is outside what the walk can see — the walk
+    guarantees containment below the directory it opens.
+    Returns (content_bytes, sha256_hex). All existence / type
+    / symlink failures raise the single
+    ceremony_evidence_unresolvable refusal; oversize raises
+    ceremony_evidence_too_large."""
+    root = config.ceremony_evidence_dir
+    segments = evidence_ref.split("/")
+    fds = []
+    try:
+        try:
+            root_fd = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            raise _evidence_unresolvable("root_missing")
+        except NotADirectoryError:
+            raise _evidence_unresolvable("root_not_directory")
+        except OSError:
+            raise _evidence_unresolvable("root_unopenable")
+        fds.append(root_fd)
+        current = root_fd
+        for segment in segments[:-1]:
+            try:
+                current = os.open(
+                    segment,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=current)
+            except FileNotFoundError:
+                raise _evidence_unresolvable(
+                    "intermediate_missing")
+            except NotADirectoryError:
+                raise _evidence_unresolvable(
+                    "intermediate_not_directory")
+            except OSError:
+                raise _evidence_unresolvable(
+                    "intermediate_unopenable_or_symlink")
+            fds.append(current)
+        try:
+            # O_NONBLOCK on the leaf open (cycle 20 fix round):
+            # without it, opening a FIFO leaf blocks forever,
+            # before the S_ISREG fstat check below can refuse
+            # it. O_NONBLOCK does not alter read behaviour for
+            # regular files (it is meaningful only for FIFOs,
+            # devices and sockets), so the blocking reads below
+            # keep their semantics for the only file type that
+            # passes the fstat check.
+            final_fd = os.open(
+                segments[-1],
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=current)
+        except FileNotFoundError:
+            raise _evidence_unresolvable("artifact_missing")
+        except OSError:
+            raise _evidence_unresolvable(
+                "artifact_unopenable_or_symlink")
+        fds.append(final_fd)
+        info = os.fstat(final_fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise _evidence_unresolvable("artifact_not_regular")
+        if info.st_size == 0:
+            raise _evidence_unresolvable("artifact_empty")
+        if info.st_size > _CEREMONY_EVIDENCE_MAX_BYTES:
+            raise _config(
+                "ceremony_evidence_too_large",
+                "the named evidence artifact exceeds the 1 MiB "
+                "evidence size cap")
+        digest = hashlib.sha256()
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(final_fd, 1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _CEREMONY_EVIDENCE_MAX_BYTES:
+                raise _config(
+                    "ceremony_evidence_too_large",
+                    "the named evidence artifact exceeds the "
+                    "1 MiB evidence size cap")
+            digest.update(chunk)
+            chunks.append(chunk)
+        if total != info.st_size:
+            raise _evidence_unresolvable(
+                "artifact_changed_during_read")
+        return b"".join(chunks), digest.hexdigest()
+    finally:
+        for fd in reversed(fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _retain_ceremony_evidence(config: _Config, authorisation_id,
+                              content: bytes) -> None:
+    """Retain the exact bytes the verifier hashed, under
+    <home>/ceremony-evidence/<authorisation_id> (cycle 20,
+    design-b §1.8 as re-ordered by R5(a) and the build note).
+
+    Called AFTER signing (the authorisation_id is derivable
+    only once the envelope exists — it is a function of the
+    payload hash and the signing key's public id) and BEFORE
+    the ceremony-journal append, so the invariant "every
+    committed ceremony has its evidence retained" holds: no
+    journal commit can land without its retained copy already
+    on disk. A failure here is a PRE-commit refusal
+    (ledger_failed class): nothing is burned and the request
+    is retryable. Idempotent: an existing retained file with
+    byte-identical content is already-retained and the flow
+    proceeds; different bytes under a derived id are a payload
+    collision and refuse pre-commit."""
+    retained_dir = Path(config.home) / "ceremony-evidence"
+    try:
+        retained_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise _config(
+            "ledger_failed",
+            "the ceremony evidence could not be retained; "
+            "refusing before commit — nothing is burned and "
+            "the request is retryable")
+    target = retained_dir / authorisation_id
+    try:
+        fd = os.open(target,
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            existing = target.read_bytes()
+        except OSError:
+            existing = None
+        if existing is not None and existing == content:
+            return  # already retained, byte-identical
+        raise _config(
+            "ledger_failed",
+            "a different artifact is already retained under "
+            "this authorisation id; refusing before commit — "
+            "nothing is burned and the request is retryable")
+    except OSError:
+        raise _config(
+            "ledger_failed",
+            "the ceremony evidence could not be retained; "
+            "refusing before commit — nothing is burned and "
+            "the request is retryable")
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    except OSError:
+        # Partial-write orphan cleanup (cycle 20 fix round):
+        # the file exists under this authorisation id but holds
+        # incomplete bytes; left in place it would permanently
+        # block a same-id retry (the byte-compare above would
+        # refuse it as a collision). Best-effort unlink before
+        # propagating the refusal — if the unlink itself fails
+        # the refusal still stands and the orphan is an
+        # operator-repair artefact, named by id.
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        raise _config(
+            "ledger_failed",
+            "the ceremony evidence could not be retained; "
+            "refusing before commit — nothing is burned and "
+            "the request is retryable")
+    finally:
+        os.close(fd)
+    try:
+        dir_fd = os.open(retained_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
 def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
-    """Issue a signed ceremony authorisation (cycle 19).
+    """Issue a signed ceremony authorisation (cycle 19; evidence
+    resolution and Ed25519 signing, cycle 20).
 
-    The operator authority comes from the verifier's OWN
-    protected configuration (AION_CEREMONY_OPERATORS, parsed in
-    _load_config from the environment) — the strict body key set
-    has no field an operator list could arrive in, which is
-    exactly how an invented operator list dies. The verifier
-    signs ABOUT the operator's presentation: it binds the
-    presented evidence_hash to one exact recovery event (old
-    pin, candidate, reason, ceremony_id) under the verifier key.
-    It never inspects the evidence artefact (see the module
-    docstring's honest limits).
+    Operator identity is operator-id allowlist eligibility via
+    the verifier's launch channel, not authentication: the
+    verifier checks that the presented operator_id was on its
+    configured allowlist at issuance; it does not and cannot
+    verify that the presenter *is* that operator — no
+    per-operator credential exists in this system, and any caller
+    able to launch the verifier can present any listed id. The
+    envelope proves a presentation under an allowlisted id,
+    ledgered at issuance and bound to this event — workflow
+    provenance, not cryptographic attribution: nothing in the
+    envelope is evidence *by* the operator, only *about* them,
+    and it does not prove which human or process made the
+    presentation.
 
-    Validation order follows issue_attestation's discipline:
-    deterministic input validation runs BEFORE anything is
-    consumed or ledgered, so a bad spelling can never burn a
-    single-use pair. No step before the commit writes anything.
+    The verifier signs ABOUT the operator's presentation: it
+    binds the evidence hash IT COMPUTED over bytes IT READ —
+    resolved from evidence_ref under its own configured
+    evidence directory — to one exact recovery event (old pin,
+    candidate, reason, ceremony_id) under its ceremony seed.
+    The claim is the module docstring's: existence + content at
+    issuance, nothing about truth, relevance or authorship.
 
-    Commit order and failure semantics: the ceremony-journal
-    append is FIRST and is the commit point for single-use; the
-    signing-ledger append and the anchor update follow. Any
-    failure after the ceremony-journal append is ledger_failed
-    and the (ceremony_id, evidence_hash) pair stays burned with
-    no envelope returned — recovery is a NEW ceremony_id with a
-    NEW evidence bundle (documented in the module docstring).
-    An IDENTICAL re-presentation is refused like any replay:
-    the verifier cannot distinguish a lost response from a
-    replay, and single-use that makes exceptions for plausible
-    stories is not single-use.
+    Exact order implemented here, and why: (1) config gates
+    (operators, seed, evidence — a disabled mode refuses
+    wholesale, whatever the body says); (2) cheap validation,
+    including the evidence_ref grammar — pure string work, no
+    filesystem touched, so a bad spelling can never burn a
+    single-use pair; (3) operator membership — BEFORE evidence
+    resolution, so an unlisted operator id cannot make this
+    process open a file (no existence oracle, no read
+    amplification); (4) evidence resolution: fd-walk below the
+    resolved root, verifier-computed SHA-256, the supplied
+    evidence_hash cross-checked against it; (5) anti-replay
+    scan keyed on ceremony_id and the COMPUTED hash; (6) sign
+    with the CeremonySigningKey (TTL min(config, 900));
+    (7) retention write of the hashed bytes under the
+    authorisation id; (8) ceremony-journal append — the
+    COMMIT POINT; (9) signing-ledger append; (10) anchor
+    update.
+
+    The anti-replay scan sits at (5), BEFORE signing and
+    retention (cycle 20 fix round): its inputs — ceremony_id
+    and the verifier-computed evidence hash — are both fixed
+    once resolution at (4) has run, so a refused replay now
+    leaves no trace at all: no signature is minted and no
+    retained-evidence file is written for a presentation that
+    will be refused. Retention sits at (7), not beside
+    resolution at (4), for one reason: the retained file is
+    named by the authorisation_id, which is derivable only
+    after signing (it is a function of the payload hash,
+    which binds the computed evidence hash, and the signing
+    key's public id). Retention still precedes the journal
+    append, so the invariant "every committed ceremony has
+    its evidence retained" holds: no journal append can land
+    without its retained copy already on disk, and nothing
+    burns before the journal append — a retention failure,
+    and equally a replay refusal at (5), is a pre-commit
+    refusal. Any failure AFTER the journal
+    append is ledger_failed and the (ceremony_id,
+    evidence_hash) pair stays burned with no envelope
+    returned — recovery is a NEW ceremony_id with a NEW
+    evidence bundle (documented in the module docstring).
+    Retention is NOT a consumption input: no consumption path
+    reads retained copies; the signed envelope hash is the
+    commitment to the retained bytes. An IDENTICAL
+    re-presentation is refused like any replay: the verifier
+    cannot distinguish a lost response from a replay, and
+    single-use that makes exceptions for plausible stories
+    is not single-use.
 
     Race honesty: one process per request; the anti-replay scan
-    and the commit append are not atomic as a pair, but
+    and the commit append are not atomic as a pair, but two
+    composed mechanisms guarantee at most one handed-out
+    authorisation per (ceremony_id, evidence_hash) pair
+    (cycle 20 fix round): CeremonyAuthorisationLedger.
+    append_authorisation re-checks the pair against the
+    entries it reloads immediately before appending — a
+    competitor commit landing before that reload is seen by
+    the re-check and refused with LedgerError — and
     HashChainJournal._save's under-flock freshness check
-    guarantees at most one handed-out authorisation per pair —
-    the loser of a concurrent race gets ledger_failed, its
-    envelope is never returned, and no orphan signing-ledger
-    entry exists for it."""
-    # (1) Config gate, before body validation: a deployment that
-    # never configured ceremony operators refuses the mode
-    # wholesale, whatever the body says.
+    refuses a save whose on-disk journal moved after that
+    reload, so a commit landing after the reload trips the
+    freshness check instead. The loser of a concurrent race
+    gets ledger_failed (the mode maps both failures to it),
+    its envelope is never returned, and no orphan
+    signing-ledger entry exists for it."""
+    # (1) Config gates, before body validation: a deployment
+    # that never configured ceremony operators refuses the mode
+    # wholesale, whatever the body says. Seed and evidence
+    # configuration gate the same way (research + absent only;
+    # production refused both at startup).
     if not config.ceremony_operators:
         raise _config(
             "ceremony_operators_unconfigured",
             "AION_CEREMONY_OPERATORS is not configured; the "
+            "ceremony_authorise mode is disabled")
+    if config.ceremony_signing_key is None:
+        raise _config(
+            "ceremony_seed_unconfigured",
+            "AION_CEREMONY_SIGNING_SEED_PATH is not configured; "
+            "the ceremony_authorise mode is disabled")
+    if config.ceremony_evidence_dir is None:
+        raise _config(
+            "ceremony_evidence_unconfigured",
+            "AION_CEREMONY_EVIDENCE_DIR is not configured; the "
             "ceremony_authorise mode is disabled")
     # (2) Strict key set + cheap field validation: malformed,
     # exit 2, NO ledger touched.
@@ -1659,7 +2132,7 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
         raise _malformed(
             "malformed_request",
             "ceremony_authorise body has missing or unknown keys; "
-            "operator authority comes from the verifier's "
+            "operator eligibility comes from the verifier's "
             "configuration, never from the request")
     operator_id = body["operator_id"]
     ceremony_id = body["ceremony_id"]
@@ -1694,6 +2167,10 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
     except SigningError:
         raise _malformed("malformed_request",
                          "evidence fields are ill-formed")
+    # evidence_ref grammar (cycle 20): a relative path under the
+    # configured evidence directory, canonical lowercase
+    # segments only — still pure string work, no filesystem.
+    _check_evidence_ref_grammar(evidence_ref)
     if old_pin is not None:
         if not isinstance(old_pin, dict) \
                 or set(old_pin) != _CEREMONY_OLD_PIN_KEYS \
@@ -1755,9 +2232,36 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
             "ceremony_operator_not_authorised",
             "the named operator is not on the verifier's "
             "configured ceremony operator list")
-    # (4) Anti-replay scan of the ceremony journal. A journal
-    # that cannot be read refuses ledger_failed — never scan a
-    # partial history and proceed.
+    # (4) Evidence resolution (cycle 20): the FIRST step with
+    # side effects (file opens), earned by passing membership.
+    # The verifier reads the artifact itself and computes the
+    # hash; the supplied hash is a cross-check only, never the
+    # signed value.
+    evidence_bytes, computed_hash = _resolve_ceremony_evidence(
+        config, evidence_ref)
+    if computed_hash != evidence_hash:
+        raise _malformed(
+            "ceremony_evidence_hash_mismatch",
+            "the supplied evidence_hash does not match the "
+            "hash the verifier computed over the resolved "
+            "artifact")
+    # Re-run the evidence non-equality check against the
+    # COMPUTED hash — the value that will be signed (equal to
+    # the supplied hash on this path, by the cross-check above).
+    if computed_hash == candidate["payload_hash"] \
+            or (old_pin is not None
+                and computed_hash == old_pin["payload_hash"]):
+        raise _malformed(
+            "malformed_request",
+            "evidence_hash must differ from the pin payload "
+            "hashes it is evidence about")
+    # (5) Anti-replay scan of the ceremony journal, BEFORE
+    # signing and retention (cycle 20 fix round): both scan
+    # inputs — ceremony_id and the COMPUTED hash — are fixed
+    # by now, so a refused replay mints no signature and
+    # writes no retained-evidence file. A journal that cannot
+    # be read refuses ledger_failed — never scan a partial
+    # history and proceed.
     try:
         ceremony_entries = CeremonyAuthorisationLedger(
             config.home).entries()
@@ -1771,29 +2275,35 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
             raise _config(
                 "ceremony_id_reused",
                 "this ceremony_id was already authorised; "
-                "ceremony ids are single-use")
+                "ceremony ids are single-use at issuance")
     for entry in ceremony_entries:
-        if entry["evidence_hash"] == evidence_hash:
+        if entry["evidence_hash"] == computed_hash:
             raise _config(
                 "ceremony_evidence_reused",
                 "this evidence_hash was already authorised for "
                 "another ceremony; evidence is single-use per "
-                "event")
-    # (5) Sign, with the ceremony TTL hard cap applied over the
-    # configured verifier TTL.
+                "event at issuance")
+    # (6) Sign with the ceremony seed, with the ceremony TTL
+    # hard cap applied over the configured verifier TTL. The
+    # COMPUTED hash is signed, never the body value.
     try:
         signed = sign_ceremony_authorisation(
-            signing_key=config.signing_key,
+            signing_key=config.ceremony_signing_key,
             signer_id=config.signer_id,
             operator_id=operator_id, ceremony_id=ceremony_id,
             reason=reason, old_pin=old_pin, candidate=candidate,
-            evidence_hash=evidence_hash, evidence_ref=evidence_ref,
+            evidence_hash=computed_hash, evidence_ref=evidence_ref,
             ttl_seconds=min(
                 config.ttl_seconds,
                 CEREMONY_AUTHORISATION_TTL_MAX_SECONDS))
     except SigningError as exc:
         raise _malformed("signing_input_error", str(exc))
-    # (6) Commit: ceremony journal FIRST (the commit point),
+    # (7) Retention, BEFORE the commit point (see docstring):
+    # the retained file is named by the authorisation id, which
+    # exists only now that signing has happened.
+    _retain_ceremony_evidence(config, signed.authorisation_id,
+                              evidence_bytes)
+    # (8) Commit: ceremony journal FIRST (the commit point),
     # then the signing ledger, then the anchor. Any failure
     # after the first append is ledger_failed and the pair
     # stays burned — see the docstring.

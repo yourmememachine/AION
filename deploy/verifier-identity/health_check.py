@@ -91,6 +91,8 @@ ALLOWED_KEYS = (
     "AION_BUDGETS_ANCHOR_INIT",
     "AION_DEPLOYMENT_MODE",
     "AION_CEREMONY_OPERATORS",
+    "AION_CEREMONY_EVIDENCE_DIR",
+    "AION_CEREMONY_SIGNING_SEED_PATH",
 )
 REQUIRED_KEYS = (
     "AION_VERIFIER_KEY_PATH",
@@ -110,7 +112,17 @@ _PATH_KEYS = (
     "AION_VERIFIER_HOME",
     "AION_ANCHOR_PATH",
     "AION_BUDGETS_ANCHOR_PATH",
+    "AION_CEREMONY_EVIDENCE_DIR",
+    "AION_CEREMONY_SIGNING_SEED_PATH",
 )
+
+# Canonical ceremony paths (cycle 20): when the configured
+# values name these, the checker verifies their filesystem
+# shape; a non-canonical absolute value is reported as an
+# informational detail, not a FAIL — the env vars deliberately
+# leave layout open. The checker NEVER reads seed bytes.
+CANONICAL_EVIDENCE_DIR = "/var/lib/aion-verifier/evidence"
+CANONICAL_CEREMONY_SEED = "/var/lib/aion-verifier/keys/ceremony.seed"
 
 # The canonical passwd home of the verifier user on a normally
 # provisioned machine. A parameterised (--base) fixture/staging
@@ -505,6 +517,77 @@ class Checker:
                     f"{key} is set to {config[key]!r}: a "
                     f"steady-state deployment must carry no INIT "
                     f"flags")
+        # Ceremony variables (cycle 20): in a production env
+        # file both are required, mirroring the verifier's own
+        # startup refusals — a missing or non-absolute value is
+        # a FAIL. Presence/consistency only: this checker NEVER
+        # reads the seed's bytes.
+        if self.expect_mode == "production":
+            for key in ("AION_CEREMONY_EVIDENCE_DIR",
+                        "AION_CEREMONY_SIGNING_SEED_PATH"):
+                value = config.get(key)
+                if not value:
+                    problems.append(
+                        f"{key} missing/empty: production "
+                        f"requires it")
+                elif not Path(value).is_absolute():
+                    problems.append(
+                        f"{key} is {value!r}, must be an "
+                        f"absolute path")
+            # Canonical-path filesystem consistency: only when
+            # the configured value IS the canonical path.
+            evidence = config.get("AION_CEREMONY_EVIDENCE_DIR")
+            if evidence == str(self.base / "evidence"):
+                ev_path = Path(evidence)
+                try:
+                    st = os.lstat(ev_path)
+                except OSError:
+                    problems.append(
+                        f"evidence dir {ev_path} missing "
+                        f"(canonical path configured)")
+                else:
+                    if stat.S_ISLNK(st.st_mode) \
+                            or not stat.S_ISDIR(st.st_mode):
+                        problems.append(
+                            f"evidence dir {ev_path} is not a "
+                            f"real directory")
+                    else:
+                        mode = stat.S_IMODE(st.st_mode)
+                        try:
+                            group_name = grp.getgrgid(
+                                st.st_gid).gr_name
+                        except KeyError:
+                            group_name = f"gid:{st.st_gid}"
+                        if _owner_name(st.st_uid) != "root" \
+                                or group_name != self.user \
+                                or mode != 0o750:
+                            problems.append(
+                                f"evidence dir {ev_path} is "
+                                f"{_owner_name(st.st_uid)}:"
+                                f"{group_name} {oct(mode)}, "
+                                f"expected root:{self.user} "
+                                f"0750")
+            seed = config.get("AION_CEREMONY_SIGNING_SEED_PATH")
+            if seed == str(self.base / "keys" / "ceremony.seed"):
+                seed_path = Path(seed)
+                try:
+                    st = os.lstat(seed_path)
+                except OSError:
+                    problems.append(
+                        f"ceremony seed file {seed_path} "
+                        f"missing (canonical path configured)")
+                else:
+                    mode = stat.S_IMODE(st.st_mode)
+                    if stat.S_ISLNK(st.st_mode) \
+                            or not stat.S_ISREG(st.st_mode) \
+                            or _owner_name(st.st_uid) != self.user \
+                            or mode != 0o600:
+                        problems.append(
+                            f"ceremony seed file {seed_path} "
+                            f"must be a regular file owned by "
+                            f"{self.user} with mode 0600 "
+                            f"(metadata only — its bytes are "
+                            f"never read by this checker)")
         self._validate_env_values(config, problems)
         self._validate_env_base_binding(config, problems)
         if problems:

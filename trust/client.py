@@ -18,7 +18,12 @@ observed mode is recorded on the client either way. That field
 is verifier-reported: a compromised verifier can lie about its
 mode; the pin detects stale/downgraded verifiers and config
 drift, it is not cryptographic evidence. What it cannot do is
-verify any MAC: client-side
+verify any MAC: the HMAC envelopes stay unverifiable here.
+The one cryptographic exception (cycle 20) is the ceremony
+authorisation: it is Ed25519-signed, so a client configured
+with the pinned CeremonyPublicKey verifies its signature
+itself in ceremony_authorise — public material only, still
+no signing capability. Client-side
 acceptance means "well-formed, consistently bound, from the
 pinned signer identity, issued by the process the orchestrator
 launched". Cryptographic verification happens at key-holding
@@ -52,8 +57,10 @@ from pathlib import Path
 
 from signing.attestation import attestation_envelope_from_dict
 from signing.ceremony_authorisation import (
+    CeremonyPublicKey,
     authorisation_id_for,
     ceremony_authorisation_envelope_from_dict,
+    verify_ceremony_authorisation,
 )
 from signing.gate_decision import (
     SigningError,
@@ -107,6 +114,7 @@ class VerifierClient:
                  timeout_seconds=30.0,
                  max_response_bytes=protocol.MAX_RESPONSE_BYTES,
                  expected_signer_id=None, expected_key_id=None,
+                 authorisation_public_key=None,
                  expected_deployment_mode=None,
                  verifier_env=None, pythonpath_extra=()):
         if expected_deployment_mode is not None \
@@ -115,11 +123,23 @@ class VerifierClient:
             raise VerifierConfigError(
                 "expected_deployment_mode must be None, "
                 "'production' or 'research'")
+        if authorisation_public_key is not None \
+                and not isinstance(authorisation_public_key,
+                                   CeremonyPublicKey):
+            raise VerifierConfigError(
+                "authorisation_public_key must be a "
+                "CeremonyPublicKey (the pinned ceremony "
+                "verification key) or None")
         self._module = module
         self._timeout = float(timeout_seconds)
         self._max_response = int(max_response_bytes)
         self._expected_signer_id = expected_signer_id
         self._expected_key_id = expected_key_id
+        # The ceremony public-key pin (cycle 20): beside the
+        # signer/key pins, but a public-key OBJECT — its key_id
+        # is derived from its bytes, so the pin cannot be
+        # re-pointed independently of the key material.
+        self._authorisation_public_key = authorisation_public_key
         self._expected_deployment_mode = expected_deployment_mode
         self.observed_deployment_mode = None
         self._verifier_env = dict(verifier_env or {})
@@ -415,18 +435,49 @@ class VerifierClient:
                            evidence_ref) -> dict:
         """Obtain a verifier-issued ceremony authorisation.
 
-        The caller names the operator and the recovery event; the
-        AUTHORITY is the verifier's own protected operator list
-        (AION_CEREMONY_OPERATORS in its environment) — this client
-        cannot supply, extend or override it, and the request body
-        has no field for a list. Returns the envelope dict only;
-        key-holding consumers convert it with
-        ceremony_authorisation_envelope_from_dict and verify the
-        MAC where the authorisation is consumed. Exit-3 refusals
-        (unconfigured list, unlisted operator, replay, evidence
-        reuse) surface as VerifierConfigError; exit-2 malformed
-        requests as VerifierProtocolError — via _run, as with
-        every mode."""
+        The caller names the operator and the recovery event;
+        ELIGIBILITY is the verifier's own protected operator
+        allowlist (AION_CEREMONY_OPERATORS in its environment) —
+        this client cannot supply, extend or override it, and
+        the request body has no field for a list. This client
+        asserts the operator id; it does not authenticate it.
+        Operator identity is operator-id allowlist eligibility via
+        the verifier's launch channel, not authentication: the
+        verifier checks that the presented operator_id was on its
+        configured allowlist at issuance; it does not and cannot
+        verify that the presenter *is* that operator — no
+        per-operator credential exists in this system, and any caller
+        able to launch the verifier can present any listed id. The
+        envelope proves a presentation under an allowlisted id,
+        ledgered at issuance and bound to this event — workflow
+        provenance, not cryptographic attribution: nothing in the
+        envelope is evidence *by* the operator, only *about* them,
+        and it does not prove which human or process made the
+        presentation.
+
+        Returns the envelope dict only. In addition to the
+        structural checks, this client verifies the envelope's
+        Ed25519 signature itself with its pinned
+        CeremonyPublicKey (the same
+        verify_ceremony_authorisation call consumers make — not
+        a second verify path), so a mis-pinned key or a forged
+        envelope fails here, at the earliest point. A client
+        with no ceremony public-key pin configured refuses
+        locally (VerifierConfigError) rather than accepting an
+        unverified envelope. Exit-3 refusals (unconfigured
+        list, ceremony_seed_unconfigured,
+        ceremony_evidence_unconfigured, unlisted operator,
+        replay, evidence reuse, ceremony_evidence_unresolvable,
+        ceremony_evidence_too_large) surface as
+        VerifierConfigError; exit-2 malformed requests
+        (including ceremony_evidence_hash_mismatch) as
+        VerifierProtocolError — via _run, as with every mode."""
+        if self._authorisation_public_key is None:
+            raise VerifierConfigError(
+                "ceremony_authorise requires a pinned ceremony "
+                "public key (authorisation_public_key); refusing "
+                "to request an envelope this client cannot "
+                "verify")
         body = {"operator_id": operator_id,
                 "ceremony_id": ceremony_id, "reason": reason,
                 "old_pin": old_pin, "candidate": candidate,
@@ -459,6 +510,34 @@ class VerifierClient:
                 "ceremony authorisation id is inconsistent")
         self._check_pins(signed.signer_id, signed.key_id)
         self._check_not_expired(signed.expires_at)
+        # Cryptographic verification (cycle 20, R8): verify the
+        # Ed25519 signature with the pinned CeremonyPublicKey —
+        # the same verify_ceremony_authorisation call consumers
+        # make, with the full event binding as expectations.
+        # The envelope's evidence_hash is the verifier-computed
+        # one; the echo comparison below binds it against the
+        # REQUEST's hash, which the verifier cross-checked
+        # against its computed value before signing.
+        try:
+            reasons = verify_ceremony_authorisation(
+                signed,
+                public_key=self._authorisation_public_key,
+                expected_signer_id=self._expected_signer_id,
+                expected_operator_id=operator_id,
+                expected_ceremony_id=ceremony_id,
+                expected_reason=reason,
+                expected_old_pin=old_pin,
+                expected_candidate=candidate,
+                expected_evidence_hash=evidence_hash,
+                expected_evidence_ref=evidence_ref)
+        except SigningError as exc:
+            raise VerifierProtocolError(
+                f"ceremony authorisation failed verification: "
+                f"{exc}") from exc
+        if reasons:
+            raise VerifierProtocolError(
+                "ceremony authorisation failed signature "
+                "verification: " + ",".join(reasons))
         # Echo binding (the sealed_eval answers-hash precedent):
         # the envelope must be bound to the event THIS client
         # sent, not merely well-formed.

@@ -1,14 +1,21 @@
-"""E2E tests for cycle 19 Part C: ceremony authorisation consumed
-by signing/pin_ceremony.reanchor_pin, issued by the REAL verifier
+"""E2E tests for ceremony authorisation consumed by
+signing/pin_ceremony.reanchor_pin, issued by the REAL verifier
 subprocess (trust.verifier_main, mode ceremony_authorise) with
-AION_CEREMONY_OPERATORS set.
+AION_CEREMONY_OPERATORS set (cycle 19; evidence resolution +
+Ed25519 key boundary, cycle 20).
 
 Fixture discipline follows test_trust_verifier.py: temp
-verifier-home (0700), generated verifier key, fake registry. The
-fixture holds the verifier key test-side only to verify outcomes
-and to consume envelopes as a key-holding consumer would. The
-SNAPSHOT key is a distinct test key — key separation between the
-authorisation key and the snapshot key is enforced in-process.
+verifier-home (0700), generated verifier key, fake registry.
+Cycle-20 discipline: a REAL evidence artifact file is created
+in a tmp evidence dir and the request's evidence_hash is its
+actual SHA-256 (the verifier resolves the artifact itself,
+computes the hash, and cross-checks); the ceremony seed is
+provisioned via generate_ceremony_key_file and loaded by the
+verifier through the real loader (load_ceremony_seed) — never
+a literal seed. The client pins the derived CeremonyPublicKey
+and verifies envelope signatures client-side; consumption
+passes authorisation_public_key= (the same pin object) and an
+explicit ceremony_history=() to reanchor_pin.
 
 Clock discipline (critique-c catch): the verifier signs with its
 real clock, so the happy paths omit now= end-to-end (live clock
@@ -16,6 +23,7 @@ on both sides); fixed-time snapshots would read as
 signed_in_future / expired against a live-issued envelope.
 """
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -27,7 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from eval.registry import EvalRegistry
 from signing import SigningError, generate_key_file, make_signing_key
 from signing.ceremony_authorisation import (
-    ceremony_authorisation_envelope_from_dict)
+    ceremony_authorisation_envelope_from_dict,
+    ceremony_public_key_for,
+    generate_ceremony_key_file,
+    load_ceremony_seed,
+)
 from signing.pin_ceremony import reanchor_pin, verify_ceremony_record
 from signing.state_snapshot import sign_state_snapshot
 from trust.client import VerifierClient
@@ -39,7 +51,8 @@ SNAP_KEY = make_signing_key(bytes(range(32, 64)))
 SNAP_SIGNER = "seat-3"
 OPERATOR = "operator-1"
 OPERATORS = "operator-1,operator-2"
-EVIDENCE = "e" * 64
+ARTIFACT = b"ceremony evidence bundle: e2e case file\n"
+EVIDENCE = hashlib.sha256(ARTIFACT).hexdigest()
 EVIDENCE_REF = "evidence-bundle-e2e"
 ITEMS = [("sealed-1", "algebra", "2+2?", "4"),
          ("sealed-2", "algebra", "3*3?", "9"),
@@ -92,6 +105,19 @@ class CeremonyAuthorisationFixture(unittest.TestCase):
         self.home.mkdir()
         self.home.chmod(0o700)
         self.key = generate_key_file(self.home / "gate.key")
+        # Ceremony seed via the real generator; the verifier
+        # loads it through the real loader.
+        self.seed_path = base / "ceremony.seed"
+        self.seed_key = generate_ceremony_key_file(self.seed_path)
+        self.assertEqual(
+            load_ceremony_seed(self.seed_path).key_id,
+            self.seed_key.key_id)
+        self.pub = ceremony_public_key_for(self.seed_key)
+        # Real evidence artifact in a tmp evidence dir; the
+        # request hash is the artifact's real SHA-256.
+        self.evidence_dir = base / "evidence"
+        self.evidence_dir.mkdir()
+        (self.evidence_dir / EVIDENCE_REF).write_bytes(ARTIFACT)
         self.registry_dir = base / "registry"
         registry = EvalRegistry(self.registry_dir)
         for item_id, domain, prompt, expected in ITEMS:
@@ -105,10 +131,13 @@ class CeremonyAuthorisationFixture(unittest.TestCase):
             "AION_VERIFIER_HOME": str(self.home / "ledger"),
             "AION_DEPLOYMENT_MODE": "research",
             "AION_CEREMONY_OPERATORS": OPERATORS,
+            "AION_CEREMONY_EVIDENCE_DIR": str(self.evidence_dir),
+            "AION_CEREMONY_SIGNING_SEED_PATH": str(self.seed_path),
         }
         self.client = VerifierClient(
             verifier_env=self.env, expected_signer_id=SIGNER,
-            expected_key_id=self.key.key_id)
+            expected_key_id=self.seed_key.key_id,
+            authorisation_public_key=self.pub)
         self._cid = 0
 
     def tearDown(self):
@@ -132,16 +161,18 @@ class CeremonyAuthorisationFixture(unittest.TestCase):
 
     def reanchor(self, old_pin, cand, authorisation, **over):
         """Consume an envelope in reanchor_pin with NO caller
-        list anywhere (the parameter no longer exists). Live
-        clock: no now= unless a test overrides it."""
+        operator list anywhere. Live clock: no now= unless a
+        test overrides it. ceremony_history is explicit (cycle
+        20: required keyword, fail-closed on omission)."""
         args = dict(
             signing_key=SNAP_KEY,
             state_bytes=state_bytes(cand.cycle_seq),
             calibration_bytes=CAL, expected_signer_id=SNAP_SIGNER,
             operator_id=OPERATOR, reason="chain_gap_recovery",
             evidence_hash=EVIDENCE, authorisation=authorisation,
-            authorisation_key=self.key,
+            authorisation_public_key=self.pub,
             expected_verifier_signer_id=SIGNER,
+            ceremony_history=(),
             strict_reasons=("chain_gap",))
         args.update(over)
         return reanchor_pin(old_pin, cand, **args)
@@ -202,21 +233,36 @@ class CeremonyAuthorisationE2ETests(CeremonyAuthorisationFixture):
                           evidence_hash="d" * 64)
         self.assertIn("different evidence", str(cm.exception))
 
-    def test_consumption_side_replay_within_ttl_without_history_succeeds_documented_limit(self):
-        # Pins the C3 documented limit, NOT a feature: the ledger
-        # burns the (ceremony_id, evidence_hash) pair at ISSUANCE,
-        # not at consumption, and ceremony_history is optional —
-        # so the SAME envelope consumed twice for the identical
-        # ceremony succeeds twice within its TTL. If a future
-        # cycle closes this (mandatory history / consumption-side
-        # ledger check), this test must be rewritten with it.
+    def test_history_omission_refused_in_process(self):
+        # Cycle 20 (R6): ceremony_history is a REQUIRED keyword
+        # of reanchor_pin — omitting it is a TypeError at the
+        # call site, and an explicit None refuses early, before
+        # envelope verification, for every reason (fail-closed
+        # ON OMISSION). The cycle-19 documented-limit test that
+        # consumed without any history is deleted: that path no
+        # longer exists.
         a, cand = snap(1), snap(4, prev="f" * 64)
         auth = self.authorise(pin_of(a), cand)
-        pin1, rec1 = self.reanchor(pin_of(a), cand, auth)
-        pin2, rec2 = self.reanchor(pin_of(a), cand, auth)
-        self.assertEqual(pin1, pin2)
-        self.assertEqual(rec1.authorisation_id,
-                         rec2.authorisation_id)
+        with self.assertRaises(SigningError):
+            self.reanchor(pin_of(a), cand, auth,
+                          ceremony_history=None)
+
+    def test_forged_envelope_injection_refused(self):
+        # A forged envelope — the genuine envelope's fields with
+        # a tampered Ed25519 signature, re-parsed through the
+        # real from_dict — is refused at consumption: signature
+        # verification under the pinned CeremonyPublicKey fails.
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = self.authorise(pin_of(a), cand)
+        from signing.ceremony_authorisation import (
+            ceremony_authorisation_envelope_to_dict,
+        )
+        forged = ceremony_authorisation_envelope_to_dict(auth)
+        sig = forged["signature"]
+        forged["signature"] = ("0" if sig[0] != "0" else "1") + sig[1:]
+        forged_auth = ceremony_authorisation_envelope_from_dict(forged)
+        with self.assertRaises(SigningError):
+            self.reanchor(pin_of(a), cand, forged_auth)
 
 
 if __name__ == "__main__":

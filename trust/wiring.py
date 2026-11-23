@@ -85,7 +85,7 @@ Production client rules (production_client): the env mapping
 is copied and the copy is validated BEFORE any client exists
 and before anything can be spawned. Keys are restricted to the
 wrapper's allowlist as shipped in
-deploy/verifier-identity/run-verifier.sh (ALLOWED_KEYS, 15
+deploy/verifier-identity/run-verifier.sh (ALLOWED_KEYS, 17
 names — the shipped wrapper governs). An unknown key
 refuses, including AION_SHIP_ANCHOR_PATH, which does not exist
 anywhere in the verifier's configuration. The five core names,
@@ -157,6 +157,7 @@ from memory.store import (
     MemoryError,
     MemoryStore,
 )
+from signing.ceremony_authorisation import CeremonyPublicKey
 from signing.gate_decision import SigningError, commit_signed
 from trust.client import VerifierClient
 from trust.errors import VerifierConfigError
@@ -170,7 +171,7 @@ __all__ = [
 ]
 
 # The wrapper's allowlist, copied from ALLOWED_KEYS in
-# deploy/verifier-identity/run-verifier.sh as shipped (15
+# deploy/verifier-identity/run-verifier.sh as shipped (17
 # names). A key outside this set is not verifier configuration
 # and refuses; the verifier itself would ignore or reject it,
 # and a wiring layer that passed it through would be smuggling
@@ -191,6 +192,8 @@ ALLOWED_ENV_KEYS = frozenset({
     "AION_BUDGETS_ANCHOR_INIT",
     "AION_DEPLOYMENT_MODE",
     "AION_CEREMONY_OPERATORS",
+    "AION_CEREMONY_EVIDENCE_DIR",
+    "AION_CEREMONY_SIGNING_SEED_PATH",
 })
 
 # Required non-empty for a production client: the five core
@@ -198,6 +201,15 @@ ALLOWED_ENV_KEYS = frozenset({
 # both anchor paths (production makes anchoring mandatory and
 # fail-closed, so an unanchored production client is a
 # misconfiguration, not a weaker-but-valid one).
+# AION_CEREMONY_OPERATORS, AION_CEREMONY_EVIDENCE_DIR and
+# AION_CEREMONY_SIGNING_SEED_PATH (cycle 20) are allowlisted
+# but deliberately NOT wiring-required, mirroring the operators
+# treatment: production *startup* refusal for a missing
+# ceremony variable is the verifier's own rule, and wiring's
+# required set is the client-construction minimum. A production
+# client can therefore be constructed with an env lacking them;
+# the verifier it spawns will refuse to start in production —
+# fail-closed, one layer down.
 REQUIRED_ENV_KEYS = (
     "AION_VERIFIER_KEY_PATH",
     "AION_VERIFIER_SIGNER_ID",
@@ -225,7 +237,8 @@ def _config_refusal(variable: str, problem: str):
 
 
 def production_client(verifier_env, *, expected_signer_id,
-                      expected_key_id, launch=_LAUNCH_SAME_USER):
+                      expected_key_id, authorisation_public_key=None,
+                      launch=_LAUNCH_SAME_USER):
     """Build the production verifier client from a validated
     copy of the given env mapping.
 
@@ -372,10 +385,28 @@ def production_client(verifier_env, *, expected_signer_id,
             "be supplied out-of-band in the form "
             "key-<16 lowercase hex>")
 
+    # Ceremony public-key pin (cycle 20): the production client
+    # shape supports pinning the ceremony Ed25519 public key
+    # beside the signer/key pins, the same way — supplied
+    # out-of-band as a CeremonyPublicKey object (its key_id is
+    # derived from its bytes) and passed through to the client,
+    # whose ceremony_authorise verifies envelope signatures
+    # against it. Optional at THIS factory because ceremony use
+    # is optional for a production client; a client without it
+    # refuses ceremony_authorise locally rather than accepting
+    # an unverified envelope.
+    if authorisation_public_key is not None \
+            and not isinstance(authorisation_public_key,
+                               CeremonyPublicKey):
+        raise VerifierConfigError(
+            "authorisation_public_key: must be a "
+            "CeremonyPublicKey supplied out-of-band, or None")
+
     return VerifierClient(
         verifier_env=env,
         expected_signer_id=expected_signer_id,
         expected_key_id=expected_key_id,
+        authorisation_public_key=authorisation_public_key,
         expected_deployment_mode="production")
 
 

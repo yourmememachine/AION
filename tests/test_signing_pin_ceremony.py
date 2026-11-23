@@ -14,7 +14,18 @@ binding fixture only: it exercises MAC/expiry/exact-binding,
 and is never evidence the authority path works (issuance-side
 authority — env list, ledgers — is proven only by the
 subprocess E2E in test_trust_ceremony_authorisation.py).
+
+Cycle 20: the envelope is Ed25519 (asymmetric) — the helper
+mints in-process with a ``CeremonySigningKey`` built from a
+test seed (NOT an RFC 8032 vector seed), and the ceremony
+verifies under the matching pinned ``CeremonyPublicKey``,
+which holds public bytes only. ``ceremony_history`` is a
+required keyword of ``reanchor_pin``; the helper below supplies
+an explicit ``ceremony_history=()`` default IN THE HELPER ONLY
+so existing cases stay readable — the function itself has no
+default (pinned by test T1).
 """
+import inspect
 import json
 import re
 import sys
@@ -26,23 +37,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from signing import SigningError, make_signing_key
 from signing.ceremony_authorisation import (
+    CEREMONY_AUTHORISATION_DOMAIN,
     PURPOSE_CEREMONY_AUTHORISATION,
+    CeremonyPublicKey,
+    CeremonySigningKey,
     authorisation_id_for,
+    ceremony_authorisation_envelope_from_dict,
     ceremony_authorisation_envelope_to_dict,
+    public_key_id_for,
     sign_ceremony_authorisation)
 from signing.ceremony_authorisation import (
-    _mac as _authorisation_mac,
     _payload_hash as _authorisation_payload_hash)
-from signing.gate_decision import ALG as _AUTH_ALG
+from signing.ed25519 import public_key_from_seed, sign as _ed25519_sign
 from signing.pin_ceremony import (
     advance_pin, classify_verification, reanchor_pin,
     verify_ceremony_record)
 from signing.state_snapshot import sign_state_snapshot
 
 KEY = make_signing_key(bytes(range(32, 64)))
-# The verifier's key: DISTINCT from the snapshot key (key
-# separation is enforced in-process, cycle 19).
-VERIFIER_KEY = make_signing_key(bytes(range(64, 96)))
+
+
+def _ceremony_signing_key(seed):
+    """Seat A's v2 minting key, in-process from a test seed."""
+    public_key = public_key_from_seed(seed)
+    return CeremonySigningKey(
+        seed=seed, public_key=public_key,
+        key_id=public_key_id_for(public_key))
+
+
+def _ceremony_public_key(signing_key):
+    return CeremonyPublicKey(
+        public_key=signing_key.public_key, key_id=signing_key.key_id)
+
+
+# The verifier's ceremony key pair: DISTINCT seed from the
+# snapshot key. Separation is now type/role separation (cycle
+# 20): the ceremony side holds only VERIFIER_PUBLIC_KEY.
+VERIFIER_SEED = bytes(range(160, 192))
+VERIFIER_SIGNING_KEY = _ceremony_signing_key(VERIFIER_SEED)
+VERIFIER_PUBLIC_KEY = _ceremony_public_key(VERIFIER_SIGNING_KEY)
+# An attacker's ceremony key pair, for key-substitution tests.
+ATTACKER_SEED = bytes(range(192, 224))
+ATTACKER_SIGNING_KEY = _ceremony_signing_key(ATTACKER_SEED)
+ATTACKER_PUBLIC_KEY = _ceremony_public_key(ATTACKER_SIGNING_KEY)
 VERIFIER_SIGNER = "verifier-svc"
 SIGNER = "seat-3"
 NOW = "2026-11-20T12:00:00+00:00"
@@ -96,7 +133,8 @@ def _project_old_pin(old):
 def mint_authorisation(old, cand, *, operator_id=OPERATOR,
                        reason="chain_gap_recovery",
                        evidence_hash=EVIDENCE, now=NOW,
-                       key=VERIFIER_KEY, signer_id=VERIFIER_SIGNER,
+                       key=VERIFIER_SIGNING_KEY,
+                       signer_id=VERIFIER_SIGNER,
                        old_pin="project"):
     """Mint an in-process authorisation envelope (binding
     fixture only — see the module docstring). ``old_pin`` is
@@ -117,7 +155,7 @@ def mint_authorisation(old, cand, *, operator_id=OPERATOR,
 
 
 def remac_authorisation(auth):
-    """Re-MAC a hand-built envelope under the test verifier key.
+    """Re-sign a hand-built envelope under the test verifier seed.
 
     The hash is computed over the RAW payload projection, not
     via ``auth.payload()``: for the un-mintable events below,
@@ -125,9 +163,9 @@ def remac_authorisation(auth):
     ceremony's own rules), which is exactly why those events
     can never carry a verifying envelope. For a mintable
     payload the raw projection is identical to ``payload()``'s
-    output, so the re-MACed envelope verifies clean."""
+    output, so the re-signed envelope verifies clean."""
     raw = {
-        "v": "signed-ceremony-authorisation/1", "alg": _AUTH_ALG,
+        "v": "signed-ceremony-authorisation/2", "alg": "ed25519",
         "purpose": PURPOSE_CEREMONY_AUTHORISATION,
         "signer_id": auth.signer_id, "key_id": auth.key_id,
         "operator_id": auth.operator_id,
@@ -138,12 +176,13 @@ def remac_authorisation(auth):
         "signed_at": auth.signed_at, "expires_at": auth.expires_at,
     }
     payload_hash = _authorisation_payload_hash(raw)
+    blob = (CEREMONY_AUTHORISATION_DOMAIN + "\n" + "ed25519" + "\n"
+            + auth.key_id + "\n" + payload_hash).encode("utf-8")
     return replace(
         auth, payload_hash=payload_hash,
         authorisation_id=authorisation_id_for(payload_hash,
                                               auth.key_id),
-        signature=_authorisation_mac(VERIFIER_KEY.key, payload_hash,
-                                     auth.key_id))
+        signature=_ed25519_sign(VERIFIER_SEED, blob).hex())
 
 
 def hand_authorisation(old, cand, *, reason, evidence_hash=EVIDENCE):
@@ -175,8 +214,12 @@ def reanchor(old, cand, **kw):
         kw.setdefault("strict_reasons", ("chain_gap",))
     kw.setdefault("evidence_hash", EVIDENCE)
     kw.setdefault("now", NOW)
-    kw.setdefault("authorisation_key", VERIFIER_KEY)
+    kw.setdefault("authorisation_public_key", VERIFIER_PUBLIC_KEY)
     kw.setdefault("expected_verifier_signer_id", VERIFIER_SIGNER)
+    # Helper-only default (design-c §6): existing cases stay
+    # readable; reanchor_pin itself has NO default for
+    # ceremony_history — omitting it there is a TypeError (T1).
+    kw.setdefault("ceremony_history", ())
     if "authorisation" not in kw:
         # Mint now= MUST equal the ceremony's now= (one clock per
         # call): cycle-16 tests reanchor at LATER, and a 900 s TTL
@@ -515,17 +558,46 @@ class ReanchorTests(unittest.TestCase):
 class CeremonyAuthorisationTests(unittest.TestCase):
     """Cycle 19, Part C: envelope consumption in reanchor_pin."""
 
-    def test_same_key_as_snapshot_refused(self):
-        # Key separation, checked BEFORE envelope verification:
-        # even a genuine envelope under the snapshot key itself
-        # refuses, with the separation message.
+    def test_signing_key_as_authorisation_public_key_refused_on_type(self):
+        # Cycle 20 (T11 as amended): key separation is a TYPE
+        # gate. The snapshot SigningKey passed as
+        # authorisation_public_key refuses on type, before
+        # envelope verification — there is no second secret in
+        # the ceremony to compare ids with, and the cycle-19
+        # id-inequality check is deleted (it compared disjoint
+        # ``pub-…`` / ``key-…`` namespaces and could never fire).
         a, cand = snap(1), snap(4, prev="f" * 64)
-        auth = mint_authorisation(pin_of(a), cand, key=KEY,
-                                  signer_id=SIGNER)
+        auth = mint_authorisation(pin_of(a), cand)
         with self.assertRaises(SigningError) as cm:
             reanchor(pin_of(a), cand, authorisation=auth,
-                     authorisation_key=KEY)
-        self.assertIn("key separation", str(cm.exception))
+                     authorisation_public_key=KEY)
+        self.assertIn("CeremonyPublicKey", str(cm.exception))
+
+    def test_key_substitution_attacker_public_key_pinned_refused(self):
+        # Key substitution, direction (i): a GENUINE verifier
+        # envelope, but the ceremony is pinned to an ATTACKER
+        # CeremonyPublicKey ⇒ refusal at envelope verification.
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     authorisation_public_key=ATTACKER_PUBLIC_KEY)
+        self.assertIn("ceremony authorisation does not verify",
+                      str(cm.exception))
+
+    def test_key_substitution_envelope_under_attacker_seed_refused(self):
+        # Key substitution, direction (ii): an envelope minted
+        # under the ATTACKER's seed for the exact real event,
+        # presented to a ceremony pinned to the GENUINE verifier
+        # public key ⇒ refusal. Substitution produces refusal
+        # (DoS), never acceptance, in either direction.
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand,
+                                  key=ATTACKER_SIGNING_KEY)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth)
+        self.assertIn("ceremony authorisation does not verify",
+                      str(cm.exception))
 
     def test_envelope_binding_refusals_per_field(self):
         a, cand = snap(1), snap(4, prev="f" * 64)
@@ -554,12 +626,17 @@ class CeremonyAuthorisationTests(unittest.TestCase):
         self.assertIn("expired", str(cm.exception))
 
     def test_wrong_key_envelope_refused(self):
+        # Superseded in shape by the two key-substitution tests
+        # above; kept as the plain wrong-pin leg: a genuine
+        # envelope verified against an unrelated public key
+        # refuses.
         a, cand = snap(1), snap(4, prev="f" * 64)
         auth = mint_authorisation(pin_of(a), cand)
-        wrong = make_signing_key(b"\xaa" * 32)
+        wrong = _ceremony_public_key(
+            _ceremony_signing_key(b"\xaa" * 32))
         with self.assertRaises(SigningError):
             reanchor(pin_of(a), cand, authorisation=auth,
-                     authorisation_key=wrong)
+                     authorisation_public_key=wrong)
 
     def test_wrong_verifier_signer_pin_refused(self):
         a, cand = snap(1), snap(4, prev="f" * 64)
@@ -578,7 +655,7 @@ class CeremonyAuthorisationTests(unittest.TestCase):
                          auth))
         with self.assertRaises(SigningError):
             reanchor(pin_of(a), cand, authorisation=auth,
-                     authorisation_key="not-a-key")
+                     authorisation_public_key="not-a-key")
 
     def test_record_carries_authorisation_binding(self):
         a, cand = snap(1), snap(4, prev="f" * 64)
@@ -683,7 +760,14 @@ class Cycle16HardeningTests(unittest.TestCase):
             reanchor(pin_of(a), behind, now=LATER,
                      evidence_hash="d" * 64, ceremony_history=[rec])
 
-    def test_history_empty_and_absent_unchanged(self):
+    def test_history_explicit_empty_accepted(self):
+        # Cycle 20 split of the old empty-and-absent test: the
+        # EMPTY half survives — an explicit empty history is a
+        # caller assertion that no prior ceremony exists, and a
+        # first chain_gap ceremony succeeds on it. The ABSENT
+        # half is inverted by cycle 20: omission is now a
+        # TypeError and explicit None refuses (see
+        # Cycle20ConsumptionTests, T1–T3).
         a = snap(1)
         cand = snap(4, prev="f" * 64)
         _, rec = reanchor(pin_of(a), cand, ceremony_history=[])
@@ -780,6 +864,232 @@ class Cycle16HardeningTests(unittest.TestCase):
         for bad in [{"chain_gap": 1}, {"chain_gap"}]:
             with self.assertRaises(SigningError, msg=repr(bad)):
                 reanchor(pin_of(a), cand, strict_reasons=bad)
+
+
+class Cycle20ConsumptionTests(unittest.TestCase):
+    """Cycle 20, seat C: required ceremony_history, per-reason
+    admissibility, the duplicate-consumption matrix, and the
+    honest residual pins (design-c §6 T1–T8 as amended by
+    critique-c; DESIGN-FINAL R6)."""
+
+    def _direct_kwargs(self, old, cand):
+        """The full reanchor_pin argument set, built directly
+        (not via the reanchor() helper) so a test can OMIT a
+        keyword the helper would supply."""
+        return dict(
+            signing_key=KEY,
+            state_bytes=state_bytes(cand.cycle_seq),
+            calibration_bytes=CAL,
+            expected_signer_id=SIGNER,
+            operator_id=OPERATOR,
+            reason="chain_gap_recovery",
+            strict_reasons=("chain_gap",),
+            evidence_hash=EVIDENCE,
+            authorisation=mint_authorisation(old, cand),
+            authorisation_public_key=VERIFIER_PUBLIC_KEY,
+            expected_verifier_signer_id=VERIFIER_SIGNER,
+            now=NOW)
+
+    def test_t1_ceremony_history_keyword_is_required(self):
+        # T1: the parameter has no default — omitting the
+        # keyword raises TypeError before any logic runs. Pins
+        # the call shape against a future "convenience" default
+        # creeping back.
+        param = inspect.signature(
+            reanchor_pin).parameters["ceremony_history"]
+        self.assertIs(param.default, inspect.Parameter.empty)
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        with self.assertRaises(TypeError):
+            reanchor_pin(pin_of(a), cand,
+                         **self._direct_kwargs(pin_of(a), cand))
+
+    def test_t2_explicit_none_refuses_before_envelope_verification(self):
+        # T2: explicit None refuses for chain_gap_recovery with
+        # the fail-closed-on-omission message — and the refusal
+        # fires even with an EXPIRED envelope, pinning the
+        # ordering (presence before envelope verification).
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, ceremony_history=None)
+        self.assertIn("fail-closed on omission", str(cm.exception))
+        auth = mint_authorisation(pin_of(a), cand)  # minted at NOW
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     ceremony_history=None,
+                     now="2026-11-20T12:16:00+00:00")
+        self.assertIn("fail-closed on omission", str(cm.exception))
+
+    def test_t3_explicit_none_refuses_for_every_no_pin_reason(self):
+        # T3: omission is not a bootstrap path — None refuses
+        # with the same message for every no-pin reason.
+        cand = snap(3)
+        for reason in ("initial_anchor", "lost_pin",
+                       "corrupted_pin"):
+            with self.assertRaises(SigningError, msg=reason) as cm:
+                reanchor(None, cand, reason=reason,
+                         ceremony_history=None)
+            self.assertIn("fail-closed on omission",
+                          str(cm.exception))
+
+    def test_t4_initial_anchor_nonempty_history_refused(self):
+        # T4, leg 1: initial_anchor with a non-empty VERIFIED
+        # history refuses with the empty-only message, naming
+        # the contradiction and pointing at lost_pin (with a new
+        # authorisation/evidence required).
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        _pin, rec = reanchor(pin_of(a), cand)
+        cand2 = snap(5, prev="f" * 64)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(None, cand2, reason="initial_anchor",
+                     evidence_hash="d" * 64, ceremony_history=[rec])
+        self.assertIn("initial_anchor requires an empty ceremony "
+                      "history", str(cm.exception))
+        self.assertIn("lost_pin", str(cm.exception))
+
+    def test_t4_lost_pin_populated_history_evidence_reuse_refused(self):
+        # T4, leg 2: lost_pin with a populated history runs the
+        # generic checks — reusing the first ceremony's evidence
+        # refuses.
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        _pin, rec = reanchor(pin_of(a), cand)
+        nxt = snap_at(7, prev="f" * 64)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(None, nxt, reason="lost_pin", now=LATER,
+                     ceremony_history=[rec])
+        self.assertIn("already been used in a prior ceremony",
+                      str(cm.exception))
+
+    def test_t4_corrupted_pin_populated_history_behind_head_refused(self):
+        # T4, leg 3: corrupted_pin with a populated history and
+        # a candidate behind its ceremony head refuses.
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        _pin, rec = reanchor(pin_of(a), cand)
+        behind = snap_at(3, prev="f" * 64)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(None, behind, reason="corrupted_pin",
+                     now=LATER, evidence_hash="d" * 64,
+                     ceremony_history=[rec])
+        self.assertIn("abandon higher attested work",
+                      str(cm.exception))
+
+    def test_t5_duplicate_consumption_second_presentation_none_refused(self):
+        # T5 (unit leg): the same envelope consumed once, then
+        # presented again with ceremony_history=None ⇒ refused.
+        # The cycle-19 pinned limit (replay succeeds when
+        # history is omitted) is DELETED — this is its
+        # replacement.
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand)
+        reanchor(pin_of(a), cand, authorisation=auth,
+                 ceremony_history=())
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     ceremony_history=None)
+        self.assertIn("fail-closed on omission", str(cm.exception))
+
+    def test_t6_duplicate_consumption_updated_history_refused(self):
+        # T6: the same envelope twice, the second call supplying
+        # the UPDATED history [rec1] ⇒ refused as a replayed
+        # target.
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand)
+        _pin1, rec1 = reanchor(pin_of(a), cand, authorisation=auth,
+                               ceremony_history=())
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     ceremony_history=[rec1])
+        self.assertIn("already a ceremonied target",
+                      str(cm.exception))
+
+    def test_consumption_replay_with_stale_history_succeeds_named_residual_protected_head(self):
+        """T7 — HONEST RESIDUAL PIN, not a feature. The same
+        envelope twice, the second call supplying the STALE
+        history (the same () as the first call) SUCCEEDS. This
+        pins design-c §5 / F1 (narrowed, still open): with a
+        stale or honestly-empty history the replay succeeds
+        within TTL; the protected monotonic consumption head
+        remains the fix. GPT's cycles 14–16 stale-history
+        condition is explicitly NOT met by this cycle."""
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand)
+        pin1, rec1 = reanchor(pin_of(a), cand, authorisation=auth,
+                              ceremony_history=())
+        pin2, rec2 = reanchor(pin_of(a), cand, authorisation=auth,
+                              ceremony_history=())
+        self.assertEqual(pin2, pin1)
+        self.assertEqual(rec2.authorisation_id,
+                         rec1.authorisation_id)
+
+    def test_t8_regression_scenario_stale_history_returns_regressed_pin(self):
+        """T8 — Gemini's regression attack, concrete, with the
+        concession stated plainly: this test concedes the
+        stale-history leg of the external consumption-replay
+        finding; it is pinned so the concession is executable,
+        not rhetorical. Consume seq1→seq4, advance the real pin
+        to seq6 by ordinary advance_pin steps (which leave NO
+        trace in the ceremony history), then replay the original
+        envelope with old_pin restaged to the seq-1 pin:
+        updated history refuses (replayed target); STALE
+        history SUCCEEDS and returns the seq-4 pin — asserted
+        as the regression value itself, behind the caller's
+        seq-6 pin. Stopping the stale leg is the protected
+        head's job, not this function's."""
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand)
+        pin4, rec1 = reanchor(pin_of(a), cand, authorisation=auth,
+                              ceremony_history=())
+        s5 = snap(5, prev=cand.payload_hash)
+        s6 = snap(6, prev=s5.payload_hash)
+        pin6 = advance_pin(advance_pin(pin4, s5, ()), s6, ())
+        self.assertEqual(pin6["cycle_seq"], 6)
+        # Updated history: refused.
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     ceremony_history=[rec1])
+        self.assertIn("already a ceremonied target",
+                      str(cm.exception))
+        # Stale history: succeeds, returning the REGRESSED pin.
+        regressed, _rec = reanchor(pin_of(a), cand,
+                                   authorisation=auth,
+                                   ceremony_history=())
+        self.assertEqual(regressed, pin_of(cand))
+        self.assertEqual(regressed["cycle_seq"], 4)
+        self.assertLess(regressed["cycle_seq"], pin6["cycle_seq"])
+
+    def test_v1_golden_envelope_refused_with_version_wording(self):
+        # R6: v1 refusal is EXPLICIT. A literal cycle-19 envelope
+        # dict (hex64 HMAC signature, ``key-…`` id) converted via
+        # from_dict must raise a SigningError NAMING the
+        # superseded version, before any reanchor logic; and the
+        # raw dict presented to reanchor_pin refuses as a
+        # non-typed authorisation.
+        v1 = {
+            "operator_id": OPERATOR,
+            "ceremony_id": "ceremony-golden-v1",
+            "reason": "chain_gap_recovery",
+            "old_pin": {"cycle_seq": 1, "payload_hash": "b" * 64},
+            "candidate": {"cycle_seq": 4, "payload_hash": "c" * 64,
+                          "signer_id": SIGNER, "key_id": KEY.key_id},
+            "evidence_hash": EVIDENCE,
+            "evidence_ref": EVIDENCE_REF,
+            "signer_id": VERIFIER_SIGNER,
+            "key_id": "key-0123456789abcdef",
+            "signed_at": NOW,
+            "expires_at": "2026-11-20T12:15:00+00:00",
+            "payload_hash": "d" * 64,
+            "authorisation_id": "f" * 64,
+            "signature": "a" * 64,
+        }
+        with self.assertRaises(SigningError) as cm:
+            ceremony_authorisation_envelope_from_dict(v1)
+        self.assertRegex(str(cm.exception), r"(?i)version 1|v1")
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        with self.assertRaises(SigningError):
+            reanchor(pin_of(a), cand, authorisation=v1)
 
 
 if __name__ == "__main__":

@@ -50,8 +50,10 @@ Pod E (seats 12/13/14) coverage:
           tests.test_trust_wiring.LiveProductionWiringTests
 
 Ground truth used (Pod C, shipped code over design note): the
-wrapper allowlist has 15 names (cycle 19 added
-AION_CEREMONY_OPERATORS) — AION_SHIP_ANCHOR_PATH is not among
+wrapper allowlist has 17 names (cycle 19 added
+AION_CEREMONY_OPERATORS; cycle 20 added
+AION_CEREMONY_EVIDENCE_DIR and AION_CEREMONY_SIGNING_SEED_PATH)
+— AION_SHIP_ANCHOR_PATH is not among
 them and refuses as unknown.
 INIT flags refuse for any value other than "" or "0".
 """
@@ -144,12 +146,16 @@ class ProductionClientRefusalTests(unittest.TestCase):
         self.assertIn(variable, message)
         return message
 
-    def test_allowlist_is_the_shipped_15_names(self):
+    def test_allowlist_is_the_shipped_17_names(self):
         # Pod C ground truth: the shipped wrapper's ALLOWED_KEYS
-        # has 15 names (cycle 19 added AION_CEREMONY_OPERATORS
-        # as the 15th); AION_SHIP_ANCHOR_PATH is not among them.
-        self.assertEqual(len(ALLOWED_ENV_KEYS), 15)
+        # has 17 names (cycle 19 added AION_CEREMONY_OPERATORS
+        # as the 15th; cycle 20 added AION_CEREMONY_EVIDENCE_DIR
+        # and AION_CEREMONY_SIGNING_SEED_PATH); AION_SHIP_ANCHOR_PATH
+        # is not among them.
+        self.assertEqual(len(ALLOWED_ENV_KEYS), 17)
         self.assertIn("AION_CEREMONY_OPERATORS", ALLOWED_ENV_KEYS)
+        self.assertIn("AION_CEREMONY_EVIDENCE_DIR", ALLOWED_ENV_KEYS)
+        self.assertIn("AION_CEREMONY_SIGNING_SEED_PATH", ALLOWED_ENV_KEYS)
         self.assertNotIn("AION_SHIP_ANCHOR_PATH", ALLOWED_ENV_KEYS)
 
     def test_allowlist_matches_wrapper_script_at_test_time(self):
@@ -157,7 +163,7 @@ class ProductionClientRefusalTests(unittest.TestCase):
         # parse the ALLOWED_KEYS array out of the shipped
         # wrapper script at test time and assert set equality,
         # so a wrapper-side rename or addition fails here even
-        # if the 15-count pin above still passes by accident.
+        # if the 17-count pin above still passes by accident.
         script = (Path(__file__).resolve().parents[1]
                   / "deploy" / "verifier-identity"
                   / "run-verifier.sh")
@@ -168,7 +174,7 @@ class ProductionClientRefusalTests(unittest.TestCase):
         wrapper_keys = set(re.findall(r"AION_[A-Z_]+",
                                       match.group(1)))
         self.assertEqual(wrapper_keys, set(ALLOWED_ENV_KEYS))
-        self.assertEqual(len(wrapper_keys), 15)
+        self.assertEqual(len(wrapper_keys), 17)
 
     def test_unknown_ship_anchor_path_refused(self):
         env = self.env(AION_SHIP_ANCHOR_PATH="/tmp/ship.anchor.json")

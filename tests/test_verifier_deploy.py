@@ -60,6 +60,13 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn("AION_VERIFIER_PROPOSAL_BUDGET", allowed)
         self.assertIn("AION_VERIFIER_IDENTITY_BUDGET", allowed)
 
+    def test_ceremony_evidence_dir_key_allowlisted(self):
+        self.assertIn("AION_CEREMONY_EVIDENCE_DIR", _allowed_keys())
+
+    def test_ceremony_signing_seed_path_key_allowlisted(self):
+        self.assertIn("AION_CEREMONY_SIGNING_SEED_PATH",
+                      _allowed_keys())
+
     def test_ceremony_operators_key_allowlisted(self):
         # Cycle 19: AION_CEREMONY_OPERATORS is read by
         # trust/verifier_main.py, so the wrapper must allowlist
@@ -79,7 +86,7 @@ class DeployScriptTests(unittest.TestCase):
                           re.S).group(1)
         health_keys = set(re.findall(r"[A-Z][A-Z_]+", block))
         self.assertEqual(health_keys, _allowed_keys())
-        self.assertEqual(len(health_keys), 15)
+        self.assertEqual(len(health_keys), 17)
 
     def test_every_verifier_main_env_var_is_allowlisted(self):
         main_text = (REPO / "trust" / "verifier_main.py").read_text()
