@@ -11,3 +11,6 @@ Consequences:
 
 ## Ratification (2026-11-23)
 Dilip was presented the as-built substitution (operator list in the verifier's protected env config, not a list inside the gate) with both external seats' positions (Gemini: the placement is the right call, the literal reading would be a security regression; ChatGPT: ratification itself is required). Dilip's answer: "Do the best." Recorded as RATIFIED: the verifier-env authority model stands as the accepted interpretation of this decision.
+
+## Standing rule — decisions go to the war room (Dilip, 2026-11-23)
+Dilip, asked to decide the consumption head's store location: "Don't ask me discuss in the war room and take decision not now anytime do the same." Recorded as a standing rule for AION (and his projects generally): do NOT bring design/store-location decisions to Dilip. The war room (internal seats + ChatGPT + Gemini as blind seats) discusses and decides; the decision and its reasoning go in the project records. Dilip is informed of outcomes in the normal updates, not asked for approvals mid-build. Applied immediately: the consumption head's store location is decided by the war room — the verifier-owned form (route-4) is the leading candidate on the existing record.

@@ -1,0 +1,11 @@
+# External war-room seats — cycle 20 (ceremony authorisation fix round)
+Date: 2026-11-23 ~01:57-01:59 CST. Brief: CROSS-CHECK-BRIEF-CYCLE-20.md (blind).
+
+## Item verdicts (both seats)
+(1) Key boundary / Ed25519: GPT SHIP-with-qualification 0.91; Gemini FIX (blocking this cycle). CONVERGENT requirement: independent differential validation of the in-house Ed25519 — RFC 8032/Wycheproof adversarial vectors (non-canonical R, S>=L boundary, small-order A/R, mixed torsion, bit-flips) + cross-implementation agreement (openssl pkeyutl cross-check, skip-if-absent); Gemini adds: seed-file permission enforcement (0600, fail closed) and derivation-overlap checks at startup.
+(2) Evidence provenance: SHIP both (0.95 / accepted). GPT asks adversarial filesystem tests (symlink substitution, intermediate-dir replacement, concurrent mutation, crash boundaries) as remaining-uncertainty closure.
+(3) Consumption integrity: Gemini FIX binding ONLY cycles 14-16 (blocking 20 would double-penalise a held gate). GPT FIX 0.96 BLOCKING cycle 20: a demonstrated replay that regresses protected state is an active defect in the integrated system, not a deferrable enhancement; two-of-three legs is not partial credit on a single replay-resistance guarantee; the monotonic head is a release gate. Also GPT process finding: owner overrides of external findings must be recorded explicitly with residual risk accepted.
+(4) Operator claim: SHIP both (0.98 / accepted) — narrowed claim discharges the item for the prototype.
+
+## RECONCILIATION — cycle 20 PROVISIONAL (issuance half complete).
+Items (2) and (4) closed. Item (1) closes with the differential suite + seed hygiene (small, no owner decision). Item (3): GPT's blocking reading governs under the standing rule (an external FIX is never overridden by a narrower scope reading elsewhere) — the protected monotonic consumption head is required before cycle 20 ships as an integrated system, and remains required before cycles 14-16 re-review. The head needs an owner-level store-location decision: verifier-owned consumption state (route-4 delegated consumption check — the only existing protected store; cycle 20's recorded runner-up route) is the recommended form. Put to Dilip 2026-11-23.
