@@ -67,9 +67,41 @@ the authority transition invalidates outstanding envelopes
 at consume - is therefore NOT the system's behaviour today;
 the war room must judge whether issuance-time-only membership
 is acceptable.
+
+CYCLE 25 DISCLOSURE (CROSS-CHECK-18 Q2, settled): the leg-2
+behaviour above is now stated explicitly as the contract in
+signing/ceremony_authorisation.py: removing an operator
+prevents future issuance; it does NOT revoke authorisations
+already issued - they remain valid until TTL expiry. Where
+an immediate cutover is required, pair removal with a
+ceremony signing-key rotation (leg 3), which does invalidate
+outstanding envelopes at consume.
+
+CYCLE 25 (leg 4): the restored pin store's recovery no
+longer rides an adopter-auto-requested supersession decision
+(cycle 24's flow, held by seat-gpt in CROSS-CHECK-18 Q1).
+The adopter now STOPS at PinSupersessionPendingApproval -
+no decision requested, nothing consumed - and completes only
+when a separately invoked attempt presents an out-of-band
+independent supersession approval artefact (genuinely signed
+by the real approval tool's signing function under a
+dedicated approver key; the verifier, configured with the
+approver public key only, verifies it before issuing). Leg 4
+below is re-pointed through that independently authorised
+route. NOTE: leg 4 builds its client directly (VerifierClient
+with the approver public key added to the verifier env) —
+that is now a CHOICE, not a necessity: seat B's
+wiring-allowlist/harness updates for
+AION_SUPERSESSION_APPROVER_PUBLIC_KEY (design section 4.3)
+HAVE landed (the allowlist is 20 at every §4.3 site and the
+harness provisions a real approver key), so the direct
+construction is retained only as the leg's existing shape
+and does not exercise the wiring validation layer; legs 1-3/5
+above use the harness production_client unchanged.
 """
 
 import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -94,7 +126,21 @@ from trust.ledger import (
     CeremonySupersessionLedger,
     SigningLedger,
 )
-from trust.pin_adoption import PinAdopterConfig, build_pin_adopter
+from trust.client import VerifierClient
+from trust.pin_adoption import (
+    PinAdopter,
+    PinAdopterConfig,
+    PinSupersessionPendingApproval,
+)
+from trust.supersession_approval import (
+    supersession_approval_to_dict,
+    supersession_approval_to_json,
+)
+from trust.supersession_approval_tool import (
+    approver_public_key_for,
+    build_approval_for_report,
+    generate_approver_key_file,
+)
 from trust.wiring import production_client
 
 OPERATOR_B = "operator-2"   # second entry of the harness OPERATORS
@@ -315,12 +361,18 @@ class PinStoreRestorationTests(ProductionCeremonyFixture):
     only) while the consumption head stays at seq 3 does not
     silently re-consume the seq-3 movement and does not
     regress anything. The next adopter attempt on a NEW state
-    (seq 4) recovers only through the legitimate cycle-24
-    path: a fresh chain_gap_recovery ceremony whose first
-    consume is refused pre-commit as supersede-required, a
-    journaled supersession decision, and only then a consume
-    that lands - exactly one new consumption, for the new
-    seq-4 candidate."""
+    (seq 4) recovers only through the legitimate cycle-25
+    independently authorised route: a fresh chain_gap_recovery
+    ceremony whose first consume is refused pre-commit as
+    supersede-required; the adopter STOPS
+    (PinSupersessionPendingApproval - no decision requested,
+    nothing consumed); an out-of-band approval artefact,
+    genuinely signed by the approval tool under a dedicated
+    approver key against the pending report completed from
+    the verifier's own consumption journal, is placed in the
+    adopter's inbox; only then does a later attempt present
+    it, obtain the journaled supersession decision, and land
+    exactly one new consumption, for the new seq-4 candidate."""
 
     def setUp(self):
         super().setUp()
@@ -332,6 +384,23 @@ class PinStoreRestorationTests(ProductionCeremonyFixture):
         self.calibration_path.write_bytes(CAL)
         self.pin_dir = self.base / "pins"
         self.store = PinStore(self.pin_dir, state_dir=self.state_dir)
+        # Cycle 25: the dedicated approver key (tool side
+        # only) and a verifier client whose env carries the
+        # approver PUBLIC key (production mode requires it
+        # beside the ceremony seed). Built directly, not via
+        # production_client - see the module docstring note.
+        self.approver_key = generate_approver_key_file(
+            self.base / "approver.seed")
+        approver_pub = approver_public_key_for(self.approver_key)
+        env = dict(self.home.env)
+        env["AION_SUPERSESSION_APPROVER_PUBLIC_KEY"] = \
+            approver_pub.public_key.hex()
+        client = VerifierClient(
+            verifier_env=env, expected_signer_id=SIGNER,
+            expected_key_id=self.home.verifier_key_id,
+            authorisation_public_key=self.home.pub)
+        self.inbox = self.base / "approval-inbox"
+        self.inbox.mkdir()
         config = PinAdopterConfig(
             state_path=self.loop.state_path,
             calibration_path=self.calibration_path,
@@ -340,13 +409,12 @@ class PinStoreRestorationTests(ProductionCeremonyFixture):
             expected_snapshot_signer_id=SNAP_SIGNER,
             operator_id=OPERATOR,
             expected_verifier_signer_id=SIGNER,
-            evidence_dir=self.home.evidence_dir)
-        self.adopter = build_pin_adopter(
-            self.home.env, expected_signer_id=SIGNER,
-            expected_key_id=self.home.verifier_key_id,
-            authorisation_public_key=self.home.pub,
-            signing_key_path=self.home.snapshot_key_path,
-            config=config)
+            evidence_dir=self.home.evidence_dir,
+            supersession_approval_path=self.inbox)
+        self.adopter = PinAdopter(
+            client=client, store=self.store,
+            signing_key=self.home.snapshot_key, config=config,
+            authorisation_public_key=self.home.pub)
         self._item_seq = 0
 
     def scan_items(self, n):
@@ -393,9 +461,57 @@ class PinStoreRestorationTests(ProductionCeremonyFixture):
         self.assertEqual(pin, genesis.pin)
         self.assertEqual(len(history), 1)
         self.assertEqual(self.consumption_head(), head_before)
-        # Next adopter cycle, on new state (seq 4).
+        # Next adopter cycle, on new state (seq 4): the first
+        # attempt STOPS at supersession pending independent
+        # approval - no decision requested, nothing consumed,
+        # pin still at the restored seq 1.
         self.scan_items(1)
         self.bare_cycle()
+        with self.assertRaises(
+                PinSupersessionPendingApproval) as cm:
+            self.adopter.snapshot_and_adopt()
+        self.assertEqual(cm.exception.candidate_seq, 4)
+        self.assertEqual(len(self.consumption_entries()), 2)
+        self.assertEqual(
+            CeremonySupersessionLedger(
+                self.home.verifier_home).entries(), [])
+        pin, _history = self.read_store()
+        self.assertEqual(pin["cycle_seq"], 1)
+        # The approver's deliberate act: complete the pending
+        # report's head seq/entry_hash from the verifier's own
+        # consumption journal, sign with the real approval
+        # tool under the approver key, drop the artefact in
+        # the adopter's inbox.
+        report = json.loads(
+            self.adopter.pending_report_path.read_text(
+                encoding="utf-8"))
+        head = self.consumption_entries()[-1]
+        # The adopter's report head is all-null here: the
+        # seq-3 movement was ADOPTED by this adopter (then the
+        # store was rolled back), so its journal holds no
+        # unadopted burn to name the head from. The approver
+        # completes the whole head block from the verifier's
+        # own consumption journal - the deliberate act's
+        # verification step.
+        self.assertIsNone(report["head"]["authorisation_id"])
+        report["head"] = {
+            "authorisation_id": head["authorisation_id"],
+            "ceremony_id": head["ceremony_id"],
+            "old_cycle_seq": head["old_cycle_seq"],
+            "old_payload_hash": head["old_payload_hash"],
+            "new_cycle_seq": head["new_cycle_seq"],
+            "new_payload_hash": head["new_payload_hash"],
+            "seq": head["seq"],
+            "entry_hash": head["entry_hash"]}
+        signed_approval = build_approval_for_report(
+            approver_key=self.approver_key,
+            approver_id="approver-1", report=report)
+        artefact = supersession_approval_to_dict(signed_approval)
+        (self.inbox / f"{signed_approval.approval_id}.json"
+         ).write_text(
+            supersession_approval_to_json(signed_approval),
+            encoding="utf-8")
+        # The separately invoked attempt completes the route.
         result = self.adopter.snapshot_and_adopt()
         self.assertEqual(result.outcome, "reanchored")
         self.assertEqual(result.record.reason, "chain_gap_recovery")
@@ -412,15 +528,18 @@ class PinStoreRestorationTests(ProductionCeremonyFixture):
         self.assertEqual(entries[-1]["new_cycle_seq"], 4)
         self.assertEqual(self.consumption_head(),
                          (4, result.pin["payload_hash"]))
-        # The recovery went through the decision gate, not a
-        # silent landing: exactly one supersession decision
-        # was journaled by the verifier, abandoning the seq-3
-        # head movement for this envelope.
+        # The recovery went through the independently approved
+        # decision gate, not a silent landing: exactly one
+        # supersession decision was journaled by the verifier,
+        # abandoning the seq-3 head movement for this envelope,
+        # and it records the approval that authorised it.
         decisions = CeremonySupersessionLedger(
             self.home.verifier_home).entries()
         self.assertEqual(len(decisions), 1)
         self.assertEqual(decisions[0]["new_authorisation_id"],
                          entries[-1]["authorisation_id"])
+        self.assertEqual(decisions[0]["approval_id"],
+                         artefact["approval_id"])
         # The adopted store is consistent: pin at seq 4, and
         # its history is the restored genesis record plus the
         # new seq-4 record (the seq-3 record stays lost with

@@ -874,7 +874,18 @@ class CeremonyConsumptionLedger(HashChainJournal):
     every HashChainJournal subclass. The consumed HEAD
     TARGET is exposed separately as head_target(). The base
     _append is overridden so the chain bookkeeping uses the
-    hash head explicitly via chain_head()."""
+    hash head explicitly via chain_head().
+
+    INTERNAL / TEST-ONLY SEAM (cycle 25, CROSS-CHECK-18 Q4
+    precaution): this class is the VERIFIER PROCESS's store.
+    Driving it — or append_consumption — directly in-process
+    from any other process is an internal/test-only seam, not
+    a production API surface: the system-level guarantees
+    (single-use, head monotonicity as a composed property)
+    hold only through the verifier modes, which are the only
+    production callers. A fabricated in-process consumer or a
+    direct append silently voids those guarantees, exactly as
+    for signing.pin_ceremony.consume_authorisation."""
 
     FILENAME = "ceremony-consumptions.json"
     EXTRA_KEYS = frozenset({
@@ -1627,6 +1638,20 @@ class CeremonySupersessionLedger(HashChainJournal):
     the THEN-current head: a decision minted against head H
     is inert once the head moves past H.
 
+    Cycle 25: each verifier-mode decision also records the
+    ``approval_id``, ``approval_payload_hash`` and
+    ``approver_key_id`` of the out-of-band supersession
+    approval artefact the verifier verified before issuing
+    (see trust/verifier_main.py's ceremony_supersede mode and
+    trust/supersession_approval.py) — the independent record
+    of the approval. The approval is single-use: a non-empty
+    approval_id may appear on at most one entry, enforced at
+    append (reload-recheck inside the bounded retry loop)
+    and at load. Entries written before cycle 25 carry none
+    of the three keys (the legacy key set, accepted by
+    _allowed_entry_key_sets); direct in-process appends
+    record "" for all three.
+
     Single-decision-per-envelope is enforced at append
     (reload-recheck inside the bounded retry loop) and at
     load. Per-ABANDONED uniqueness is deliberately NOT
@@ -1664,7 +1689,25 @@ class CeremonySupersessionLedger(HashChainJournal):
     self-validates; the signing-ledger mirror
     (SigningLedger.append_ceremony_supersession) is an
     anchored audit trace that a decision was recorded, not a
-    proof of any particular journal entry."""
+    proof of any particular journal entry.
+
+    INTERNAL / TEST-ONLY SEAM (cycle 25, CROSS-CHECK-18 Q4
+    precaution): this class is the VERIFIER PROCESS's store.
+    Driving it — or append_decision — directly in-process
+    from any other process is an internal/test-only seam, not
+    a production API surface: the guarantees hold only
+    through the verifier modes, which are the only production
+    callers. The concrete consequence: append_decision's
+    three approval fields (approval_id,
+    approval_payload_hash, approver_key_id) are DEFAULTED to
+    "" — a direct in-process append therefore records an
+    approval-free decision, and the consumption ledger's
+    decision binding (check_head) never inspects the approval
+    fields, so such a fabricated decision would be honoured
+    by a direct in-process consume composition. Only the
+    verifier's ceremony_supersede mode passes a verified
+    approval's fields, and only that path carries the
+    cycle-25 approval guarantee."""
 
     FILENAME = "ceremony-supersessions.json"
     EXTRA_KEYS = frozenset({
@@ -1675,11 +1718,30 @@ class CeremonySupersessionLedger(HashChainJournal):
         "operator_id",
         "superseding_old_cycle_seq", "superseding_old_payload_hash",
         "candidate_cycle_seq", "candidate_payload_hash",
+        "approval_id", "approval_payload_hash", "approver_key_id",
         "decided_at"})
+
+    def _allowed_entry_key_sets(self):
+        # Cycle 25 seam (the cycle-23 v1/v2 pattern): entries
+        # written before the approval record existed carry none
+        # of the three approval keys; entries written by the
+        # cycle-25 append path always carry all three (""
+        # spellings for a direct in-process append with no
+        # approval; the verified approval's id, payload hash
+        # and approver key id for a verifier-mode decision).
+        # Both sets load; _load validates the values when
+        # present.
+        current = frozenset(_ENTRY_KEYS | set(self.EXTRA_KEYS))
+        legacy = frozenset(
+            _ENTRY_KEYS | (set(self.EXTRA_KEYS) - {
+                "approval_id", "approval_payload_hash",
+                "approver_key_id"}))
+        return (current, legacy)
 
     def _load(self) -> list:
         entries = HashChainJournal._load(self)
         seen_new = set()
+        seen_approvals = set()
         for entry in entries:
             # Entry kind (cycle 24 fix round, r3-F3): this
             # journal holds supersede decisions only; any other
@@ -1714,6 +1776,38 @@ class CeremonySupersessionLedger(HashChainJournal):
                     "supersession journal contains a duplicate "
                     "new_authorisation_id")
             seen_new.add(entry["new_authorisation_id"])
+            # Approval record coherence + single-use at load
+            # (cycle 25): the three approval fields are either
+            # all empty (legacy / direct appends — not an
+            # approval) or all present in form (a verifier-mode
+            # decision's record of its verified approval); a
+            # non-empty approval_id may appear on at most one
+            # decision — one approval mints one decision.
+            approval_id = entry.get("approval_id", "")
+            approval_hash = entry.get("approval_payload_hash", "")
+            approver_key_id = entry.get("approver_key_id", "")
+            approval_fields = (approval_id, approval_hash,
+                               approver_key_id)
+            if any(not isinstance(v, str)
+                   for v in approval_fields) \
+                    or (any(v != "" for v in approval_fields)
+                        and not all(v != ""
+                                    for v in approval_fields)):
+                raise CorruptLedgerError(
+                    "supersession approval fields must be "
+                    "strings, all empty or all present")
+            if approval_id:
+                if not _is_hex64(approval_id) \
+                        or not _is_hex64(approval_hash):
+                    raise CorruptLedgerError(
+                        "supersession approval_id and "
+                        "approval_payload_hash must be 64-char "
+                        "lowercase hex strings")
+                if approval_id in seen_approvals:
+                    raise CorruptLedgerError(
+                        "supersession journal contains a "
+                        "duplicate approval_id")
+                seen_approvals.add(approval_id)
             for field in ("abandoned_authorisation_id",
                           "new_authorisation_id"):
                 if not _is_hex64(entry[field]):
@@ -1776,8 +1870,22 @@ class CeremonySupersessionLedger(HashChainJournal):
                 return dict(entry)
         return None
 
+    def find_by_approval_id(self, approval_id):
+        """Reload, return the decision entry dict minted
+        against this approval_id, or None (cycle 25). The
+        empty id is not an approval and never matches."""
+        if not approval_id:
+            return None
+        self._reload()
+        for entry in self._entries:
+            if entry.get("approval_id", "") == approval_id:
+                return dict(entry)
+        return None
+
     def append_decision(self, *, abandoned_entry, signed,
-                        recorded_at) -> dict:
+                        recorded_at, approval_id="",
+                        approval_payload_hash="",
+                        approver_key_id="") -> dict:
         """Append one decision as kind "supersede".
 
         All binding fields are copied from ``abandoned_entry``
@@ -1793,6 +1901,28 @@ class CeremonySupersessionLedger(HashChainJournal):
         if not isinstance(signed, SignedCeremonyAuthorisation):
             raise LedgerError(
                 "can only decide for a SignedCeremonyAuthorisation")
+        # Approval record form (cycle 25): the three fields
+        # are all "" (no approval bound — direct in-process
+        # appends only; the verifier mode always passes the
+        # verified approval's fields) or all present, with the
+        # id and payload hash hex64 and the approver key id a
+        # non-empty string. Anything else is refused before
+        # append, like the shape checks below.
+        approval_fields = (approval_id, approval_payload_hash,
+                           approver_key_id)
+        if any(not isinstance(v, str) for v in approval_fields) \
+                or (any(v != "" for v in approval_fields)
+                    and not all(v != ""
+                                for v in approval_fields)) \
+                or (approval_id != ""
+                    and not _is_hex64(approval_id)) \
+                or (approval_payload_hash != ""
+                    and not _is_hex64(approval_payload_hash)):
+            raise LedgerError(
+                "approval_id, approval_payload_hash and "
+                "approver_key_id must be all empty (no approval) "
+                "or all present, with the id and payload hash "
+                "as 64-char lowercase hex strings")
         required = ("authorisation_id", "ceremony_id",
                     "old_cycle_seq", "old_payload_hash",
                     "new_cycle_seq", "new_payload_hash")
@@ -1836,6 +1966,16 @@ class CeremonySupersessionLedger(HashChainJournal):
                 raise LedgerError(
                     "supersession already decided for "
                     f"authorisation: {signed.authorisation_id}")
+            # Approval single-use at append (cycle 25),
+            # rechecked against fresh entries on every attempt:
+            # one approval mints exactly one decision, even
+            # under concurrent supersede calls.
+            if approval_id and any(
+                    e.get("approval_id", "") == approval_id
+                    for e in self._entries):
+                raise LedgerError(
+                    "supersession already decided for approval: "
+                    f"{approval_id}")
             try:
                 return self._append(
                     "supersede", recorded_at,
@@ -1862,6 +2002,9 @@ class CeremonySupersessionLedger(HashChainJournal):
                         "cycle_seq"],
                     candidate_payload_hash=signed.candidate[
                         "payload_hash"],
+                    approval_id=approval_id,
+                    approval_payload_hash=approval_payload_hash,
+                    approver_key_id=approver_key_id,
                     decided_at=recorded_at)
             except CorruptLedgerError as exc:
                 last_error = exc

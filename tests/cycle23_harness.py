@@ -42,6 +42,10 @@ from signing.ceremony_authorisation import (
 )
 from trust import protocol
 from trust.ledger import SigningLedger
+from trust.supersession_approval_tool import (
+    approver_public_key_for,
+    generate_approver_key_file,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -77,6 +81,9 @@ class ProductionHome:
     snapshot_key_path: Path      # fresh snapshot signing key file
     snapshot_key: object         # its SigningKey
     bootstrap_returncode: int
+    approver_seed_path: object = None  # cycle 25 approver seed file
+    approver_key: object = None        # SupersessionApproverKey
+    approver_pub: object = None        # SupersessionApproverPublicKey
     _tmp: object = field(default=None, repr=False)
 
     def cleanup(self):
@@ -119,6 +126,12 @@ def provision_production_home(base=None):
     seed_path = base / "ceremony.seed"
     seed_key = generate_ceremony_key_file(seed_path)
     pub = ceremony_public_key_for(seed_key)
+    # Cycle 25: a dedicated approver key (approval-tool side);
+    # the verifier env carries only its PUBLIC key hex —
+    # production with the ceremony seed configured requires it.
+    approver_seed_path = base / "approver.seed"
+    approver_key = generate_approver_key_file(approver_seed_path)
+    approver_pub = approver_public_key_for(approver_key)
     evidence_dir = base / "evidence"
     evidence_dir.mkdir(exist_ok=True)
     registry_dir = base / "registry"
@@ -152,6 +165,8 @@ def provision_production_home(base=None):
         "AION_CEREMONY_OPERATORS": OPERATORS,
         "AION_CEREMONY_EVIDENCE_DIR": str(evidence_dir),
         "AION_CEREMONY_SIGNING_SEED_PATH": str(seed_path),
+        "AION_SUPERSESSION_APPROVER_PUBLIC_KEY":
+            approver_pub.public_key.hex(),
     }
 
     # (1) Research-mode bootstrap: all INIT flags set, one
@@ -194,4 +209,7 @@ def provision_production_home(base=None):
         registry_dir=registry_dir, anchor_paths=anchor_paths,
         env=production_env, snapshot_key_path=snapshot_key_path,
         snapshot_key=snapshot_key,
-        bootstrap_returncode=result.returncode, _tmp=tmp)
+        bootstrap_returncode=result.returncode,
+        approver_seed_path=approver_seed_path,
+        approver_key=approver_key, approver_pub=approver_pub,
+        _tmp=tmp)

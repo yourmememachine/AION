@@ -40,6 +40,8 @@ nothing.
 
 Operator identity is operator-id allowlist eligibility via the verifier's launch channel, not authentication: the verifier checks that the presented operator_id was on its configured allowlist at issuance; it does not and cannot verify that the presenter *is* that operator — no per-operator credential exists in this system, and any caller able to launch the verifier can present any listed id. The envelope proves a presentation under an allowlisted id, ledgered at issuance and bound to this event — workflow provenance, not cryptographic attribution: nothing in the envelope is evidence *by* the operator, only *about* them, and it does not prove which human or process made the presentation.
 
+Operator removal, stated explicitly (cycle 25, CROSS-CHECK-18 Q2 disclosure): removing an operator from ``AION_CEREMONY_OPERATORS`` prevents FUTURE issuance — new authorisation requests for that operator are refused — but it does NOT revoke authorisations already issued. An outstanding, unexpired envelope issued while the operator was listed remains valid and consumable until its TTL expires; allowlist membership is an issuance fact, not a consumption gate. Where an immediate cutover is required, pair removal with a ceremony signing-key rotation, which does invalidate outstanding envelopes at consumption.
+
 The reason allowlist below is a LOCAL MIRROR of
 ``signing.pin_ceremony.REASONS``. This module must NOT import
 pin_ceremony (pin_ceremony imports this module to verify

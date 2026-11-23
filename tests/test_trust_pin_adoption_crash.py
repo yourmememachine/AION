@@ -46,6 +46,15 @@ from trust.pin_adoption import (
     PinAdopterConfig,
     PinAdoptionBurned,
     PinAdoptionRefused,
+    PinSupersessionPendingApproval,
+)
+from trust.supersession_approval import (
+    supersession_approval_to_json,
+)
+from trust.supersession_approval_tool import (
+    approver_public_key_for,
+    build_approval_for_report,
+    generate_approver_key_file,
 )
 
 ACTOR = "verifier-actor"
@@ -580,16 +589,67 @@ class RecoverySeamTests(CrashFixture):
         # candidate (seq 11) is strictly ahead of the head
         # (seq 9) and the old pin (seq 7) is behind it, so
         # the pin jumps past the burned sequence.
-        # Cycle 24 RE-PIN (supersede Option A, design B §9.3):
-        # the landing now goes through the decision flow —
-        # the first consume refuses ceremony_supersede_required,
-        # the adopter requests the decision, and the re-run
-        # consumes. Outcome assertions are unchanged; the
-        # decision-journal assertions below are new.
+        # Cycle 25 RE-PIN (CROSS-CHECK-18 Q1; supersedes the
+        # cycle-24 auto-decision re-pin): the first consume
+        # refuses ceremony_supersede_required and the adopter
+        # STOPS at PinSupersessionPendingApproval — no
+        # decision is requested. The landing happens only on
+        # a later attempt presenting an out-of-band approval
+        # artefact, genuinely signed by the real approval
+        # tool under a dedicated approver key against the
+        # pending report completed from the verifier's own
+        # consumption journal. Outcome assertions are
+        # unchanged; the approval assertions are new.
         self.scan_items(2)
         self.bare_cycle()
         self.bare_cycle()
-        result = self.fresh_adopter().snapshot_and_adopt()
+        approver_key = generate_approver_key_file(
+            self.base / "approver.seed")
+        approver_pub = approver_public_key_for(approver_key)
+        env2 = dict(self.env)
+        env2["AION_SUPERSESSION_APPROVER_PUBLIC_KEY"] = \
+            approver_pub.public_key.hex()
+        client2 = VerifierClient(
+            verifier_env=env2, expected_signer_id=SIGNER,
+            expected_key_id=self.seed_key.key_id,
+            authorisation_public_key=self.pub)
+        inbox = self.base / "approval-inbox"
+        inbox.mkdir()
+        approved_adopter = PinAdopter(
+            client=client2, store=self.store,
+            signing_key=SNAP_KEY,
+            config=PinAdopterConfig(
+                state_path=self.loop.state_path,
+                calibration_path=self.calibration_path,
+                pin_dir=self.pin_dir,
+                snapshot_signer_id=SNAP_SIGNER,
+                expected_snapshot_signer_id=SNAP_SIGNER,
+                operator_id=OPERATOR,
+                expected_verifier_signer_id=SIGNER,
+                evidence_dir=self.evidence_dir,
+                supersession_approval_path=inbox),
+            authorisation_public_key=self.pub)
+        with self.assertRaises(PinSupersessionPendingApproval):
+            approved_adopter.snapshot_and_adopt()
+        self.assertEqual(
+            CeremonySupersessionLedger(self.home / "ledger")
+            .entries(), [])
+        report = json.loads(
+            approved_adopter.pending_report_path.read_text(
+                encoding="utf-8"))
+        head = self.consumption_entries()[-1]
+        self.assertEqual(report["head"]["authorisation_id"],
+                         head["authorisation_id"])
+        report["head"]["seq"] = head["seq"]
+        report["head"]["entry_hash"] = head["entry_hash"]
+        signed_approval = build_approval_for_report(
+            approver_key=approver_key, approver_id="approver-1",
+            report=report)
+        (inbox / f"{signed_approval.approval_id}.json"
+         ).write_text(
+            supersession_approval_to_json(signed_approval),
+            encoding="utf-8")
+        result = approved_adopter.snapshot_and_adopt()
         self.assertEqual(result.outcome, "reanchored")
         self.assertEqual(result.record.reason, "chain_gap_recovery")
         self.assertEqual(result.pin["cycle_seq"], 11)
@@ -609,6 +669,8 @@ class RecoverySeamTests(CrashFixture):
             self.home / "ledger").entries()
         self.assertEqual(len(decisions), 1)
         decision = decisions[0]
+        self.assertEqual(decision["approval_id"],
+                         signed_approval.approval_id)
         self.assertEqual(decision["abandoned_new_cycle_seq"], 9)
         self.assertEqual(decision["candidate_cycle_seq"], 11)
         self.assertEqual(decision["new_authorisation_id"],

@@ -341,3 +341,95 @@ guarantee does not hold. Making lineage mandatory at the ledger API
 boundary itself would break the v1 read path and is not attempted;
 the scoping sentence above is the precise claim, and it supersedes
 any broader reading of Addendum 3's guarantee.
+
+## Addendum 5 — cycle 25: independent supersession authorisation; Addendum 4's reading superseded
+
+*(Cycle 25, resolving the Q1 split in internal/CROSS-CHECK-18.md.
+War-room record: internal/REVIEW-CYCLE-25.md. Design:
+internal/cycle25-work/design-approval.md.)*
+
+Addendum 4 disclosed that cycle 24's supersession decision,
+while a separate signed envelope, mode, journal and receipt,
+was requested by PinAdopter AUTOMATICALLY after a refusal, and
+recorded that its closure was conditional on seat-gpt ratifying
+that reading of "separately authorised". Seat-gpt did not
+ratify it (CROSS-CHECK-18): a separately SIGNED decision is not
+a separately AUTHORISED one. Addendum 4's reading is therefore
+SUPERSEDED as the standing claim. The cycle-24 mechanism
+remains as the decision layer; what changed is what may cause
+a decision to be issued.
+
+**The rule as of cycle 25.** A supersession decision is
+issued only against an independent supersession APPROVAL: a
+signed artefact minted out-of-band by the standalone approval
+tool (`trust/supersession_approval_tool.py`) under a dedicated
+approver key — a third Ed25519 key, distinct from the snapshot
+signing key and the verifier's ceremony seed (distinctness
+from both is now enforced at verifier startup). The verifier
+verifies the approval — signature, expiry, and the full
+binding re-derived from its own journals — BEFORE journaling
+any decision, and records the approval's id, payload hash and
+approver key id in the decision entry. The approval binds the
+abandoned head movement, the replacement candidate, the exact
+(old, new) movement on both sides, and the original failed
+consumption attempt (attempted authorisation id, the refusal
+code, and the head entry's authorisation id, journal seq and
+entry hash, so any head movement stales the approval).
+Approvals are single-use: a spent approval id refuses at load,
+at the mode, and inside the ledger's append retry loop.
+
+**The adopter's role.** On `ceremony_supersede_required` the
+adopter now STOPS: it journals a pending phase, writes a
+pending-supersession report, and raises
+`PinSupersessionPendingApproval` (runner exit 7). It makes no
+decision request and no re-run. Only a later, separately
+invoked attempt that finds an approval artefact in its inbox
+presents it — once — and completes the consume. The adopter
+is the approval's custodian and presenter, never its author:
+its code path contains no import of the approval tool and no
+access to the approver seed (the seed's path variable is
+absent from the verifier wrapper allowlist and refused by the
+client wiring as unknown). The pending report's head `seq` /
+`entry_hash` are written null by the adopter — it cannot read
+the verifier's journals — and are completed by the approver
+from the consumption journal as a disclosed transcription
+step inside the act; a wrong transcription is inert, because
+the verifier re-derives the binding from its own head entry
+and refuses rather than misapproving.
+
+**The precise trust claim.** Independence is at the
+AUTHORISATION-EVENT level: supersession cannot happen as a
+side effect of an automated recovery flow; it requires a
+deliberate separate act, with its own artefact and key,
+outside the adopter's control flow. It is NOT a claim of a
+separate human or a separate OS user — on this same-user
+machine the operator and the approver are the same person
+running a second command, and a fully malicious same-user
+process remains outside the claim. Approval TTL is 900 s by
+default, hard-capped at 3600 s (a documented deviation for a
+human-paced act); the effective window is bounded in practice
+by the candidate envelope's remaining TTL. Production startup
+refuses to run without the approver public key configured
+(the fail-fast discipline of cycles 22–23), so the key gates
+verifier startup although it is used only by the supersede
+mode; approver-key rotation and seed-loss recovery are
+documented in deploy/verifier-identity/README.md (rotation
+invalidates unspent approvals only; seed loss wedges
+supersession alone and is recovered by reprovisioning).
+
+**Stage names (seat-gemini's relabel condition).** The
+consumption AUTHORISATION is the cycle-19/20 envelope. The
+supersession DECISION is the verifier-journaled record that a
+specific abandonment is permitted. The supersession APPROVAL
+is the out-of-band artefact that alone authorises a decision.
+No stage is an "authorisation" except the first.
+
+**Resume semantics completed in the fix rounds.** A journaled
+decision whose outcome was lost to the adopter no longer
+strands the movement: resume is consume-first when a decision
+may already exist; a pre-commit refusal (supersede-required
+or head-regression) on that consume falls through to the
+approval path in the same attempt or re-pends, never burns;
+and a consume the verifier certifies as already-consumed is
+journaled `consumed` adopter-side, releasing the movement to
+the ordinary `burned_unadopted` recovery.

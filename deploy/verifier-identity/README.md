@@ -262,6 +262,57 @@ announced here, identical in kind to the cycle-19
 act: new seed → new `pub-…` pin everywhere → all in-flight
 envelopes dead within 900 s.
 
+**Operator removal does NOT revoke (cycle 25, CROSS-CHECK-18
+Q2 disclosure).** Removing an operator from
+`AION_CEREMONY_OPERATORS` prevents FUTURE issuance for that
+operator only; it does NOT revoke authorisations already
+issued — outstanding envelopes remain valid and consumable
+until their TTL expiry, because allowlist membership is an
+issuance fact, not a consumption gate. Where an immediate
+cutover is required, pair the removal with a ceremony
+signing-key rotation (above), which does invalidate
+outstanding envelopes.
+
+**Supersession approval (cycle 25).** A supersession
+decision additionally requires an out-of-band supersession
+approval artefact, signed under a dedicated approver key by
+the standalone approval tool
+(`trust.supersession_approval_tool`) — never by any running
+service. The verifier holds only the approver PUBLIC key:
+`AION_SUPERSESSION_APPROVER_PUBLIC_KEY` (hex64; allowlist
+19 → 20), printed by the tool's `public-key` command at
+provisioning and written into the env file by `setup.sh`.
+The approver seed is provisioned outside the verifier home
+and its path variable is deliberately absent from this env
+file and the wrapper allowlist. Production with the
+ceremony seed configured refuses startup while the public
+key is empty; research without it refuses supersession
+per-request. Startup also enforces the approver key's
+distinctness: an approver public key equal to the ceremony
+public key, or to the snapshot signing key (its bytes, or
+the Ed25519 public key derived from them), refuses startup —
+provision the approver seed as an independent random draw,
+never derived from or equal to either other key.
+Independence is at the authorisation-event
+level only — not a claim of a separate human or OS user.
+
+**Approver-key rotation and seed loss (cycle 25).** Rotate
+the approver key by generating a new seed with the approval
+tool, updating `AION_SUPERSESSION_APPROVER_PUBLIC_KEY` to
+the new public key, and restarting the verifier: approvals
+minted under the old key stop verifying at that moment, so
+any supersession still pending approval must be re-approved
+under the new key (no decision can have been journaled
+against an unverifiable approval, so nothing in flight is
+stranded by the rotation itself). If the approver SEED is
+lost, supersession — and only supersession — is wedged:
+ordinary authorisation, consumption and recovery are
+unaffected, because the approver key gates no other mode.
+Recovery is reprovisioning, not repair: generate a fresh
+seed, pin its public key as above, and re-approve any
+pending supersession. No journalled state depends on the
+old seed, so a lost seed destroys no history.
+
 **Ceremony consumption (cycle 21).** Issuance alone no longer
 spends an authorisation: the `ceremony_consume` verifier mode
 records the single use of an issued envelope in the

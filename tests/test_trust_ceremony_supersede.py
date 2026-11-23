@@ -32,6 +32,27 @@ Covered, in three layers:
   consume integration (a supersede-shaped envelope consumes
   ONLY after a decision; the decision is spent by its own
   envelope only).
+
+Cycle 25 (design-approval.md section 8) adds the approval
+gate on the mode: the fixture now configures an approver
+public key and the supersede helper presents a genuine
+approval (minted in-process with the approval tool's signing
+function) by default. New coverage:
+CeremonySupersedeApprovalGateTests (no approval refuses; the
+unconfigured / invalid / expired approval codes; approvals
+signed with the ceremony seed or the snapshot signing key
+refuse; approvals bound to a different candidate, movement
+or failed attempt refuse unproven; approval reuse refuses;
+a recovery envelope cannot acquire a decision; the client
+route with a valid approval lands the consume) and the
+ledger-level approval-record tests (fields recorded,
+single-use at append and at load). Existing mode tests were
+updated only where the widened body / approval gate forced
+it: they now present a valid approval by default, the
+second-decision test presents a FRESH approval for its
+second call, and the burned_unadopted test presents an
+approval bound to a primary envelope (one bound to the
+recovery itself is un-mintable).
 """
 
 import hashlib
@@ -58,6 +79,12 @@ from signing.ceremony_authorisation import (
 from signing.gate_decision import _canonical, _sha256
 from trust import protocol
 from trust.client import VerifierClient
+from trust.supersession_approval import supersession_approval_to_dict
+from trust.supersession_approval_tool import (
+    _make_approver_key,
+    approver_public_key_for as _approver_pin_for,
+    sign_supersession_approval,
+)
 from trust.ledger import (
     AlreadyConsumedError,
     CeremonyConsumptionLedger,
@@ -193,6 +220,52 @@ class CeremonySupersessionLedgerTests(unittest.TestCase):
         self.assertEqual(found, entry)
         self.assertIsNone(
             self.ledger.find_by_new_authorisation("f" * 64))
+
+    def test_append_records_approval_fields_and_reuse_refused(self):
+        # Cycle 25: a decision records its approval's id,
+        # payload hash and approver key id; the same approval
+        # cannot mint a second decision for a DIFFERENT
+        # envelope either (single-use at append).
+        env = supersede_env()
+        entry = self.ledger.append_decision(
+            abandoned_entry=self.head_entry, signed=env,
+            recorded_at=NOW, approval_id="9" * 64,
+            approval_payload_hash="8" * 64,
+            approver_key_id="pub-0123456789abcdef")
+        self.assertEqual(entry["approval_id"], "9" * 64)
+        self.assertEqual(entry["approval_payload_hash"], "8" * 64)
+        self.assertEqual(entry["approver_key_id"],
+                         "pub-0123456789abcdef")
+        found = self.ledger.find_by_approval_id("9" * 64)
+        self.assertEqual(found, entry)
+        self.assertIsNone(self.ledger.find_by_approval_id("7" * 64))
+        self.assertIsNone(self.ledger.find_by_approval_id(""))
+        env2 = supersede_env(candidate=cand(55, "d" * 64))
+        with self.assertRaises(LedgerError):
+            self.ledger.append_decision(
+                abandoned_entry=self.head_entry, signed=env2,
+                recorded_at=NOW, approval_id="9" * 64,
+                approval_payload_hash="8" * 64,
+                approver_key_id="pub-0123456789abcdef")
+        self.assertEqual(len(self.ledger.entries()), 1)
+        # A fresh instance loads the widened entry cleanly.
+        self.assertEqual(
+            len(CeremonySupersessionLedger(self.tmp.name).entries()),
+            1)
+
+    def test_load_rejects_duplicate_approval_id(self):
+        other = Path(self.tmp.name) / "dupapproval"
+        fields = dict(approval_id="9" * 64,
+                      approval_payload_hash="8" * 64,
+                      approver_key_id="pub-0123456789abcdef")
+        write_supersession_journal(other, [
+            decision_fields(**fields),
+            decision_fields(
+                abandoned_authorisation_id="3" * 64,
+                new_authorisation_id="4" * 64,
+                new_ceremony_id="ceremony-new-2", **fields)])
+        with self.assertRaises(CorruptLedgerError):
+            CeremonySupersessionLedger(other)
 
     def test_second_decision_same_envelope_refused_at_append(self):
         env = supersede_env()
@@ -679,6 +752,11 @@ class SupersessionJournalLoadCoherenceTests(unittest.TestCase):
 ACTOR = "verifier-actor"
 SIGNER = "verifier-svc"
 OPERATOR = "operator-uma"
+APPROVER_ID = "approver-1"
+APPROVER_KEY = _make_approver_key(
+    hashlib.sha256(b"cycle25 supersede mode approver seed").digest())
+WRONG_APPROVER_KEY = _make_approver_key(
+    hashlib.sha256(b"cycle25 supersede mode wrong approver").digest())
 ITEMS = [("sealed-1", "algebra", "2+2?", "4"),
          ("sealed-2", "algebra", "3*3?", "9"),
          ("sealed-3", "geo", "pi~?", "3.14")]
@@ -727,6 +805,8 @@ class SupersedeFixture(unittest.TestCase):
             "AION_CEREMONY_OPERATORS": OPERATOR + ",operator-backup",
             "AION_CEREMONY_EVIDENCE_DIR": str(self.evidence_dir),
             "AION_CEREMONY_SIGNING_SEED_PATH": str(self.seed_path),
+            "AION_SUPERSESSION_APPROVER_PUBLIC_KEY":
+                _approver_pin_for(APPROVER_KEY).public_key.hex(),
         }
         self.client = VerifierClient(
             verifier_env=self.env, expected_signer_id=SIGNER,
@@ -782,9 +862,69 @@ class SupersedeFixture(unittest.TestCase):
             pass
         return result.returncode, doc, result.stdout
 
-    def supersede(self, envelope, operator_id=OPERATOR, **kw):
+    def approval_for(self, envelope, *, head=None,
+                     approver_key=APPROVER_KEY, ttl_seconds=900,
+                     now=None):
+        """Mint a genuine supersession approval (the approval
+        tool's signing function, in-process) binding the
+        current consumption head (or ``head``) to ``envelope``
+        and to the failed consume attempt against that head."""
+        signed_env = ceremony_authorisation_envelope_from_dict(
+            envelope)
+        if head is None:
+            entries = self.consumption_entries()
+            head = entries[-1] if entries else {
+                "authorisation_id": "1" * 64,
+                "ceremony_id": "ceremony-fabricated-head",
+                "old_cycle_seq": 41, "old_payload_hash": OLD_HASH,
+                "new_cycle_seq": 47, "new_payload_hash": CAND_HASH,
+                "seq": 1, "entry_hash": "f" * 64}
+        abandoned = {
+            "authorisation_id": head["authorisation_id"],
+            "ceremony_id": head["ceremony_id"],
+            "old_cycle_seq": head["old_cycle_seq"],
+            "old_payload_hash": head["old_payload_hash"],
+            "new_cycle_seq": head["new_cycle_seq"],
+            "new_payload_hash": head["new_payload_hash"]}
+        replacement = {
+            "authorisation_id": signed_env.authorisation_id,
+            "ceremony_id": signed_env.ceremony_id,
+            "reason": signed_env.reason,
+            "operator_id": signed_env.operator_id,
+            "superseding_old_cycle_seq":
+                signed_env.old_pin["cycle_seq"],
+            "superseding_old_payload_hash":
+                signed_env.old_pin["payload_hash"],
+            "candidate_cycle_seq":
+                signed_env.candidate["cycle_seq"],
+            "candidate_payload_hash":
+                signed_env.candidate["payload_hash"]}
+        failed_attempt = {
+            "attempted_authorisation_id":
+                signed_env.authorisation_id,
+            "refusal_code": "ceremony_supersede_required",
+            "head_authorisation_id": head["authorisation_id"],
+            "head_entry_seq": head["seq"],
+            "head_entry_hash": head["entry_hash"]}
+        approval = sign_supersession_approval(
+            approver_key=approver_key, approver_id=APPROVER_ID,
+            abandoned=abandoned, replacement=replacement,
+            failed_attempt=failed_attempt,
+            ttl_seconds=ttl_seconds, now=now)
+        return supersession_approval_to_dict(approval)
+
+    _AUTO_APPROVAL = object()
+
+    def supersede(self, envelope, operator_id=OPERATOR,
+                  approval=_AUTO_APPROVAL, **kw):
+        # Default: present a valid approval for this envelope
+        # (the cycle-25 happy shape). Pass approval=None (or a
+        # dict) explicitly to present exactly that.
+        if approval is self._AUTO_APPROVAL:
+            approval = self.approval_for(envelope)
         return self.raw({"operator_id": operator_id,
-                         "signed_authorisation": envelope}, **kw)
+                         "signed_authorisation": envelope,
+                         "supersession_approval": approval}, **kw)
 
     def consume(self, envelope, **kw):
         return self.raw({"signed_authorisation": envelope},
@@ -846,7 +986,8 @@ class CeremonySupersedeModeTests(SupersedeFixture):
     def test_supersede_happy_path_journals_bound_decision(self):
         envelope = self.head_and_supersede_envelope()
         head = self.consumption_entries()[-1]
-        code, doc, _ = self.supersede(envelope)
+        approval = self.approval_for(envelope)
+        code, doc, _ = self.supersede(envelope, approval=approval)
         self.assertEqual(code, 0, msg=str(doc))
         result = doc["result"]
         signed = ceremony_authorisation_envelope_from_dict(envelope)
@@ -879,6 +1020,14 @@ class CeremonySupersedeModeTests(SupersedeFixture):
                          signed.authorisation_id)
         self.assertEqual(decision["candidate_cycle_seq"], 50)
         self.assertEqual(decision["operator_id"], OPERATOR)
+        # Cycle 25: the decision records the verified approval
+        # (its independent record; the single-use key).
+        self.assertEqual(decision["approval_id"],
+                         approval["approval_id"])
+        self.assertEqual(decision["approval_payload_hash"],
+                         approval["payload_hash"])
+        self.assertEqual(decision["approver_key_id"],
+                         approval["key_id"])
         # Signing-ledger mirror, scoped kind/format.
         mirrors = [e for e in self.signing_entries()
                    if e["kind"] == "supersede"]
@@ -1075,7 +1224,17 @@ class CeremonySupersedeModeTests(SupersedeFixture):
             reason="burned_unadopted",
             evidence_hash=EVIDENCE_HASH2,
             evidence_ref="case-file-2")
-        code, doc, _ = self.supersede(envelope)
+        # Cycle 25: an approval bound to the recovery envelope
+        # is un-mintable (projection refusal), so present a
+        # genuine approval bound to a primary envelope — the
+        # refusal must still be the single unproven code.
+        primary = self.authorise(
+            ceremony_id="ceremony-2026-11-28-003",
+            candidate=self.candidate(50, "d" * 64),
+            evidence_hash=EVIDENCE_HASH3,
+            evidence_ref="case-file-3")
+        code, doc, _ = self.supersede(
+            envelope, approval=self.approval_for(primary))
         self.assertEqual(code, 3)
         self.assertEqual(self.error_code(doc),
                          "ceremony_supersede_unproven")
@@ -1099,7 +1258,12 @@ class CeremonySupersedeModeTests(SupersedeFixture):
         envelope = self.head_and_supersede_envelope()
         code, doc, _ = self.supersede(envelope)
         self.assertEqual(code, 0, msg=str(doc))
-        code, doc, _ = self.supersede(envelope)
+        # A second decision refuses even against a FRESH,
+        # unspent approval (different TTL -> different
+        # approval_id): the prior decision for this envelope
+        # is itself disqualifying at step (8).
+        fresh = self.approval_for(envelope, ttl_seconds=1800)
+        code, doc, _ = self.supersede(envelope, approval=fresh)
         self.assertEqual(code, 3)
         self.assertEqual(self.error_code(doc),
                          "ceremony_supersede_unproven")
@@ -1112,6 +1276,215 @@ class CeremonySupersedeModeTests(SupersedeFixture):
         self.assertEqual(code, 3)
         self.assertEqual(self.error_code(doc),
                          "ceremony_supersede_unproven")
+        self.assertEqual(self.supersession_entries(), [])
+
+
+class CeremonySupersedeApprovalGateTests(SupersedeFixture):
+    """Cycle 25 (design-approval.md section 8): the verifier
+    issues a decision ONLY against a valid, fully bound,
+    unspent supersession approval. Authenticity failures
+    refuse at step (5b), before any journal read, under the
+    dedicated approval codes; binding and single-use failures
+    fold into step (8)'s ceremony_supersede_unproven."""
+
+    def test_no_approval_auto_request_refuses(self):
+        # The cycle-24 adopter auto-request shape: envelope
+        # presented with NO approval (null, or the key absent).
+        # Both refuse and journal nothing.
+        envelope = self.head_and_supersede_envelope()
+        code, doc, _ = self.supersede(envelope, approval=None)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.error_code(doc), "malformed_request")
+        code, doc, _ = self.raw(
+            {"operator_id": OPERATOR,
+             "signed_authorisation": envelope})
+        self.assertEqual(code, 2)
+        self.assertEqual(self.error_code(doc), "malformed_request")
+        self.assertEqual(self.supersession_entries(), [])
+        self.assertEqual(len(self.consumption_entries()), 1)
+
+    def test_approval_unconfigured_refuses(self):
+        envelope = self.head_and_supersede_envelope()
+        code, doc, _ = self.supersede(envelope, env_over={
+            "AION_SUPERSESSION_APPROVER_PUBLIC_KEY": ""})
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_approval_unconfigured")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_forged_approval_wrong_approver_key_refuses(self):
+        envelope = self.head_and_supersede_envelope()
+        forged = self.approval_for(
+            envelope, approver_key=WRONG_APPROVER_KEY)
+        code, doc, _ = self.supersede(envelope, approval=forged)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_approval_invalid")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_approval_signed_with_ceremony_seed_refuses(self):
+        # Self-approval by the ceremony seed's holder (the
+        # cycle-24 self-escalation under a new name): the
+        # signature is a genuine Ed25519 signature, but under
+        # the WRONG key — the configured approver pin refuses.
+        envelope = self.head_and_supersede_envelope()
+        ceremony_key = _make_approver_key(self.seed_key.seed)
+        forged = self.approval_for(envelope,
+                                   approver_key=ceremony_key)
+        code, doc, _ = self.supersede(envelope, approval=forged)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_approval_invalid")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_approval_signed_with_snapshot_signing_key_refuses(self):
+        envelope = self.head_and_supersede_envelope()
+        snapshot_key = _make_approver_key(self.key.key)
+        forged = self.approval_for(envelope,
+                                   approver_key=snapshot_key)
+        code, doc, _ = self.supersede(envelope, approval=forged)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_approval_invalid")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_expired_approval_refuses_expired(self):
+        envelope = self.head_and_supersede_envelope()
+        past = (datetime.now(timezone.utc)
+                - timedelta(seconds=2000)).isoformat()
+        expired = self.approval_for(envelope, now=past)
+        code, doc, _ = self.supersede(envelope, approval=expired)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_approval_expired")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_approval_bound_to_other_candidate_unproven(self):
+        # An authentic approval minted for a DIFFERENT envelope
+        # (candidate 55) presented with this one (candidate
+        # 50): authenticity passes step (5b); the binding
+        # refuses at step (8b) as unproven.
+        envelope = self.head_and_supersede_envelope()
+        other = self.authorise(
+            ceremony_id="ceremony-2026-11-28-003",
+            candidate=self.candidate(55, "e" * 64),
+            evidence_hash=EVIDENCE_HASH3,
+            evidence_ref="case-file-3")
+        approval = self.approval_for(other)
+        code, doc, _ = self.supersede(envelope, approval=approval)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_unproven")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_approval_bound_to_other_attempt_unproven(self):
+        # The approval's failed-attempt facts name a different
+        # head state (seq/hash) than the verifier's own head
+        # entry: the attempt it approves is not the attempt
+        # that happened -> unproven at step (8b).
+        envelope = self.head_and_supersede_envelope()
+        head = self.consumption_entries()[-1]
+        stale_head = dict(head, seq=99, entry_hash="e" * 64)
+        approval = self.approval_for(envelope, head=stale_head)
+        code, doc, _ = self.supersede(envelope, approval=approval)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_unproven")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_approval_bound_to_other_movement_unproven(self):
+        # The approval abandons a different movement than the
+        # verifier's head (fabricated abandoned pair, genuinely
+        # signed): binding mismatch -> unproven.
+        envelope = self.head_and_supersede_envelope()
+        head = self.consumption_entries()[-1]
+        fake_head = dict(
+            head, authorisation_id="1" * 64,
+            ceremony_id="ceremony-fabricated-head",
+            new_payload_hash="9" * 64)
+        approval = self.approval_for(envelope, head=fake_head)
+        code, doc, _ = self.supersede(envelope, approval=approval)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_unproven")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_approval_reuse_refuses(self):
+        # One approval mints exactly one decision: replaying
+        # it — for the same envelope, or for a different
+        # envelope standing in the same shape — refuses.
+        envelope = self.head_and_supersede_envelope()
+        approval = self.approval_for(envelope)
+        code, doc, _ = self.supersede(envelope, approval=approval)
+        self.assertEqual(code, 0, msg=str(doc))
+        code, doc, _ = self.supersede(envelope, approval=approval)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_unproven")
+        other = self.authorise(
+            ceremony_id="ceremony-2026-11-28-003",
+            candidate=self.candidate(55, "e" * 64),
+            evidence_hash=EVIDENCE_HASH3,
+            evidence_ref="case-file-3")
+        code, doc, _ = self.supersede(other, approval=approval)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_unproven")
+        self.assertEqual(len(self.supersession_entries()), 1)
+
+    def test_recovery_envelope_cannot_acquire_decision(self):
+        # Criterion (iv) at the verifier: a burned_unadopted
+        # (ordinary recovery) envelope can never acquire a
+        # decision. An approval BOUND to a recovery envelope
+        # is un-mintable (the projection refuses it — seat A's
+        # tests pin that), so the strongest presentable
+        # artefact is a genuine approval bound to a primary
+        # envelope; presented with the recovery envelope it
+        # still refuses unproven (the shape predicate excludes
+        # the recovery before binding is even consulted).
+        self.consume(self.authorise())
+        envelope = self.authorise(
+            ceremony_id="ceremony-2026-11-28-002",
+            reason="burned_unadopted",
+            evidence_hash=EVIDENCE_HASH2,
+            evidence_ref="case-file-2")
+        primary = self.authorise(
+            ceremony_id="ceremony-2026-11-28-003",
+            candidate=self.candidate(50, "d" * 64),
+            evidence_hash=EVIDENCE_HASH3,
+            evidence_ref="case-file-3")
+        approval = self.approval_for(primary)
+        code, doc, _ = self.supersede(envelope, approval=approval)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_unproven")
+        self.assertEqual(self.supersession_entries(), [])
+
+    def test_valid_approval_via_client_then_consume_lands(self):
+        envelope = self.head_and_supersede_envelope()
+        approval = self.approval_for(envelope)
+        receipt = self.client.ceremony_supersede(
+            OPERATOR, envelope, approval)
+        self.assertEqual(receipt["supersession_seq"], 1)
+        code, doc, _ = self.consume(envelope)
+        self.assertEqual(code, 0, msg=str(doc))
+        ledger = CeremonyConsumptionLedger(self.ledger_home)
+        self.assertEqual(ledger.head_target(), (50, "d" * 64))
+
+    def test_client_rejects_approval_for_other_envelope(self):
+        # The client's echo check refuses BEFORE sending when
+        # the approval's replacement names another envelope.
+        from trust.errors import VerifierProtocolError
+        envelope = self.head_and_supersede_envelope()
+        other = self.authorise(
+            ceremony_id="ceremony-2026-11-28-003",
+            candidate=self.candidate(55, "e" * 64),
+            evidence_hash=EVIDENCE_HASH3,
+            evidence_ref="case-file-3")
+        approval = self.approval_for(other)
+        with self.assertRaises(VerifierProtocolError):
+            self.client.ceremony_supersede(OPERATOR, envelope,
+                                           approval)
         self.assertEqual(self.supersession_entries(), [])
 
 

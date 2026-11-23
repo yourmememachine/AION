@@ -33,7 +33,10 @@ from cycle23_harness import OPERATOR, SIGNER, SNAP_SIGNER, \
     provision_production_home
 from core.loop import CoreLoop
 from signing.pin_store import PinStore
-from trust.ledger import CeremonyConsumptionLedger
+from trust.ledger import (
+    CeremonyConsumptionLedger,
+    CeremonySupersessionLedger,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_STATE_DIR = REPO_ROOT / "state"
@@ -262,6 +265,58 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.consumption_count(), 1)
         self.assertFalse(
             (self.pin_dir / "snapshot-pin.json").exists())
+        self.assert_real_state_untouched()
+
+    def test_adopt_step_supersession_pending_is_exit_7(self):
+        # Exit 7 (cycle 25, r3 non-blocking add): an adopt step
+        # whose consume refuses ceremony_supersede_required
+        # stops at supersession pending independent approval —
+        # no decision requested, nothing further consumed, pin
+        # unmoved — and the structured line carries
+        # report_written so a failed report write is visible.
+        # Shape: genesis adopt @13; two test-side hookless
+        # cycles open state to 15; a held-lock adopt burns the
+        # 13->15 ceremony movement (pin stays 13, head 15);
+        # one more hookless cycle opens state to 16, so the
+        # next adopt's fresh primary (candidate 16, old pin 13
+        # behind head 15) is exactly the supersede shape.
+        proc = self.run_runner([{"adopt": True}])
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertEqual(self.read_pin()["cycle_seq"], 13)
+        for expected_seq in (14, 15):
+            loop = CoreLoop(self.state_dir)
+            entry = loop.run_one_cycle(
+                CODERS, REVIEWERS, "reconciled", True, DELTA)
+            self.assertEqual(entry["cycle_id"], expected_seq)
+        proc = self.run_runner_holding_pin_lock([{"adopt": True}])
+        self.assertEqual(proc.returncode, 4, proc.stderr.decode())
+        self.assertEqual(self.read_pin()["cycle_seq"], 13)
+        self.assertEqual(self.consumption_count(), 2)
+        loop = CoreLoop(self.state_dir)
+        entry = loop.run_one_cycle(
+            CODERS, REVIEWERS, "reconciled", True, DELTA)
+        self.assertEqual(entry["cycle_id"], 16)
+
+        proc = self.run_runner([{"adopt": True}])
+        self.assertEqual(proc.returncode, 7, proc.stderr.decode())
+        lines = self.parse_lines(proc)
+        self.assertEqual(len(lines), 1)
+        line = lines[0]
+        self.assertEqual(line["kind"], "adopt")
+        self.assertEqual(line["outcome"], "supersession_pending")
+        self.assertEqual(
+            line["error"], "PinSupersessionPendingApproval")
+        self.assertEqual(line["candidate_seq"], 16)
+        self.assertEqual(line["old_cycle_seq"], 13)
+        self.assertTrue(line["authorisation_id"])
+        self.assertTrue(line["ceremony_id"])
+        self.assertTrue(line["report_written"])
+        # Nothing decided, nothing more consumed, pin unmoved.
+        self.assertEqual(self.consumption_count(), 2)
+        self.assertEqual(
+            CeremonySupersessionLedger(
+                self.home.verifier_home).entries(), [])
+        self.assertEqual(self.read_pin()["cycle_seq"], 13)
         self.assert_real_state_untouched()
 
     def test_idle_cycle_step_is_exit_0(self):

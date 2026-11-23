@@ -149,6 +149,16 @@ AION_CEREMONY_EVIDENCE_DIR=/var/lib/aion-verifier/evidence
 # distributing the seed's pub-… pin to ceremony callers) or
 # the verifier refuses to start after upgrade.
 AION_CEREMONY_SIGNING_SEED_PATH=/var/lib/aion-verifier/keys/ceremony.seed
+# Supersession approver PUBLIC key (cycle 25): hex64 of the
+# approver's Ed25519 public key, printed by the approval
+# tool's `public-key` command at provisioning. Public
+# material only — the approver SEED is provisioned outside
+# the verifier home (generate-key), is held only by the
+# approval tool's invocation environment, and its path
+# variable is deliberately NOT part of this env file or the
+# wrapper allowlist. Production with the ceremony seed
+# configured refuses startup while this is empty.
+AION_SUPERSESSION_APPROVER_PUBLIC_KEY=
 # Production steady state (after the one-time anchor ceremony):
 # anchoring is mandatory and fail-closed, and the INIT flags
 # above are refused. Research deployments must set this variable

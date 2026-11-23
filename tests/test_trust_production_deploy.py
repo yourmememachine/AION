@@ -50,6 +50,7 @@ was built for; whole-machine snapshot restore by the machine
 owner is out of scope.
 """
 
+import hashlib
 import json
 import os
 import pwd
@@ -66,6 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from eval.registry import EvalRegistry
 from signing import generate_key_file, load_signing_key
 from signing.ceremony_authorisation import generate_ceremony_key_file
+from signing.ed25519 import public_key_from_seed
 from trust import protocol
 from trust.anchoring import initialise_anchor, load_anchor, verify_anchor
 from trust.attestation import verify_eval_attestation
@@ -967,6 +969,16 @@ class ProductionModeSpecTests(unittest.TestCase):
             "AION_CEREMONY_EVIDENCE_DIR": str(
                 Path(self.tmp.name) / "evidence"),
             "AION_CEREMONY_SIGNING_SEED_PATH": str(seed_path),
+            # Cycle 25: production with the ceremony seed
+            # configured also requires the supersession
+            # approver public key (the 20th allowlisted name);
+            # a fixed hex64 test pin, distinct from the
+            # generated ceremony key above.
+            "AION_SUPERSESSION_APPROVER_PUBLIC_KEY":
+                public_key_from_seed(
+                    hashlib.sha256(
+                        b"cycle25 production approver seed"
+                    ).digest()).hex(),
         })
         self.assertEqual(
             result.returncode, 0,

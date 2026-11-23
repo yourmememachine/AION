@@ -196,6 +196,22 @@ silently ignored field:
                             (anchor_refused) — recovery is the
                             audited force_reanchor path, exactly
                             as for signing
+  AION_SUPERSESSION_APPROVER_PUBLIC_KEY
+                            optional (cycle 25): hex64 encoding
+                            of the supersession approver's
+                            Ed25519 PUBLIC key — public material
+                            only; the approver seed never enters
+                            this process (it is held only by the
+                            standalone approval tool,
+                            trust.supersession_approval_tool).
+                            Production mode with the ceremony
+                            seed configured REQUIRES it; research
+                            mode without it loads None and the
+                            ceremony_supersede mode refuses
+                            per-request
+                            (ceremony_supersede_approval_unconfigured).
+                            Startup refuses if it equals the
+                            ceremony public key.
   AION_VERIFIER_HOME        REQUIRED: signing-ledger directory;
                             the service refuses to run without it
 
@@ -286,6 +302,30 @@ journal and consumes against it; without a decision the
 supersede shape refuses pre-commit as
 ceremony_supersede_required.
 
+Cycle 25 narrows who may obtain that decision (design:
+internal/cycle25-work/design-approval.md). Supersession
+independence in cycle 25 is independence at the
+authorisation-event level, and nothing more: the mode
+issues ONLY against a supersession approval artefact that
+(a) is signed under a dedicated approver key — a third
+Ed25519 key, distinct from the snapshot signing key and
+from the verifier's ceremony seed, configured here as a
+public key only (AION_SUPERSESSION_APPROVER_PUBLIC_KEY);
+(b) is produced by a separate tool invocation
+(trust.supersession_approval_tool) outside any adopter or
+verifier code path; and (c) binds the abandoned head
+movement, the replacement candidate, the exact (old -> new)
+movement, and the original failed consumption attempt. The
+verifier verifies the approval BEFORE journaling any
+decision, and records its id and payload hash in the
+decision entry; the approval is single-use. It is NOT
+claimed that the approver is a separate human or a separate
+OS user: the guarantee is that supersession cannot happen
+as a side effect of an automated recovery flow — an adopter
+auto-request after a refusal cannot mint a decision,
+because the adopter's code path contains no route to create
+an approval.
+
 The verifier never touches the network, never spawns processes,
 and writes only where the registry itself writes (its access log
 and file, plus the quarantine file a corrupt registry document
@@ -364,6 +404,12 @@ from trust.ledger import MAX_RECOVERY_DEPTH, \
     CorruptLedgerError, HeadRegressionError, LedgerError, \
     SigningLedger, SupersedeRequiredError
 from trust.pathpolicy import canonicalise as _policy_canonicalise
+from trust.supersession_approval import (
+    approval_binding_mismatches,
+    approver_public_key_from_hex,
+    supersession_approval_from_dict,
+    verify_supersession_approval,
+)
 
 GENESIS_HASH = "0" * 64
 MAX_ANSWER_CHARS = 8000
@@ -429,7 +475,9 @@ class _Config:
                  ceremony_consumption_anchor_path=None,
                  ceremony_consumption_anchor_init=False,
                  ceremony_operators=(), ceremony_evidence_dir=None,
-                 ceremony_signing_key=None, *, deployment_mode):
+                 ceremony_signing_key=None,
+                 supersession_approver_key=None, *,
+                 deployment_mode):
         self.signing_key = signing_key
         self.signer_id = signer_id
         self.actor = actor
@@ -453,6 +501,12 @@ class _Config:
         self.ceremony_evidence_dir = ceremony_evidence_dir
         # CeremonySigningKey or None (research + unconfigured).
         self.ceremony_signing_key = ceremony_signing_key
+        # Cycle 25: the supersession approver's public-key pin
+        # (a SupersessionApproverPublicKey — public bytes only;
+        # the approver seed never enters this process) or None.
+        # When None, ceremony_supersede refuses per-request
+        # with ceremony_supersede_approval_unconfigured.
+        self.supersession_approver_key = supersession_approver_key
         self.deployment_mode = deployment_mode
 
 
@@ -574,6 +628,42 @@ def _load_config() -> _Config:
             "verifier_misconfigured",
             "production mode requires "
             "AION_CEREMONY_SIGNING_SEED_PATH")
+    # Supersession approver PUBLIC key (cycle 25, design
+    # §4.2): the out-of-band supersession approval artefact
+    # for ceremony_supersede is verified under this key. It
+    # is public material, configured directly as hex64 — no
+    # file, and the approver SEED never enters this process
+    # (the seed-path variable is a tool-process variable only,
+    # deliberately not read or named here, and absent from
+    # the verifier env allowlist by design).
+    # Present-but-not-hex64 refuses startup in
+    # BOTH modes. Production with the ceremony seed
+    # configured REQUIRES it (mirroring the consumption-anchor
+    # rule: a production verifier that can consume
+    # supersede-shaped envelopes but can never authorise one
+    # is a wedge, not a policy); research + absent loads None
+    # and the supersede mode refuses per-request. Equality
+    # with the ceremony public key refuses startup after the
+    # ceremony key loads, below.
+    supersession_approver_key = None
+    approver_raw = env.get(
+        "AION_SUPERSESSION_APPROVER_PUBLIC_KEY", "")
+    if approver_raw:
+        try:
+            supersession_approver_key = \
+                approver_public_key_from_hex(approver_raw)
+        except SigningError:
+            raise _config(
+                "verifier_misconfigured",
+                "AION_SUPERSESSION_APPROVER_PUBLIC_KEY is "
+                "malformed: it must be 64 lowercase hex "
+                "characters (the 32-byte Ed25519 approver "
+                "public key)")
+    elif deployment_mode == "production" and ceremony_seed_raw:
+        raise _config(
+            "verifier_misconfigured",
+            "production mode with the ceremony seed configured "
+            "requires AION_SUPERSESSION_APPROVER_PUBLIC_KEY")
     ttl_raw = env.get("AION_VERIFIER_TTL_SECONDS", "")
     if ttl_raw:
         if not ttl_raw.isdigit():
@@ -684,6 +774,46 @@ def _load_config() -> _Config:
         # Scrub the seed path from the environment after load,
         # like the key path.
         env.pop("AION_CEREMONY_SIGNING_SEED_PATH", None)
+    # Approver-key distinctness (cycle 25, design §4.1/§4.2
+    # check (c)): the verifier holds both public keys, and an
+    # approver public key equal to the ceremony public key
+    # would mean the approver seed IS the ceremony seed — the
+    # approval authority must be a genuinely separate key, so
+    # the one seed collision the verifier can detect is
+    # refused at startup. (The verifier never sees either
+    # seed; no stronger claim is made.) Detail names neither
+    # value.
+    if supersession_approver_key is not None \
+            and ceremony_signing_key is not None \
+            and supersession_approver_key.public_key \
+            == ceremony_signing_key.public_key:
+        raise _config(
+            "verifier_misconfigured",
+            "the supersession approver public key must differ "
+            "from the ceremony public key")
+    # Approver-vs-snapshot-signing-key distinctness (cycle 25
+    # fix round, r2 F3): the docstrings claim the approver key
+    # is distinct from the snapshot signing key (the verifier's
+    # HMAC signing key) as well as from the ceremony seed, and
+    # startup now ENFORCES that claim where it is checkable
+    # here: the approver public key must neither equal the
+    # HMAC key bytes themselves nor equal the Ed25519 public
+    # key derived by treating the HMAC key bytes as an Ed25519
+    # seed (the cycle-21 overlap derivation). Detail names
+    # neither value.
+    if supersession_approver_key is not None:
+        _approver_pub = supersession_approver_key.public_key
+        _snapshot_derived = None
+        if len(signing_key.key) == _ed25519.SEED_BYTES:
+            _snapshot_derived = _ed25519.public_key_from_seed(
+                signing_key.key)
+        if _approver_pub == signing_key.key \
+                or (_snapshot_derived is not None
+                    and _approver_pub == _snapshot_derived):
+            raise _config(
+                "verifier_misconfigured",
+                "the supersession approver public key must "
+                "differ from the snapshot signing key")
     proposal_budget = DEFAULT_PER_PROPOSAL_CAP
     identity_budget = DEFAULT_PER_IDENTITY_CAP
     for env_name, attr in (("AION_VERIFIER_PROPOSAL_BUDGET",
@@ -951,6 +1081,8 @@ def _load_config() -> _Config:
                    ceremony_operators=ceremony_operators,
                    ceremony_evidence_dir=ceremony_evidence_dir,
                    ceremony_signing_key=ceremony_signing_key,
+                   supersession_approver_key=(
+                       supersession_approver_key),
                    deployment_mode=deployment_mode)
 
 
@@ -2019,10 +2151,33 @@ _CEREMONY_BODY_KEYS = {"operator_id", "ceremony_id", "reason",
                        "old_pin", "candidate",
                        "evidence_hash", "evidence_ref"}
 _CEREMONY_SUPERSEDE_BODY_KEYS = {"operator_id",
-                                 "signed_authorisation"}
+                                 "signed_authorisation",
+                                 "supersession_approval"}
 _CEREMONY_OLD_PIN_KEYS = {"cycle_seq", "payload_hash"}
 _CEREMONY_CANDIDATE_KEYS = {"cycle_seq", "payload_hash",
                             "signer_id", "key_id"}
+
+# -- Supersession approval artefact (cycle 25) ----------------------------
+#
+# The approval artefact type, its strict parser, its verifier
+# and its binding helper live in trust/supersession_approval.py
+# (seat A's module, verify-side primitives only — this module
+# contains no approval-signing call, and the approval tool
+# trust/supersession_approval_tool.py is imported by NOTHING in
+# the running system). The design contract is
+# internal/cycle25-work/design-approval.md sections 5 and 8.
+#
+# PRESENTATION (design section 2/8): the artefact is presented
+# IN THE REQUEST BODY under the key "supersession_approval" —
+# the adopter merely CARRIES an artefact it cannot create
+# (creation needs the approver seed, held only by the
+# standalone approval tool's invocation; the verifier holds
+# only the approver PUBLIC key). The verifier stores no
+# approval files: it receives the artefact in the request,
+# verifies it (step 5b), binds it against its own journals
+# (step 8b), and records its approval_id / payload hash /
+# approver key id in the supersession decision entry (step 9).
+# Carrying is not creating.
 
 
 def _ceremony_seq(value) -> bool:
@@ -2661,13 +2816,42 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
     its own head anyway — pure attack surface for zero
     information.
 
+    Cycle 25 (CROSS-CHECK-18, seat-gpt's Q1 criteria; design
+    internal/cycle25-work/design-approval.md section 8): a
+    decision now additionally requires a genuinely independent
+    authorisation event — a supersession approval artefact
+    (trust/supersession_approval.py), signed under a dedicated
+    approver key distinct from the snapshot signing key and
+    the ceremony seed, produced only by the standalone
+    approval tool (trust/supersession_approval_tool.py, which
+    no running-system module imports), presented in the
+    request body under "supersession_approval", verified at
+    step (5b) BEFORE any journal read and bound at step (8b)
+    exactly to the verifier-derived facts (its own head
+    movement, the replacement candidate, the exact (old, new)
+    movement, and the original failed consumption attempt,
+    including the head entry's seq and entry_hash). The
+    adopter carrying the artefact is not its author: its code
+    path contains no route to create one, and an auto-request
+    after a refusal carries no valid approval and refuses at
+    step (5b). The approval is single-use: its id, payload
+    hash and approver key id are recorded in the journaled
+    decision, and a second decision against the same approval
+    refuses at step (8b). Independence here is independence
+    at the authorisation-event level, and nothing more (the
+    approver is not claimed to be a separate human or OS
+    user).
+
     Validation order, mirroring authorise/consume discipline:
+    (0) the cycle-25 approver-key config gate (a verifier
+    with no approver key can never issue a decision);
     (1) config gates — the operator allowlist and the ceremony
     seed (the mode checks membership and needs the seed-derived
     public key to verify the envelope); the evidence
     configuration is NOT a gate, because no evidence is
     resolved, read or retained by this mode; (2) strict body
-    key set, exactly {"operator_id", "signed_authorisation"};
+    key set, exactly {"operator_id", "signed_authorisation",
+    "supersession_approval"};
     (3) cheap validation — the operator id shape, pure value
     work that touches no journal; (4) operator membership,
     BEFORE any journal read, so an unlisted operator cannot
@@ -2680,6 +2864,12 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
     different operator is the same code), with the temporal
     carve-out (reasons ⊆ {expired, signed_in_future}) returning
     ceremony_authorisation_expired, exactly as consume;
+    (5b) approval parse, then verifier-side verification
+    under the configured approver public key — parse failure
+    is malformed_request, verification failure collapses to
+    ceremony_supersede_approval_invalid with the temporal
+    carve-out returning ceremony_supersede_approval_expired,
+    all before any journal read;
     (6) already-consumed check for the new envelope
     (consumption journal, plus the signing-ledger mirror
     scoped to kind="consume" + format="ceremony-consumption")
@@ -2694,9 +2884,17 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
     sub-cases would hand a presenter a journal-state oracle
     and because gratuitous decisions (for an envelope that
     needs no supersede, or that already has one) must never
-    be minted; (9) commit: the supersession journal append —
+    be minted — cycle 25 folds the step-(8b) approval binding
+    and single-use failures into this same step and code
+    (approval authenticity failures are refused earlier, at
+    step (5b) before any journal read, under the dedicated
+    codes ceremony_supersede_approval_invalid / _expired /
+    _unconfigured, which certify nothing about journal
+    state); (9) commit: the supersession journal append —
     the verifier copies the abandoned binding from its own
-    head entry; (10) signing-ledger mirror (kind "supersede",
+    head entry and records the verified approval's id,
+    payload hash and approver key id in the decision entry;
+    (10) signing-ledger mirror (kind "supersede",
     format "ceremony-supersession") plus the signing-anchor
     update. A mirror failure after the commit is
     ledger_failed and the decision STANDS — it is not rolled
@@ -2708,6 +2906,15 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
     decision, which lives only in the verifier's journal. It
     is not idempotent: a second decision for the same envelope
     refuses at step (8)."""
+    # (0) Cycle-25 config gate, before the existing gates: a
+    # verifier with no approver key configured can never
+    # issue a decision — there is no fallback path.
+    if config.supersession_approver_key is None:
+        raise _config(
+            "ceremony_supersede_approval_unconfigured",
+            "AION_SUPERSESSION_APPROVER_PUBLIC_KEY is not "
+            "configured; the ceremony_supersede mode is "
+            "disabled")
     # (1) Config gates, before body validation.
     if not config.ceremony_operators:
         raise _config(
@@ -2719,15 +2926,17 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
             "ceremony_seed_unconfigured",
             "AION_CEREMONY_SIGNING_SEED_PATH is not configured; "
             "the ceremony_supersede mode is disabled")
-    # (2) Strict body key set.
+    # (2) Strict body key set, exactly {"operator_id",
+    # "signed_authorisation", "supersession_approval"}
+    # (cycle 25 widened the cycle-24 set by the approval key).
     if set(body) != _CEREMONY_SUPERSEDE_BODY_KEYS:
         raise _malformed(
             "malformed_request",
             "ceremony_supersede body must carry exactly "
-            "operator_id and signed_authorisation; the "
-            "abandoned movement is identified by the verifier "
-            "from its own consumption journal, never named by "
-            "the request")
+            "operator_id, signed_authorisation and "
+            "supersession_approval; the abandoned movement "
+            "is identified by the verifier from its own "
+            "consumption journal, never named by the request")
     operator_id = body["operator_id"]
     # (3) Cheap validation: operator id shape.
     try:
@@ -2763,6 +2972,38 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
         raise _malformed(
             "ceremony_authorisation_invalid",
             "the ceremony authorisation failed verification")
+    # (5b) Approval verification (cycle 25, design section 8)
+    # — after envelope verification, BEFORE any journal read,
+    # so an unapproved request gets no state oracle (the step-4
+    # rationale one step later). Parse failures are
+    # malformed_request; verification reasons collapse exactly
+    # as envelope reasons do — temporal-only to the expired
+    # carve-out, everything else to the single code
+    # ceremony_supersede_approval_invalid — with no per-reason
+    # output anywhere, stderr included. Approver identity is
+    # the configured key pin itself (expected_approver_id is
+    # None; a foreign key is the unknown_key reason, folded
+    # into the single code). An adopter auto-request after a
+    # refusal — the cycle-24 flow — carries no valid approval
+    # and refuses HERE, before any journal is opened: the
+    # verifier never issues merely because the adopter asks.
+    try:
+        approval = supersession_approval_from_dict(
+            body["supersession_approval"])
+    except SigningError as exc:
+        raise _malformed("malformed_request", str(exc))
+    approval_reasons = verify_supersession_approval(
+        approval,
+        public_key=config.supersession_approver_key,
+        expected_approver_id=None)
+    if approval_reasons:
+        if set(approval_reasons) <= {"expired", "signed_in_future"}:
+            raise _config(
+                "ceremony_supersede_approval_expired",
+                "the supersession approval is expired")
+        raise _malformed(
+            "ceremony_supersede_approval_invalid",
+            "the supersession approval failed verification")
     # (6) Already-consumed check for the new envelope.
     try:
         consumption_ledger = CeremonyConsumptionLedger(config.home)
@@ -2813,25 +3054,58 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
             config.home)
         prior = supersession_ledger.find_by_new_authorisation(
             signed.authorisation_id)
+        prior_approval = supersession_ledger.find_by_approval_id(
+            approval.approval_id)
     except Exception:
         raise _config(
             "ledger_failed",
             "the supersession journal could not be read; "
             "refusing to decide from partial state")
-    if head_entry is None or prior is not None:
+    # (8b) Approval binding + single-use (cycle 25, design
+    # section 8) — folded into this step, after the shape gate
+    # computes head_entry: the verified approval must bind
+    # EXACTLY to the verifier's own facts (its head entry,
+    # including the head entry's seq and entry_hash in the
+    # failed-attempt facts, and the presented envelope), and
+    # no existing decision entry may already carry this
+    # approval_id (single-use). EVERY failure here is the
+    # same single code ceremony_supersede_unproven as the
+    # shape gate — distinguishing binding sub-cases, or the
+    # spent case, would hand a presenter a journal-state
+    # oracle. The binding helper's mismatch names are for
+    # tests and logs, never for the wire, and are not printed
+    # here (stderr included).
+    binding_mismatches = ()
+    if head_entry is not None:
+        binding_mismatches = approval_binding_mismatches(
+            approval, abandoned_entry=head_entry,
+            head_entry_seq=head_entry["seq"],
+            head_entry_hash=head_entry["entry_hash"],
+            signed=signed)
+    if head_entry is None or prior is not None \
+            or prior_approval is not None or binding_mismatches:
         raise _config(
             "ceremony_supersede_unproven",
             "the presented envelope does not stand in the "
-            "supersede relation to the consumed head, or a "
-            "decision already exists for it")
+            "supersede relation to the consumed head, a "
+            "decision already exists for it, or the presented "
+            "supersession approval does not bind this "
+            "movement or was already spent")
     # (9) Commit: the supersession journal append. The
     # abandoned binding is copied from the verifier's OWN head
-    # entry — the request never names it.
+    # entry — the request never names it — and the verified
+    # approval's id, payload hash and approver key id are
+    # recorded in the decision entry (the independent record
+    # of the approval, and what the step-(8b) single-use check
+    # and the ledger's append/load uniqueness key on).
     recorded_at = _now()
     try:
         decision_entry = supersession_ledger.append_decision(
             abandoned_entry=head_entry, signed=signed,
-            recorded_at=recorded_at)
+            recorded_at=recorded_at,
+            approval_id=approval.approval_id,
+            approval_payload_hash=approval.payload_hash,
+            approver_key_id=approval.key_id)
     except LedgerError:
         raise _config(
             "ledger_failed",

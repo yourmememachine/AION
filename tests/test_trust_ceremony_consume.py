@@ -85,6 +85,12 @@ from signing.ed25519 import public_key_from_seed
 from signing.gate_decision import _canonical, _sha256
 from trust import protocol
 from trust.client import VerifierClient
+from trust.supersession_approval import supersession_approval_to_dict
+from trust.supersession_approval_tool import (
+    _make_approver_key,
+    approver_public_key_for as _approver_pin_for,
+    sign_supersession_approval,
+)
 from trust.ledger import (
     GENESIS_HASH,
     CeremonyAuthorisationLedger,
@@ -110,6 +116,8 @@ EVIDENCE_HASH2 = hashlib.sha256(ARTIFACT2).hexdigest()
 ARTIFACT3 = b"ceremony evidence bundle: case file 3\n"
 EVIDENCE_HASH3 = hashlib.sha256(ARTIFACT3).hexdigest()
 REPO = Path(__file__).resolve().parents[1]
+APPROVER_KEY = _make_approver_key(
+    hashlib.sha256(b"cycle25 consume-test approver seed").digest())
 RFC_TEST1_SEED_HEX = (
     "9d61b19deffd5a60ba844af492ec2cc4"
     "4449c5697b326919703bac031cae7f60")
@@ -149,6 +157,8 @@ class ConsumeFixture(unittest.TestCase):
             "AION_CEREMONY_OPERATORS": OPERATOR + ",operator-backup",
             "AION_CEREMONY_EVIDENCE_DIR": str(self.evidence_dir),
             "AION_CEREMONY_SIGNING_SEED_PATH": str(self.seed_path),
+            "AION_SUPERSESSION_APPROVER_PUBLIC_KEY":
+                _approver_pin_for(APPROVER_KEY).public_key.hex(),
         }
         self.client = VerifierClient(
             verifier_env=self.env, expected_signer_id=SIGNER,
@@ -215,6 +225,45 @@ class ConsumeFixture(unittest.TestCase):
             input=raw, capture_output=True, timeout=30,
             cwd=str(REPO), env=self.full_env(env_over))
         return result.returncode, result.stdout, result.stderr
+
+    def supersede_approval(self, envelope):
+        """Mint a genuine cycle-25 supersession approval for
+        ``envelope`` against the current consumption head
+        (the approval tool's signing function, in-process)."""
+        signed_env = ceremony_authorisation_envelope_from_dict(
+            envelope)
+        head = CeremonyConsumptionLedger(
+            self.ledger_home).entries()[-1]
+        approval = sign_supersession_approval(
+            approver_key=APPROVER_KEY, approver_id="approver-1",
+            abandoned={
+                "authorisation_id": head["authorisation_id"],
+                "ceremony_id": head["ceremony_id"],
+                "old_cycle_seq": head["old_cycle_seq"],
+                "old_payload_hash": head["old_payload_hash"],
+                "new_cycle_seq": head["new_cycle_seq"],
+                "new_payload_hash": head["new_payload_hash"]},
+            replacement={
+                "authorisation_id": signed_env.authorisation_id,
+                "ceremony_id": signed_env.ceremony_id,
+                "reason": signed_env.reason,
+                "operator_id": signed_env.operator_id,
+                "superseding_old_cycle_seq":
+                    signed_env.old_pin["cycle_seq"],
+                "superseding_old_payload_hash":
+                    signed_env.old_pin["payload_hash"],
+                "candidate_cycle_seq":
+                    signed_env.candidate["cycle_seq"],
+                "candidate_payload_hash":
+                    signed_env.candidate["payload_hash"]},
+            failed_attempt={
+                "attempted_authorisation_id":
+                    signed_env.authorisation_id,
+                "refusal_code": "ceremony_supersede_required",
+                "head_authorisation_id": head["authorisation_id"],
+                "head_entry_seq": head["seq"],
+                "head_entry_hash": head["entry_hash"]})
+        return supersession_approval_to_dict(approval)
 
     def consume(self, envelope, **kw):
         return self.raw({"signed_authorisation": envelope}, **kw)
@@ -373,6 +422,11 @@ class CeremonyConsumeTests(ConsumeFixture):
         # consume -> ceremony_supersede_required (pre-commit,
         # nothing consumed); ceremony_supersede -> decision
         # journaled; consume -> lands, head 50.
+        # Re-pinned again cycle 25: the ceremony_supersede
+        # step must present a valid supersession approval
+        # (minted here with the approval tool's signing
+        # function) — without one it refuses and no decision
+        # is journaled.
         self.consume(self.authorise())
         envelope2 = self.authorise(
             ceremony_id="ceremony-2026-11-28-002",
@@ -386,7 +440,9 @@ class CeremonyConsumeTests(ConsumeFixture):
         self.assertEqual(len(self.consumption_entries()), 1)
         code, doc, _ = self.raw(
             {"operator_id": OPERATOR,
-             "signed_authorisation": envelope2},
+             "signed_authorisation": envelope2,
+             "supersession_approval":
+                 self.supersede_approval(envelope2)},
             mode="ceremony_supersede")
         self.assertEqual(code, 0, msg=str(doc))
         code, doc, _ = self.consume(envelope2)

@@ -126,6 +126,54 @@ class CeremonySupersedeRequired(SigningError):
     adopter with its type and ``.envelope_dict`` intact —
     ``reanchor_pin`` does not catch, wrap or decide it."""
 
+    verifier_code = "ceremony_supersede_required"
+
+    def __init__(self, message, *, envelope_dict):
+        super().__init__(message)
+        self.envelope_dict = envelope_dict
+
+
+class CeremonyHeadRegression(SigningError):
+    """The verifier refused a ceremony consumption PRE-COMMIT
+    with the code ``ceremony_head_regression`` (cycle 25, F2):
+    the envelope's movement does not satisfy the head rules
+    against the consumption journal's CURRENT head — in the
+    supersession-resume shape, a journaled supersession
+    decision exists for this envelope but was minted against
+    a head that has since moved, so the decision is inert.
+    The refusal certifies the envelope is UNCONSUMED (the
+    code is emitted by the head check, before any journal
+    append), so the same envelope may still be consumed if
+    the head relation is repaired — unlike a fresh ceremony,
+    where the same code is a plain refusal. Carries the
+    exact envelope dict the consumer presented, as
+    ``.envelope_dict``, and the code as ``.verifier_code``.
+
+    It subclasses ``SigningError`` for the same reason as
+    ``CeremonySupersedeRequired``: ``reanchor_pin`` propagates
+    a consumer's ``SigningError`` unchanged, so this reaches
+    the adopter with its type intact."""
+
+    verifier_code = "ceremony_head_regression"
+
+    def __init__(self, message, *, envelope_dict):
+        super().__init__(message)
+        self.envelope_dict = envelope_dict
+
+
+class CeremonyAlreadyConsumed(SigningError):
+    """The verifier refused a ceremony consumption with the
+    code ``ceremony_already_consumed`` (cycle 25, F3): the
+    verifier CERTIFIES this authorisation (or its exact
+    target) was already consumed — the consumption committed
+    verifier-side even if its response never reached the
+    caller. Carries the exact envelope dict the consumer
+    presented, as ``.envelope_dict``, and the code as
+    ``.verifier_code``. Subclasses ``SigningError`` for the
+    same propagation reason as the classes above."""
+
+    verifier_code = "ceremony_already_consumed"
+
     def __init__(self, message, *, envelope_dict):
         super().__init__(message)
         self.envelope_dict = envelope_dict
@@ -757,12 +805,14 @@ class VerifierClient:
                 "int >= 1")
         return result
 
-    def ceremony_supersede(self, operator_id, envelope_dict) -> dict:
+    def ceremony_supersede(self, operator_id, envelope_dict,
+                           approval_dict) -> dict:
         """Request a journaled supersession decision (cycle 24,
-        supersede Option A).
+        supersede Option A; cycle 25 approval gate).
 
         The body is exactly ``{"operator_id": operator_id,
-        "signed_authorisation": envelope_dict}``. The request
+        "signed_authorisation": envelope_dict,
+        "supersession_approval": approval_dict}``. The request
         names NO abandoned movement: the verifier identifies
         the movement being abandoned from its OWN consumption
         journal's head entry, checks the supersede shape holds
@@ -772,6 +822,28 @@ class VerifierClient:
         envelope looks the decision up itself, keyed by the
         envelope's authorisation_id — the caller never supplies
         the decision.
+
+        Cycle 25: ``approval_dict`` is a REQUIRED parameter —
+        the out-of-band supersession approval artefact (see
+        trust/supersession_approval.py) that alone authorises
+        the decision: signed by the approver under a dedicated
+        key the verifier holds only as a public key, produced
+        only by the standalone approval tool, and bound to the
+        abandoned head movement, this envelope's candidate and
+        movement pair, and the original failed consumption
+        attempt. This client merely CARRIES the artefact; it
+        cannot create one, and it is never called in response
+        to a refusal — the adopter calls it only when it holds
+        an approval to present (design-approval.md section 8).
+        There is deliberately no default: a caller without an
+        approval has no request to make. Client-side, the
+        approval is echo-checked the way the receipt is: it
+        must be a dict whose ``replacement`` names this
+        envelope's authorisation_id and candidate (a mismatch
+        is a VerifierProtocolError raised before anything is
+        sent — the approval was minted for a different
+        movement). Signature, expiry and full binding
+        verification are the verifier's, never this client's.
 
         The result's exact key set is validated, and its echoes
         must match the envelope THIS client sent —
@@ -798,16 +870,22 @@ class VerifierClient:
         authenticate it. Operator identity is operator-id
         allowlist eligibility via the verifier's launch channel,
         not authentication. Exit-3 refusals
-        (ceremony_operators_unconfigured,
+        (ceremony_supersede_approval_unconfigured,
+        ceremony_operators_unconfigured,
         ceremony_seed_unconfigured,
         ceremony_operator_not_authorised,
+        ceremony_supersede_approval_expired,
         ceremony_already_consumed, ceremony_not_issued,
         ceremony_supersede_unproven, ledger_failed) surface as
         VerifierConfigError via _run; exit-2 refusals
-        (malformed_request, ceremony_authorisation_invalid) as
-        VerifierProtocolError. Every shape failure at this mode
-        collapses to the single code
-        ``ceremony_supersede_unproven`` — no shape oracle."""
+        (malformed_request, ceremony_authorisation_invalid,
+        ceremony_supersede_approval_invalid) as
+        VerifierProtocolError. Every shape, binding and
+        approval-single-use failure at this mode collapses to
+        the single code ``ceremony_supersede_unproven`` — no
+        shape oracle; approval authenticity failures refuse
+        earlier, before any journal read, under the dedicated
+        approval codes above."""
         if not isinstance(envelope_dict, dict):
             err = VerifierProtocolError(
                 "ceremony_supersede requires the envelope dict")
@@ -824,10 +902,32 @@ class VerifierClient:
                 "authorisation_id or candidate")
             err.verifier_code = None
             raise err from exc
+        if not isinstance(approval_dict, dict) \
+                or not isinstance(
+                    approval_dict.get("replacement"), dict):
+            err = VerifierProtocolError(
+                "ceremony_supersede approval_dict must be the "
+                "supersession approval artefact dict")
+            err.verifier_code = None
+            raise err
+        replacement = approval_dict["replacement"]
+        if replacement.get("authorisation_id") != sent_id \
+                or replacement.get("candidate_cycle_seq") \
+                != sent_seq \
+                or replacement.get("candidate_payload_hash") \
+                != sent_hash:
+            err = VerifierProtocolError(
+                "ceremony_supersede approval_dict does not echo "
+                "the envelope sent (replacement authorisation_id "
+                "or candidate mismatch); the approval was minted "
+                "for a different movement")
+            err.verifier_code = None
+            raise err
         result = self._run(
             "ceremony_supersede",
             {"operator_id": operator_id,
-             "signed_authorisation": envelope_dict})
+             "signed_authorisation": envelope_dict,
+             "supersession_approval": approval_dict})
         if set(result) != {"supersession_seq",
                            "abandoned_authorisation_id",
                            "new_authorisation_id",
@@ -891,13 +991,35 @@ class VerifierClient:
         check has certified the envelope unconsumed, so the
         envelope is provably unburned. This callable translates
         exactly that code into ``CeremonySupersedeRequired``
-        (a SigningError carrying the presented envelope dict);
-        the ADOPTER — not this callable — then requests the
-        journaled supersession decision via
-        ``ceremony_supersede`` and re-runs ``reanchor_pin``
-        once with the same envelope. This callable itself
-        still makes exactly one consume attempt per invocation
-        and never re-decides or re-runs anything.
+        (a SigningError carrying the presented envelope dict)
+        and does nothing further. In cycle 25 the ADOPTER —
+        not this callable — then STOPS: it requests no
+        supersession decision and re-runs nothing. It records
+        the pending state, writes a pending-supersession
+        report, and raises ``PinSupersessionPendingApproval``.
+        A journaled supersession decision (verifier-journaled,
+        ``ceremony_supersede``) can be obtained only later, on
+        a separate attempt, by presenting an independent
+        supersession approval — a signed artefact minted
+        out-of-band by ``trust.supersession_approval_tool``
+        under a dedicated approver key, which this callable,
+        the client and the adopter have no route to create —
+        after which the retained envelope is consumed exactly
+        once. This callable itself still makes exactly one
+        consume attempt per invocation and never re-decides or
+        re-runs anything.
+
+        Two further codes are translated the same structured
+        way (cycle 25, F2/F3), detected ONLY via
+        ``.verifier_code``: ``ceremony_head_regression`` into
+        ``CeremonyHeadRegression`` (a PRE-COMMIT refusal: the
+        envelope is certified unconsumed, but a journaled
+        decision bound to a superseded head is inert) and
+        ``ceremony_already_consumed`` into
+        ``CeremonyAlreadyConsumed`` (the verifier certifies
+        the consumption COMMITTED, even if an earlier
+        response was lost). Every other code still wraps in a
+        plain ``SigningError``.
 
         Head-vs-pin-head narrowing: the head the consumer
         enforces is a ceremony head; it sees consumptions
@@ -914,12 +1036,29 @@ class VerifierClient:
             try:
                 self.ceremony_consume(envelope)
             except VerifierError as exc:
-                if isinstance(exc, VerifierConfigError) \
-                        and getattr(exc, "verifier_code", None) \
-                        == "ceremony_supersede_required":
+                code = getattr(exc, "verifier_code", None) \
+                    if isinstance(exc, VerifierConfigError) else None
+                if code == "ceremony_supersede_required":
                     raise CeremonySupersedeRequired(
                         "ceremony consumption requires a journaled "
                         "supersession decision",
+                        envelope_dict=envelope) from exc
+                if code == "ceremony_head_regression":
+                    raise CeremonyHeadRegression(
+                        "ceremony consumption refused pre-commit "
+                        "with ceremony_head_regression: the "
+                        "movement does not satisfy the head rules "
+                        "against the current consumption head (a "
+                        "journaled supersession decision bound to "
+                        "a superseded head is inert); the envelope "
+                        "is certified unconsumed",
+                        envelope_dict=envelope) from exc
+                if code == "ceremony_already_consumed":
+                    raise CeremonyAlreadyConsumed(
+                        "ceremony consumption refused with "
+                        "ceremony_already_consumed: the verifier "
+                        "certifies this authorisation was already "
+                        "consumed",
                         envelope_dict=envelope) from exc
                 raise SigningError(
                     f"ceremony consumption refused: {exc}") from exc

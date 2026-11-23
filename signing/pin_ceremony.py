@@ -304,14 +304,15 @@ Cycle 21 — consumption head and the integrated-system claim:
   enables replay when the production consumer is wired,
   because the consumer refuses already-consumed and
   head-regression cases the history cannot see.
-- Supersede decisions (cycle 24, Option A): consumption of
-  a supersede-shaped movement — a fresh primary whose
-  candidate is strictly ahead of the consumed head while
-  its old pin sits behind that head — requires a PRIOR
-  journaled supersession decision at the verifier (created
-  by the verifier's ``ceremony_supersede`` mode, binding
-  the abandoned head movement to the new candidate). Without
-  one, the verifier refuses the consumption pre-commit with
+- Supersede decisions (cycle 24, Option A, as gated by
+  cycle 25): consumption of a supersede-shaped movement — a
+  fresh primary whose candidate is strictly ahead of the
+  consumed head while its old pin sits behind that head —
+  requires a PRIOR journaled supersession decision at the
+  verifier (created by the verifier's ``ceremony_supersede``
+  mode, binding the abandoned head movement to the new
+  candidate). Without one, the verifier refuses the
+  consumption pre-commit with
   ``ceremony_supersede_required`` and the production consumer
   surfaces that as ``CeremonySupersedeRequired`` (a
   ``SigningError`` subclass defined in ``trust/client.py``).
@@ -319,11 +320,19 @@ Cycle 21 — consumption head and the integrated-system claim:
   exception propagates untouched, so the requirement reaches
   the adopter (``trust/pin_adoption.PinAdopter``) with its
   type and carried envelope intact. The consumer surfaces
-  the requirement; it does not decide — the decision is the
-  verifier's journaled act, requested by the adopter, and
-  the re-run that follows it is the second phase of a
-  two-phase authorised flow, not a retry of an ambiguous
-  consume (the refusal certifies the envelope unconsumed).
+  the requirement; it does not decide. The cycle-25 flow is
+  three-stage, not a two-phase flow requested by the
+  adopter: (1) the refusal reaches the adopter, which STOPS
+  and reports the movement as pending independent approval
+  (it requests no decision and re-runs nothing); (2) an
+  independent supersession approval artefact is minted
+  out-of-band by the approval tool under a dedicated
+  approver key — the approval gate; (3) on a later attempt
+  the adopter presents that approval, the verifier verifies
+  it BEFORE journaling the supersession decision, and only
+  then is the retained envelope consumed exactly once. The
+  refusal certifies the envelope unconsumed, so that later
+  consume is not a retry of an ambiguous consume.
 
 Issuance-journal rollback residual (the ceremony
 authorisation — ISSUANCE — journal; NOT the consumption
@@ -692,6 +701,23 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     constructed; a consumer exception propagates as a refusal
     and nothing is returned.
 
+    INTERNAL / TEST-ONLY SEAM (cycle 25, CROSS-CHECK-18 Q4
+    precaution): ``consume_authorisation`` is a composition
+    seam, not a production API surface. The single-use and
+    head guarantees of this ceremony are properties of the
+    integrated system ONLY when the callable is the
+    verifier-backed consumer
+    (``trust.client.VerifierClient.ceremony_consumer``), which
+    records consumption in the verifier's own journal. A
+    caller-supplied fabricated consumer (a lambda, a stub, a
+    direct in-process ledger writer) silently voids those
+    guarantees; such consumers are for tests and internal
+    composition only and must never be wired into a production
+    path. The same applies to direct in-process use of
+    ``trust.ledger.CeremonyConsumptionLedger``: it is the
+    verifier process's store, and driving it from any other
+    process is internal/test-only.
+
     reanchor_pin is no longer an offline function — a
     successful ceremony requires a live verifier round-trip
     inside the envelope's TTL and fails closed when the
@@ -752,7 +778,10 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     envelope dict intact — because the consumer exception
     path below re-raises SigningError unchanged. This
     function does not request a decision and does not re-run
-    itself; the adopter owns that two-phase flow.
+    itself; the adopter owns the stop-and-report that follows,
+    and completion happens only on a later attempt presenting
+    an out-of-band independent supersession approval (the
+    cycle-25 approval gate — see the module docstring).
 
     ``ceremony_history`` is an audit/consistency input that
     can only refuse, never grant; the verifier's consumption

@@ -5,7 +5,7 @@ arguments. All configuration comes from the environment,
 validated in full before any construction; refusals name the
 variable, never its value, and go to stderr as one JSON line.
 That no-value-echo guarantee is scoped to the structured
-outcome lines (exits 0/2/3/4/5/6): exit 1 is the unexpected-
+outcome lines (exits 0/2/3/4/5/6/7): exit 1 is the unexpected-
 failure path and prints a traceback on stderr, which may
 include exception messages — no no-echo guarantee is made
 for tracebacks.
@@ -41,6 +41,14 @@ as this process's exit code):
   6  a cycle step was refused before recording, the loop state
      was corrupt at construction, or an adopt step failed with
      a store/signing refusal outside the typed adoption errors
+  7  an adopt step stopped at supersession pending independent
+     approval (PinSupersessionPendingApproval, cycle 25): the consume
+     was refused pre-commit, no supersession decision was
+     requested, and the movement completes only on a later run
+     that can present an out-of-band approval artefact. A cycle
+     step whose hook stops this way reports under exit 5 (cycle
+     recorded, pin pending) with adoption_error naming
+     PinSupersessionPendingApproval.
   1  unexpected failure (traceback on stderr)
 """
 
@@ -66,6 +74,7 @@ from trust.pin_adoption import (
     PinAdopterConfig,
     PinAdoptionBurned,
     PinAdoptionRefused,
+    PinSupersessionPendingApproval,
     build_pin_adopter,
     pin_adopter_config_from_env,
     pin_cycle_hook,
@@ -305,7 +314,9 @@ def main() -> int:
             expected_snapshot_signer_id=pin_env.snapshot_signer_id,
             operator_id=pin_env.operator_id,
             expected_verifier_signer_id=rc.expected_signer_id,
-            evidence_dir=pin_env.evidence_dir)
+            evidence_dir=pin_env.evidence_dir,
+            supersession_approval_path=
+            pin_env.supersession_approval_path)
         try:
             adopter = build_pin_adopter(
                 verifier_env,
@@ -349,6 +360,18 @@ def main() -> int:
                        "outcome": "adoption_burned",
                        "error": type(exc).__name__})
                 return 4
+            except PinSupersessionPendingApproval as exc:
+                _emit({"step": index, "kind": "adopt",
+                       "outcome": "supersession_pending",
+                       "error": type(exc).__name__,
+                       "authorisation_id": exc.authorisation_id,
+                       "ceremony_id": exc.ceremony_id,
+                       "candidate_seq": exc.candidate_seq,
+                       "candidate_hash": exc.candidate_hash,
+                       "old_cycle_seq": exc.old_cycle_seq,
+                       "old_payload_hash": exc.old_payload_hash,
+                       "report_written": exc.report_written})
+                return 7
             except (SigningError, PinStoreError) as exc:
                 _emit({"step": index, "kind": "adopt",
                        "outcome": "step_refused",
@@ -371,7 +394,8 @@ def main() -> int:
                 cycle["coders"], cycle["reviewers"],
                 cycle["verdict"], cycle["verify_passed"],
                 cycle["delta"])
-        except (PinAdoptionBurned, PinAdoptionRefused) as exc:
+        except (PinAdoptionBurned, PinAdoptionRefused,
+                PinSupersessionPendingApproval) as exc:
             recorded = getattr(exc, "cycle_entry", None) or {}
             _emit({
                 "step": index, "kind": "cycle",

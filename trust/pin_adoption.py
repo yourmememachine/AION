@@ -13,6 +13,90 @@ loop's state or calibration files (it reads bytes and attests
 them; state mutation stays the loop's), and never retries a
 consume, an authorise or an adopt automatically.
 
+Supersession (cycle 25, CROSS-CHECK-18 Q1; design:
+internal/cycle25-work/design-approval.md): when a consume is
+refused pre-commit with ``ceremony_supersede_required``, the
+adopter STOPS. It does not request a supersession decision and
+does not re-run the consume. It persists a
+``supersession_pending_approval`` line in its pending journal
+(a detection aid, like every phase there), writes a
+pending-supersession report (design §7) beside the pin, and
+raises :class:`PinSupersessionPendingApproval` carrying the
+binding facts. The only independent supersession approval is
+a signed approval artefact minted out-of-band by a separate
+tool (``trust.supersession_approval_tool``) under a dedicated
+approver key — a third Ed25519 key, distinct from the snapshot
+signing key and the verifier's ceremony seed. This module
+never imports that tool, never sees the approver seed path,
+and contains no route to mint an approval. Independence here
+is at the authorisation-event level — a deliberate separate
+act with its own artefact and key — NOT a claim of a separate
+human or a separate OS user: on this same-user deployment the
+operator and the approver are the same person running a
+second, deliberate command; the guarantee is that supersession
+cannot happen as a side effect of this automated flow.
+
+Resume (design §6): the refused envelope is retained on the
+pending journal's authorised line. A later attempt for the
+same movement scans the approval inbox (``PinAdopterConfig
+.supersession_approval_path``, env
+``AION_PIN_SUPERSESSION_APPROVAL_PATH`` — an adopter-side
+setting, never a verifier variable) for an approval whose
+``replacement.authorisation_id`` equals the retained
+envelope's id; with none, it raises pending again WITHOUT a
+new ceremony, so the retained envelope stays the approvable
+one. With one, it presents the approval once (the file is
+moved aside regardless of outcome), obtains the verifier's
+journaled supersession decision — the verifier verifies the
+approval BEFORE issuing — and re-runs the consume of the SAME
+envelope exactly once.
+
+Single-file inbox asymmetry: the move-aside above is a
+DIRECTORY-mode property. When the inbox is configured as a
+single artefact file (``move_aside=False``), the approval is
+NOT moved aside on any outcome — it remains in place and may
+be re-presented by a later attempt — and the presented-once
+property rests entirely on the verifier's single-use rule
+(a second decision against the same approval refuses at the
+verifier). Safety holds in both modes; only the local
+housekeeping differs.
+
+Decision-may-already-exist (consume-first): a journaled
+decision can outlive its response — the verifier commits the
+decision before its signing-ledger mirror, so a mirror
+failure returns ``ledger_failed`` WITH the decision standing,
+and a process can die after the decision lands but before
+the consume. Resume therefore treats "a decision may already
+exist" as a consume-first state: when the pending entry
+already carries a ``supersede_decided`` phase, or a decision
+request in this attempt refuses with
+``ceremony_supersede_unproven`` (a prior decision exists) or
+``ledger_failed`` after an approval was presented, the
+adopter falls through to exactly ONE re-anchor/consume
+attempt of the retained envelope instead of classifying the
+movement burned or re-pending it unattempted. What that
+consume's refusal means depends on whether a decision
+covers the CURRENT head (cycle 25 fix round 2, F2/F3 —
+this corrects the earlier claim that a stale decision
+yields a supersede-required refusal): NO covering decision
+refuses ``ceremony_supersede_required``; a decision that
+WAS journaled for this envelope but was minted against a
+head that has since moved is inert, and its consume refuses
+``ceremony_head_regression`` instead. Both are PRE-COMMIT
+refusals — the envelope is certified unconsumed — so
+neither is terminal while an approval path remains: a
+consume-first attempt falls through to the approval-lookup
+path in the SAME attempt, and a consume attempted after a
+decision presentation returns the movement to pending
+rather than burned. A ``ceremony_already_consumed``
+refusal from a resume consume is the opposite certificate:
+the consumption COMMITTED verifier-side (its response was
+lost on an earlier attempt), so the adopter appends the
+``consumed`` phase to its pending journal before raising
+burned — the ceremony is then a genuine unadopted burn and
+the standard ``burned_unadopted`` recovery engages on
+later attempts.
+
 Reason selection (DESIGN-FINAL R3): the ceremony reason is
 COMPUTED, never hard-coded per call site. When the
 pending-adoption journal shows an unadopted burn for the SAME
@@ -83,7 +167,15 @@ from signing.state_snapshot import (
     verify_signed_snapshot,
     verify_snapshot_for_state,
 )
-from trust.client import CeremonySupersedeRequired
+from trust.client import (
+    CeremonyAlreadyConsumed,
+    CeremonyHeadRegression,
+    CeremonySupersedeRequired,
+)
+from trust.supersession_approval import (
+    supersession_approval_from_json,
+    supersession_approval_to_dict,
+)
 from trust.wiring import production_client
 
 REASON_INITIAL_ANCHOR = "initial_anchor"
@@ -91,6 +183,7 @@ REASON_CHAIN_GAP_RECOVERY = "chain_gap_recovery"
 REASON_BURNED_UNADOPTED = "burned_unadopted"
 
 PENDING_JOURNAL_FILENAME = "adoption-pending.jsonl"
+PENDING_REPORT_FILENAME = "pending-supersession.json"
 
 _PIN_ENV_VARS = (
     "AION_PIN_DIR", "AION_PIN_SIGNING_KEY_PATH", "AION_PIN_SIGNER_ID",
@@ -113,6 +206,15 @@ class PinAdopterConfig:
     operator_id: str            # presented to ceremony_authorise
     expected_verifier_signer_id: str  # envelope signer pin
     evidence_dir: Path          # == verifier's AION_CEREMONY_EVIDENCE_DIR
+    # Cycle 25: the approval INBOX (design §6) — a directory
+    # of <approval_id>.json artefacts minted out-of-band by
+    # the approval tool (a single artefact file is also
+    # accepted). An adopter-side setting only: never a
+    # verifier variable, and it must never carry the approver
+    # seed path. None = no inbox configured: a
+    # supersede-required refusal can then only ever surface
+    # as pending.
+    supersession_approval_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +225,8 @@ class PinAdopterEnv:
     snapshot_signer_id: str
     operator_id: str
     evidence_dir: Path
+    # Cycle 25: optional AION_PIN_SUPERSESSION_APPROVAL_PATH.
+    supersession_approval_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +238,113 @@ class AdoptionResult:
 
 class PinAdoptionRefused(SigningError):
     """Integrity failure / store refusal: nothing persisted."""
+
+
+class PinSupersessionPendingApproval(SigningError):
+    """Cycle 25: a consume was refused pre-commit with
+    ``ceremony_supersede_required`` — supersession pending
+    independent approval — and no approval artefact for the
+    retained envelope was found in the approval inbox (or the
+    configured client cannot present one). The envelope is
+    provably UNCONSUMED; nothing was decided, nothing was
+    re-run, and no supersession decision was requested. This
+    is a STOP, not a failure of the movement: an approver
+    approves out-of-band with the approval tool against the
+    pending-supersession report, the artefact lands in the
+    inbox, and a later adoption attempt presents it, obtains
+    the verifier's journaled supersession decision, and
+    completes the consume of the same envelope.
+
+    Carries the binding facts an approver needs:
+
+    * ``authorisation_id`` / ``ceremony_id`` / ``operator_id``
+      / ``reason`` — the original failed consumption attempt
+      (the retained envelope's identity);
+    * ``candidate_seq`` / ``candidate_hash`` — the replacement
+      candidate that would land;
+    * ``old_cycle_seq`` / ``old_payload_hash`` — the old side
+      of the exact movement (envelope old pin; ``None``/``""``
+      for a genesis-side movement);
+    * ``abandoned_movement_candidates`` — the unadopted burns
+      the adopter's own pending journal knows, as
+      ``{authorisation_id, old_cycle_seq, old_payload_hash,
+      candidate_seq, candidate_hash}`` dicts: the abandoned
+      head movement is among them when the adopter made the
+      burns. The VERIFIER identifies the abandoned movement
+      authoritatively from its own consumption head at
+      decision time; this tuple is the adopter-side aid, not
+      the authority;
+    * ``envelope_dict`` — the exact envelope whose consumption
+      was refused (retained for the resume attempt);
+    * ``report_path`` / ``report_written`` — the
+      pending-supersession report file (design §7), the
+      approval tool's input;
+    * ``approval_path`` — the inbox that was scanned
+      (``None`` when no inbox is configured);
+    * ``journal_persisted`` — whether the
+      ``supersession_pending_approval`` journal line landed.
+    """
+
+    def __init__(self, message, *, ceremony_id, authorisation_id,
+                 operator_id, reason, candidate_seq, candidate_hash,
+                 old_cycle_seq, old_payload_hash,
+                 abandoned_movement_candidates=(), envelope_dict=None,
+                 approval_path=None, journal_persisted=False,
+                 report_path=None, report_written=False):
+        super().__init__(message)
+        self.ceremony_id = ceremony_id
+        self.authorisation_id = authorisation_id
+        self.operator_id = operator_id
+        self.reason = reason
+        self.candidate_seq = candidate_seq
+        self.candidate_hash = candidate_hash
+        self.old_cycle_seq = old_cycle_seq
+        self.old_payload_hash = old_payload_hash
+        self.abandoned_movement_candidates = tuple(
+            abandoned_movement_candidates)
+        self.envelope_dict = envelope_dict
+        self.approval_path = approval_path
+        self.journal_persisted = journal_persisted
+        self.report_path = report_path
+        self.report_written = report_written
+        self.cycle_entry = None
+
+    @property
+    def movement(self) -> dict:
+        """The exact (old, new) movement this supersession
+        would perform, as plain data for an approver."""
+        return {
+            "old": {"cycle_seq": self.old_cycle_seq,
+                    "payload_hash": self.old_payload_hash},
+            "new": {"cycle_seq": self.candidate_seq,
+                    "payload_hash": self.candidate_hash}}
+
+
+# Backwards-compatible alias (the cycle-25 design §9 name is
+# the …PendingApproval form; early cycle-25 drafts used the
+# shorter name).
+PinSupersessionPending = PinSupersessionPendingApproval
+
+
+def _request_supersession_decision(client, *, operator_id,
+                                   envelope_dict, approval):
+    """Present an independent supersession approval artefact
+    and obtain the verifier's journaled supersession decision.
+
+    The approval dict is passed as the third argument of
+    ``ceremony_supersede`` (cycle 25 client contract:
+    ``ceremony_supersede(operator_id, envelope_dict,
+    supersede_approval)`` — the verifier verifies the artefact
+    BEFORE issuing any decision). This helper is called ONLY
+    from the resume path, when the adopter already holds an
+    inbox approval for the retained envelope — never in
+    response to a refusal. A client that does not accept an
+    approval argument raises TypeError here; the caller treats
+    that as "approval cannot be presented" and stays pending —
+    the adopter NEVER falls back to requesting a decision
+    without an approval."""
+    return client.ceremony_supersede(
+        operator_id, envelope_dict, approval)
 
 
 class PinAdoptionBurned(SigningError):
@@ -175,12 +386,30 @@ def pin_adopter_config_from_env(mapping) -> PinAdopterEnv:
     for name in _PIN_PATH_VARS:
         if not Path(env[name]).is_absolute():
             _env_refusal(name, "must be an absolute path")
+    # Cycle 25: the independent supersession approval path is
+    # OPTIONAL (its absence means supersessions can only ever
+    # surface as pending); when present it must be a non-empty
+    # absolute path.
+    approval_raw = env.get("AION_PIN_SUPERSESSION_APPROVAL_PATH")
+    approval_path = None
+    if approval_raw is not None:
+        if not isinstance(approval_raw, str) \
+                or not approval_raw.strip():
+            _env_refusal(
+                "AION_PIN_SUPERSESSION_APPROVAL_PATH",
+                "when present must be non-empty")
+        if not Path(approval_raw).is_absolute():
+            _env_refusal(
+                "AION_PIN_SUPERSESSION_APPROVAL_PATH",
+                "must be an absolute path")
+        approval_path = Path(approval_raw)
     return PinAdopterEnv(
         pin_dir=Path(env["AION_PIN_DIR"]),
         signing_key_path=Path(env["AION_PIN_SIGNING_KEY_PATH"]),
         snapshot_signer_id=env["AION_PIN_SIGNER_ID"],
         operator_id=env["AION_PIN_OPERATOR_ID"],
-        evidence_dir=Path(env["AION_PIN_EVIDENCE_DIR"]))
+        evidence_dir=Path(env["AION_PIN_EVIDENCE_DIR"]),
+        supersession_approval_path=approval_path)
 
 
 def build_pin_adopter(env, *, expected_signer_id, expected_key_id,
@@ -351,6 +580,23 @@ class PinAdopter:
                 if "adopted" not in slot["phases"]
                 and slot["phases"] & {"authorised", "consumed"}]
 
+    def _genuine_burn_entries(self) -> list:
+        """Unadopted burns whose envelope may actually have
+        been consumed. Cycle 25: a ceremony that reached
+        ``supersession_pending`` and never ``consumed`` is NOT
+        a burn — its consume was refused pre-commit and the
+        envelope is certified unconsumed, so it must not drive
+        ``burned_unadopted`` reason selection or be named as an
+        abandoned movement. (Its candidate envelope is still
+        retained via ``_unadopted_burns`` for re-presentation:
+        retention is a cache, burn classification is a claim.)"""
+        return [slot["entry"] for slot in self._journal_ceremonies()
+                if "adopted" not in slot["phases"]
+                and slot["phases"] & {"authorised", "consumed"}
+                and not ("supersession_pending_approval"
+                         in slot["phases"]
+                         and "consumed" not in slot["phases"])]
+
     def _retained_current_candidate(self, *, candidate_seq, old_pin):
         """The candidate envelope that IS the current pin (same
         seq + hash), retained on a ceremony's journal lines:
@@ -387,7 +633,7 @@ class PinAdopter:
     def _find_unadopted_burn(self, *, candidate_seq, candidate_hash,
                              old_pin):
         old_seq, old_hash = self._old_pin_projection(old_pin)
-        for entry in self._unadopted_burns():
+        for entry in self._genuine_burn_entries():
             if entry.get("candidate_seq") == candidate_seq \
                     and entry.get("candidate_hash") == candidate_hash \
                     and entry.get("old_cycle_seq") == old_seq \
@@ -417,6 +663,220 @@ class PinAdopter:
                     and signed.payload_hash == entry.get("candidate_hash"):
                 return signed
         return None
+
+    # -- supersession pending / approval (cycle 25) -------------------------
+
+    def _known_abandoned_movements(self, *, exclude_authorisation_id):
+        """The unadopted burns this adopter's pending journal
+        knows (excluding the ceremony currently in flight), as
+        plain binding dicts. The abandoned head movement is
+        among them when this adopter made the burns; the
+        verifier identifies it authoritatively regardless."""
+        out = []
+        for entry in self._genuine_burn_entries():
+            if entry.get("authorisation_id") \
+                    == exclude_authorisation_id:
+                continue
+            out.append({
+                "authorisation_id": entry.get("authorisation_id"),
+                "old_cycle_seq": entry.get("old_cycle_seq"),
+                "old_payload_hash": entry.get("old_payload_hash"),
+                "candidate_seq": entry.get("candidate_seq"),
+                "candidate_hash": entry.get("candidate_hash")})
+        return out
+
+    @property
+    def pending_report_path(self) -> Path:
+        return self._store.pin_dir / PENDING_REPORT_FILENAME
+
+    def _last_genuine_burn(self, *, exclude_authorisation_id=None):
+        burns = [b for b in self._genuine_burn_entries()
+                 if b.get("authorisation_id")
+                 != exclude_authorisation_id]
+        return burns[-1] if burns else None
+
+    def _find_pending_supersession(self, *, candidate_seq,
+                                   candidate_hash, old_pin):
+        """The retained pending supersession for exactly this
+        movement (same candidate seq+hash, same old pin) whose
+        envelope a resume attempt must re-present, or None."""
+        old_seq, old_hash = self._old_pin_projection(old_pin)
+        found = None
+        for slot in self._journal_ceremonies():
+            if "supersession_pending_approval" not in slot["phases"] \
+                    or "adopted" in slot["phases"] \
+                    or "consumed" in slot["phases"]:
+                continue
+            entry = slot["entry"]
+            if entry.get("candidate_seq") == candidate_seq \
+                    and entry.get("candidate_hash") == candidate_hash \
+                    and entry.get("old_cycle_seq") == old_seq \
+                    and entry.get("old_payload_hash") == old_hash \
+                    and isinstance(entry.get("authorisation_envelope"),
+                                   dict):
+                found = entry
+        return found
+
+    def _find_supersession_approval(self, *,
+                                    pending_authorisation_id,
+                                    pending_head_entry_hash):
+        """Scan the approval inbox (design §6) for the approval
+        bound to the retained pending envelope. Returns
+        ``(approval_dict, file_path, move_aside)`` or None.
+
+        Candidates are parsed with the verify-side
+        ``supersession_approval_from_json``; unparseable files
+        are ignored, never fatal. Selection: the approval's
+        ``replacement.authorisation_id`` equals the pending
+        envelope's id, and — when the pending report's head
+        entry hash is a known string — its
+        ``failed_attempt.head_entry_hash`` equals it. (The
+        adopter's report carries ``entry_hash: null`` when it
+        cannot know the verifier journal's hash — see
+        ``_stop_at_pending`` — in which case the authorisation
+        id binding alone selects, and the VERIFIER's binding
+        check remains the authoritative gate.) The adopter
+        never creates or edits an artefact; in directory mode
+        a presented file is moved aside by the caller. In
+        single-file mode (``move_aside=False``) the approval
+        is NOT moved aside on any outcome: the presented-once
+        property there rests entirely on the verifier's
+        single-use rule, not on local housekeeping."""
+        path = self._config.supersession_approval_path
+        if path is None:
+            return None
+        path = Path(path)
+        try:
+            if path.is_dir():
+                candidates = sorted(path.glob("*.json"))
+                move_aside = True
+            elif path.is_file():
+                candidates = [path]
+                move_aside = False
+            else:
+                return None
+        except OSError:
+            return None
+        for candidate_path in candidates:
+            try:
+                signed_approval = supersession_approval_from_json(
+                    candidate_path.read_bytes().decode("utf-8"))
+            except Exception:
+                continue
+            if signed_approval.replacement.get("authorisation_id") \
+                    != pending_authorisation_id:
+                continue
+            if isinstance(pending_head_entry_hash, str) \
+                    and signed_approval.failed_attempt.get(
+                        "head_entry_hash") \
+                    != pending_head_entry_hash:
+                continue
+            return (supersession_approval_to_dict(signed_approval),
+                    candidate_path, move_aside)
+        return None
+
+    def _stop_at_pending(self, sup, *, journal_base, old_pin, signed,
+                         reason):
+        """The cycle-25 stop (design §7/§8): persist the
+        ``supersession_pending_approval`` detection line, write
+        the pending-supersession report, and raise
+        :class:`PinSupersessionPendingApproval`. Always raises.
+
+        The report's ``head`` block is the adopter's BELIEF
+        about the consumption head, from its own pending
+        journal (its last genuine burn). The adopter cannot
+        know the verifier journal's ``seq``/``entry_hash`` for
+        that entry — it has no access to the verifier's
+        journals — so those two fields are written as null:
+        the approver completes them from the verifier's
+        consumption journal as part of the deliberate approval
+        act (the approval tool's signing projection refuses
+        nulls, so an uncompleted report cannot be approved by
+        accident), and the verifier re-derives every bound
+        fact from its own journals before issuing, so a wrong
+        report yields only a refused approval."""
+        old_seq, old_hash = self._old_pin_projection(old_pin)
+        known_abandoned = self._known_abandoned_movements(
+            exclude_authorisation_id=journal_base["authorisation_id"])
+        # The head burn is sought BEFORE this ceremony's
+        # pending line is appended, so the in-flight ceremony
+        # (authorised, not yet marked pending) must be excluded
+        # explicitly — it is the movement seeking supersession,
+        # never the abandoned head.
+        head_burn = self._last_genuine_burn(
+            exclude_authorisation_id=journal_base["authorisation_id"])
+        if head_burn is not None:
+            head_block = {
+                "authorisation_id": head_burn.get("authorisation_id"),
+                "ceremony_id": head_burn.get("ceremony_id"),
+                "old_cycle_seq": head_burn.get("old_cycle_seq"),
+                "old_payload_hash": head_burn.get("old_payload_hash"),
+                "new_cycle_seq": head_burn.get("candidate_seq"),
+                "new_payload_hash": head_burn.get("candidate_hash"),
+                "seq": None, "entry_hash": None}
+        else:
+            head_block = {
+                "authorisation_id": None, "ceremony_id": None,
+                "old_cycle_seq": None, "old_payload_hash": None,
+                "new_cycle_seq": None, "new_payload_hash": None,
+                "seq": None, "entry_hash": None}
+        persisted = True
+        try:
+            self._append_journal({
+                **journal_base,
+                "phase": "supersession_pending_approval",
+                "known_abandoned_authorisation_ids": [
+                    b["authorisation_id"] for b in known_abandoned],
+                "head_authorisation_id": head_block["authorisation_id"],
+                "head_entry_seq": None, "head_entry_hash": None})
+        except OSError:
+            # The journal is a detection aid, never authority;
+            # the pending outcome itself is the report and must
+            # not be masked by the aid's failure. The outcome
+            # carries journal_persisted=False so the loss is
+            # visible, not silent.
+            persisted = False
+        refusal_code = getattr(
+            sup, "verifier_code", None) \
+            or "ceremony_supersede_required"
+        report = {
+            "report": "pending-supersession/1",
+            "refusal_code": refusal_code,
+            "envelope": sup.envelope_dict,
+            "operator_id": self._config.operator_id,
+            "head": head_block,
+            "reported_at": datetime.now(timezone.utc).isoformat()}
+        report_written = True
+        try:
+            _write_bytes_atomically(
+                self.pending_report_path,
+                json.dumps(report, ensure_ascii=False, sort_keys=True,
+                           allow_nan=False).encode("utf-8"))
+        except OSError:
+            report_written = False
+        approval_path = self._config.supersession_approval_path
+        raise PinSupersessionPendingApproval(
+            "ceremony consumption is supersession pending "
+            "independent approval: the verifier refused "
+            f"pre-commit with {refusal_code}; the "
+            "adopter stopped without requesting a supersession "
+            "decision or re-running the consume, and the "
+            "movement completes only when an out-of-band "
+            "approval artefact for the retained envelope "
+            "appears in the approval inbox",
+            ceremony_id=journal_base["ceremony_id"],
+            authorisation_id=journal_base["authorisation_id"],
+            operator_id=self._config.operator_id, reason=reason,
+            candidate_seq=signed.cycle_seq,
+            candidate_hash=signed.payload_hash,
+            old_cycle_seq=old_seq, old_payload_hash=old_hash,
+            abandoned_movement_candidates=known_abandoned,
+            envelope_dict=sup.envelope_dict,
+            approval_path=str(approval_path)
+            if approval_path is not None else None,
+            journal_persisted=persisted,
+            report_path=str(self.pending_report_path),
+            report_written=report_written)
 
     # -- last-candidate retention (advance path) ---------------------------
     # A ceremony leaves its candidate envelope on the journal's
@@ -618,10 +1078,387 @@ class PinAdopter:
         ]
         return ("\n".join(lines) + "\n").encode("utf-8")
 
+    def _pending_phases(self, ceremony_id):
+        """The accumulated phase set of one pending-journal
+        ceremony (empty when unknown)."""
+        for slot in self._journal_ceremonies():
+            if slot["entry"].get("ceremony_id") == ceremony_id:
+                return slot["phases"]
+        return set()
+
+    def _consume_retained(self, *, journal_base, signed_env,
+                          signed, old_pin, history, state_bytes,
+                          calibration_bytes, strict_reasons,
+                          reason, pre_commit_fallthrough=False):
+        """Exactly ONE re-anchor/consume attempt of the
+        retained envelope against a supersession decision that
+        exists (or may already exist) in the verifier's
+        supersession journal — the consume path looks the
+        decision up by authorisation_id itself.
+
+        Pre-commit refusals (the envelope is certified
+        unconsumed) are never burned (cycle 25 fix round 2,
+        F2 — this corrects the earlier claim that a stale
+        decision yields a supersede-required refusal):
+
+        * ``ceremony_supersede_required`` — NO decision covers
+          the current head (none landed, or the head shape
+          changed): pending again, against the new head;
+        * ``ceremony_head_regression`` — a decision WAS
+          journaled for this envelope, but it was minted
+          against a head that has since moved, so the
+          verifier's binding check against the CURRENT head
+          fails and the decision is inert: also pending
+          again, never burned — the hash-binding
+          head-regression shapes stay refusals for a FRESH
+          ceremony (the ``_reanchor`` path is unchanged);
+          only this resume-of-a-decided movement re-pends.
+
+        With ``pre_commit_fallthrough=True`` (the consume-first
+        entry in ``_resume_pending``) either pre-commit
+        refusal instead returns None, signalling the caller
+        to fall through to the approval-lookup path in the
+        SAME attempt: a pre-commit refusal must not be
+        terminal while an approval path remains, and the
+        consume-first short-circuit must not make a fresh
+        approval bound to the new head unreachable. (The
+        alternative — returning to pending WITHOUT the
+        decided short-circuit once the decision is
+        known-stale — was rejected: it needs a new persistent
+        journal phase to encode known-staleness, and a stale
+        marker would outlive the attempt that learned it;
+        the same-attempt fall-through keeps the state in the
+        attempt, where it was learned.)
+
+        A ``ceremony_already_consumed`` refusal (F3) is the
+        opposite certificate: the verifier certifies the
+        consumption COMMITTED (an earlier resume consume
+        landed but its response was lost). The ``consumed``
+        phase is appended to the pending journal BEFORE
+        raising PinAdoptionBurned, so the ceremony becomes a
+        genuine unadopted burn — ``_genuine_burn_entries``
+        no longer excludes it and
+        ``_find_pending_supersession`` no longer intercepts
+        it — and the standard ``burned_unadopted`` recovery
+        engages on later attempts. Any other failure keeps
+        PinAdoptionBurned's conservatism."""
+        cfg = self._config
+        eff_strict = strict_reasons \
+            if reason == REASON_CHAIN_GAP_RECOVERY else None
+        try:
+            new_pin, record = reanchor_pin(
+                old_pin, signed, signing_key=self._key,
+                state_bytes=state_bytes,
+                calibration_bytes=calibration_bytes,
+                expected_signer_id=cfg.expected_snapshot_signer_id,
+                operator_id=cfg.operator_id, reason=reason,
+                evidence_hash=signed_env.evidence_hash,
+                authorisation=signed_env,
+                authorisation_public_key=self._pub,
+                expected_verifier_signer_id=
+                cfg.expected_verifier_signer_id,
+                ceremony_history=history,
+                consume_authorisation=self._client.ceremony_consumer(),
+                strict_reasons=eff_strict)
+        except CeremonySupersedeRequired as sup:
+            if pre_commit_fallthrough:
+                return None
+            # No covering decision for the current head:
+            # still provably unconsumed, still a stop —
+            # pending again, against the new head.
+            self._stop_at_pending(
+                sup, journal_base=journal_base, old_pin=old_pin,
+                signed=signed, reason=reason)
+        except CeremonyHeadRegression as sup:
+            if pre_commit_fallthrough:
+                return None
+            # A journaled decision exists but is bound to a
+            # superseded head (inert verifier-side): still
+            # provably unconsumed, still a stop — pending
+            # again, against the new head, so a fresh approval
+            # bound to the new head can be presented on a
+            # later attempt.
+            self._stop_at_pending(
+                sup, journal_base=journal_base, old_pin=old_pin,
+                signed=signed, reason=reason)
+        except CeremonyAlreadyConsumed as exc:
+            # F3: the verifier has CERTIFIED the consumption.
+            # Record the consumed phase first (best-effort,
+            # like every journal append here — the Burned
+            # raise must not be masked), so the pending
+            # ceremony is reclassified as a genuine unadopted
+            # burn and the ordinary recovery route engages.
+            try:
+                self._append_journal(
+                    {**journal_base, "phase": "consumed"})
+            except OSError:
+                pass
+            raise PinAdoptionBurned(
+                f"re-anchor of the retained envelope refused "
+                f"with ceremony_already_consumed: the verifier "
+                f"certifies the consumption already committed "
+                f"(an earlier resume consume landed but its "
+                f"response was lost); the consumed phase has "
+                f"been journaled so the ceremony is a genuine "
+                f"unadopted burn: {exc}",
+                returned_pin=None, returned_record=None) from exc
+        except Exception as exc:
+            raise PinAdoptionBurned(
+                f"re-anchor after a journaled supersession "
+                f"decision did not return; the authorisation is "
+                f"treated as burned: {exc}",
+                returned_pin=None, returned_record=None) from exc
+        self._append_journal({**journal_base, "phase": "consumed"})
+        try:
+            self._store.adopt(new_pin, record,
+                              expected_old_pin=old_pin,
+                              signing_key=self._key)
+        except Exception as exc:
+            raise PinAdoptionBurned(
+                f"consumption committed but adoption failed: {exc}",
+                returned_pin=new_pin, returned_record=record) from exc
+        try:
+            self._append_journal({**journal_base, "phase": "adopted"})
+        except OSError:
+            pass
+        return AdoptionResult("reanchored", new_pin, record)
+
+    def _resume_pending(self, pending_entry, *, old_pin, history,
+                        signed, state_bytes, calibration_bytes,
+                        strict_reasons) -> AdoptionResult:
+        """Cycle 25 resume (design §6): complete a retained
+        supersession-pending movement — ONLY against an inbox
+        approval bound to the retained envelope.
+
+        No approval in the inbox: raise
+        PinSupersessionPendingApproval again WITHOUT any new
+        ceremony (no authorise, no consume), so the retained
+        envelope stays the approvable one. With an approval:
+        present it once (its file is moved aside regardless of
+        outcome in directory mode; in single-file mode it is
+        NOT moved aside — see the module docstring's
+        single-file asymmetry note), obtain the verifier's
+        journaled supersession decision, re-run the consume of
+        the SAME envelope exactly once, and adopt.
+
+        Consume-first (r3 F1): if the pending entry already
+        carries a ``supersede_decided`` phase, a decision was
+        journaled by an earlier attempt whose consume never
+        landed — go straight to the single consume attempt
+        with NO approval lookup and NO second decision
+        request.
+
+        Consume-first fall-through (fix round 2, F2): if that
+        consume refuses PRE-COMMIT — supersede-required (no
+        covering decision) or head-regression (the journaled
+        decision is bound to a head that has since moved and
+        is inert) — the attempt does NOT stop there: it falls
+        through to the approval-lookup path below in the SAME
+        attempt, so a fresh approval bound to the new head
+        already in the inbox is presented, and with none the
+        movement re-pends. Without this, the decided
+        short-circuit would intercept before the approval
+        lookup on every later attempt and a fresh approval
+        would never be presented — a permanent Burned/pending
+        loop. The same fall-through applies in-attempt when
+        a decision request refuses ``ceremony_supersede_unproven``
+        (a prior decision already exists for this envelope) or
+        ``ledger_failed`` (the verifier's step-10 shape: the
+        decision may stand despite the failed response)."""
+        cfg = self._config
+        envelope_dict = pending_entry["authorisation_envelope"]
+        try:
+            signed_env = ceremony_authorisation_envelope_from_dict(
+                envelope_dict)
+        except SigningError as exc:
+            raise PinAdoptionRefused(
+                f"retained pending envelope is unparseable: {exc}"
+            ) from exc
+        journal_base = {
+            "ceremony_id": pending_entry.get("ceremony_id"),
+            "authorisation_id": signed_env.authorisation_id,
+            "candidate_seq": signed.cycle_seq,
+            "candidate_hash": signed.payload_hash,
+            "old_cycle_seq": pending_entry.get("old_cycle_seq"),
+            "old_payload_hash": pending_entry.get("old_payload_hash"),
+        }
+        reason = pending_entry.get("reason") \
+            or REASON_CHAIN_GAP_RECOVERY
+        if "supersede_decided" in self._pending_phases(
+                pending_entry.get("ceremony_id")):
+            # Consume-first: an earlier attempt journaled the
+            # decision (its supersede_decided line landed) but
+            # its consume did not. No approval is needed — or
+            # usable: a fresh decision request would refuse as
+            # already decided — so land the single consume of
+            # the retained envelope directly. F2: a PRE-COMMIT
+            # refusal from that consume (returned as None)
+            # falls through to the approval lookup below in
+            # this same attempt instead of terminating the
+            # movement — the journaled decision may be stale
+            # (bound to a superseded head), and a fresh
+            # approval bound to the new head is the one
+            # artefact that can move the movement forward.
+            result = self._consume_retained(
+                journal_base=journal_base, signed_env=signed_env,
+                signed=signed, old_pin=old_pin, history=history,
+                state_bytes=state_bytes,
+                calibration_bytes=calibration_bytes,
+                strict_reasons=strict_reasons, reason=reason,
+                pre_commit_fallthrough=True)
+            if result is not None:
+                return result
+        found = self._find_supersession_approval(
+            pending_authorisation_id=signed_env.authorisation_id,
+            pending_head_entry_hash=pending_entry.get(
+                "head_entry_hash"))
+        if found is None:
+            old_seq, old_hash = self._old_pin_projection(old_pin)
+            raise PinSupersessionPendingApproval(
+                "ceremony consumption is supersession pending "
+                "independent approval: no approval artefact for "
+                "the retained envelope was found in the approval "
+                "inbox; no new ceremony was started",
+                ceremony_id=journal_base["ceremony_id"],
+                authorisation_id=signed_env.authorisation_id,
+                operator_id=cfg.operator_id, reason=reason,
+                candidate_seq=signed.cycle_seq,
+                candidate_hash=signed.payload_hash,
+                old_cycle_seq=old_seq, old_payload_hash=old_hash,
+                abandoned_movement_candidates=
+                self._known_abandoned_movements(
+                    exclude_authorisation_id=
+                    signed_env.authorisation_id),
+                envelope_dict=envelope_dict,
+                approval_path=str(cfg.supersession_approval_path)
+                if cfg.supersession_approval_path is not None
+                else None,
+                journal_persisted=True,
+                report_path=str(self.pending_report_path),
+                report_written=self.pending_report_path.is_file())
+        approval_dict, approval_file, move_aside = found
+
+        def _move_aside():
+            if move_aside:
+                try:
+                    os.replace(
+                        approval_file,
+                        approval_file.with_name(
+                            approval_file.name + ".presented"))
+                except OSError:
+                    pass
+
+        try:
+            _request_supersession_decision(
+                self._client, operator_id=cfg.operator_id,
+                envelope_dict=envelope_dict, approval=approval_dict)
+        except TypeError:
+            # The configured client cannot present an approval
+            # artefact: the approval is unpresentable through
+            # this channel, so the movement stays pending (the
+            # file is NOT moved aside — nothing was presented)
+            # and the adopter never falls back to an unapproved
+            # decision request.
+            old_seq, old_hash = self._old_pin_projection(old_pin)
+            raise PinSupersessionPendingApproval(
+                "ceremony consumption is supersession pending "
+                "independent approval: an approval artefact "
+                "exists but the configured client cannot present "
+                "it; the movement stays pending",
+                ceremony_id=journal_base["ceremony_id"],
+                authorisation_id=signed_env.authorisation_id,
+                operator_id=cfg.operator_id, reason=reason,
+                candidate_seq=signed.cycle_seq,
+                candidate_hash=signed.payload_hash,
+                old_cycle_seq=old_seq, old_payload_hash=old_hash,
+                abandoned_movement_candidates=
+                self._known_abandoned_movements(
+                    exclude_authorisation_id=
+                    signed_env.authorisation_id),
+                envelope_dict=envelope_dict,
+                approval_path=str(cfg.supersession_approval_path)
+                if cfg.supersession_approval_path is not None
+                else None,
+                journal_persisted=True,
+                report_path=str(self.pending_report_path),
+                report_written=self.pending_report_path.is_file())
+        except Exception as exc:
+            _move_aside()
+            if getattr(exc, "verifier_code", None) in (
+                    "ceremony_supersede_unproven", "ledger_failed"):
+                # Consume-first (r3 F1): the refusal/response
+                # shape says a decision may ALREADY exist for
+                # this envelope — unproven because a prior
+                # decision exists (step 8/8b), or ledger_failed
+                # after the step-9 commit (step 10: "the
+                # decision stands … consumption may proceed
+                # against it"). A re-decide would refuse as
+                # already decided, and classifying this burned
+                # would strand a movement whose decision is
+                # journaled. Fall through to exactly ONE
+                # consume attempt of the retained envelope; the
+                # consume path looks the decision up itself, and
+                # only a PRE-COMMIT refusal from THAT consume
+                # (supersede-required: no covering decision;
+                # head-regression: the decision is bound to a
+                # superseded head) returns the movement to
+                # pending — never to burned.
+                return self._consume_retained(
+                    journal_base=journal_base,
+                    signed_env=signed_env, signed=signed,
+                    old_pin=old_pin, history=history,
+                    state_bytes=state_bytes,
+                    calibration_bytes=calibration_bytes,
+                    strict_reasons=strict_reasons, reason=reason)
+            # Any other failure: a decision may or may not be
+            # journaled; the approval is spent either way
+            # (moved aside), and PinAdoptionBurned's
+            # conservatism is retained: the adopter cannot
+            # distinguish the cases.
+            raise PinAdoptionBurned(
+                f"supersession decision request failed; the "
+                f"authorisation is treated as burned: {exc}",
+                returned_pin=None, returned_record=None) from exc
+        _move_aside()
+        # The "supersede_decided" pending-journal line is a
+        # detection aid only, like every phase; it is NOT a
+        # burn phase — _unadopted_burns is unchanged by it. Its
+        # append failing is no longer a burn: the decision IS
+        # journaled verifier-side, so the movement proceeds to
+        # the consume attempt regardless (a later attempt
+        # re-derives the consume-first state from the
+        # verifier's decision via the unproven fall-through).
+        try:
+            self._append_journal({**journal_base,
+                                  "phase": "supersede_decided"})
+        except OSError:
+            pass
+        return self._consume_retained(
+            journal_base=journal_base, signed_env=signed_env,
+            signed=signed, old_pin=old_pin, history=history,
+            state_bytes=state_bytes,
+            calibration_bytes=calibration_bytes,
+            strict_reasons=strict_reasons, reason=reason)
+
     def _reanchor(self, *, old_pin, history, signed, state_bytes,
                   calibration_bytes, primary_reason,
                   strict_reasons) -> AdoptionResult:
         cfg = self._config
+        # Cycle 25 resume: a retained supersession-pending
+        # movement for THIS candidate and old pin is completed
+        # (or re-surfaced as pending) before any new ceremony
+        # is contemplated — a fresh authorisation would orphan
+        # the retained envelope an approval may already bind.
+        if old_pin is not None:
+            pending_entry = self._find_pending_supersession(
+                candidate_seq=signed.cycle_seq,
+                candidate_hash=signed.payload_hash, old_pin=old_pin)
+            if pending_entry is not None:
+                return self._resume_pending(
+                    pending_entry, old_pin=old_pin, history=history,
+                    signed=signed, state_bytes=state_bytes,
+                    calibration_bytes=calibration_bytes,
+                    strict_reasons=strict_reasons)
         # Computed reason (DESIGN-FINAL R3): an unadopted burn
         # for THIS candidate (same seq+hash) and THIS old pin
         # makes this ceremony a burned_unadopted recovery;
@@ -715,6 +1552,12 @@ class PinAdopter:
         # authority.
         self._append_journal({
             **journal_base, "phase": "authorised",
+            "reason": reason, "evidence_hash": evidence_hash,
+            # Cycle 25: the authorisation envelope is retained
+            # too — a supersession-pending resume must
+            # re-present THIS envelope (an approval binds its
+            # authorisation_id), never a fresh one.
+            "authorisation_envelope": envelope_dict,
             "candidate_envelope": snapshot_envelope_to_dict(signed)})
         # (4) Re-anchor. Consumption commits at the verifier
         # inside this call; any exception from here is treated
@@ -738,72 +1581,30 @@ class PinAdopter:
         try:
             new_pin, record = _attempt(signed_env)
         except CeremonySupersedeRequired as sup:
-            # Cycle 24, supersede Option A (design B §7/§7.1):
-            # exactly ONE decision request, then exactly ONE
-            # re-run of _attempt with the SAME envelope. No loop:
-            # if the re-run itself raises
-            # CeremonySupersedeRequired again (the head moved
-            # concurrently; the decision is misbound against the
-            # new head), it falls into the re-run's generic
-            # handler below and is burned — the adopter never
-            # asks twice.
+            # Cycle 25 (CROSS-CHECK-18 Q1): the adopter STOPS
+            # here. Cycle 24 auto-requested a supersession
+            # decision after this refusal and re-ran the
+            # consume; seat-gpt held cycles 14-16 because an
+            # adopter auto-escalating after a refusal is not an
+            # independent authorisation event. The auto-request
+            # call is DELETED, not gated: this handler requests
+            # nothing and re-runs nothing. It records the
+            # pending state, writes the pending-supersession
+            # report for the out-of-band approval tool, and
+            # raises PinSupersessionPendingApproval. Completion
+            # is the resume path's job, on a later attempt, only
+            # against an inbox approval bound to THIS envelope.
             #
-            # This is NOT a retry of an ambiguous consume, and
-            # does not breach the never-retry rule (cycle 21,
-            # R7): that rule exists because a consume whose
-            # outcome is UNKNOWN may have committed.
-            # ceremony_supersede_required is the opposite case —
-            # a KNOWN, negative outcome. The verifier emits that
-            # code only pre-commit, from its head check, after
+            # The refusal itself is a KNOWN, negative outcome
+            # (never a retry concern): the verifier emits
+            # ceremony_supersede_required only pre-commit, after
             # its already-consumed check has certified the
-            # envelope unconsumed; the envelope is therefore
-            # provably unburned, and the re-run is the second
-            # phase of a two-phase authorised flow: it re-runs
-            # every local check against the same envelope and
-            # consumes only against the decision the verifier
-            # journaled in between. A lost or ambiguous
-            # SUPERSEDE-mode response is not covered by this
-            # argument: it is treated as burned below, never
-            # re-decided blindly within this flow.
-            try:
-                self._client.ceremony_supersede(
-                    operator_id=cfg.operator_id,
-                    envelope_dict=sup.envelope_dict)
-            except Exception as exc:
-                # Honest note: in this specific failure the
-                # envelope is in fact unconsumed and a decision
-                # may or may not be journaled; PinAdoptionBurned's
-                # "treated as burned" conservatism is retained
-                # because the adopter cannot distinguish the
-                # cases, and the next snapshot_and_adopt attempt
-                # uses a fresh ceremony regardless — no state
-                # depends on the distinction.
-                raise PinAdoptionBurned(
-                    f"supersession decision request failed; the "
-                    f"authorisation is treated as burned: {exc}",
-                    returned_pin=None, returned_record=None) from exc
-            # The "supersede_decided" pending-journal line is a
-            # detection aid only, like every phase; it is NOT a
-            # burn phase — _unadopted_burns is unchanged by it
-            # (it neither adds nor removes burn status; it rides
-            # on the existing authorised phase of this ceremony).
-            try:
-                self._append_journal({**journal_base,
-                                      "phase": "supersede_decided"})
-            except OSError as exc:
-                raise PinAdoptionBurned(
-                    f"supersede_decided journal append failed; "
-                    f"the authorisation is treated as burned: "
-                    f"{exc}",
-                    returned_pin=None, returned_record=None) from exc
-            try:
-                new_pin, record = _attempt(signed_env)
-            except Exception as exc:
-                raise PinAdoptionBurned(
-                    f"re-anchor after a journaled supersession "
-                    f"decision did not return; the authorisation "
-                    f"is treated as burned: {exc}",
-                    returned_pin=None, returned_record=None) from exc
+            # envelope unconsumed, so the envelope is provably
+            # unburned and the retained envelope may be consumed
+            # later once a decision exists.
+            self._stop_at_pending(
+                sup, journal_base=journal_base, old_pin=old_pin,
+                signed=signed, reason=reason)
         except Exception as exc:
             raise PinAdoptionBurned(
                 f"re-anchor did not return; the authorisation is "
@@ -871,7 +1672,8 @@ def pin_cycle_hook(adopter):
 
     The returned callable takes the recorded cycle entry, calls
     ``adopter.snapshot_and_adopt()``, and returns its
-    AdoptionResult. On PinAdoptionBurned / PinAdoptionRefused the
+    AdoptionResult. On PinAdoptionBurned / PinAdoptionRefused /
+    PinSupersessionPendingApproval the
     entry is attached as ``.cycle_entry`` before re-raising —
     the run_one_cycle_and_pin contract, preserved: "cycle
     recorded, pin pending, alert". The hook is the integrated
@@ -880,7 +1682,8 @@ def pin_cycle_hook(adopter):
     def _hook(entry):
         try:
             return adopter.snapshot_and_adopt()
-        except (PinAdoptionBurned, PinAdoptionRefused) as exc:
+        except (PinAdoptionBurned, PinAdoptionRefused,
+                PinSupersessionPendingApproval) as exc:
             exc.cycle_entry = entry
             raise
     return _hook
@@ -915,7 +1718,8 @@ def run_one_cycle_and_pin(loop, adopter, *, coders, reviewers,
         return None, None            # idle: no state change, no snapshot
     try:
         result = adopter.snapshot_and_adopt()
-    except (PinAdoptionBurned, PinAdoptionRefused) as exc:
+    except (PinAdoptionBurned, PinAdoptionRefused,
+            PinSupersessionPendingApproval) as exc:
         exc.cycle_entry = entry
         raise
     return entry, result
