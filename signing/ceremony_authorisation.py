@@ -93,8 +93,22 @@ Honest limits:
   neither is anchored provenance: the (ceremony_id,
   evidence_hash) pair is burned at issuance, but a genuine
   envelope replayed within its TTL against a moved pin is a
-  consumption-side problem this module does not solve; the
-  protected monotonic consumption head remains the fix.
+  consumption-side problem this module does not solve. The
+  protected monotonic consumption head that addresses it
+  EXISTS as built in cycle 21: the verifier-owned
+  ``CeremonyConsumptionLedger`` (trust/ledger.py), driven
+  through the verifier's ``ceremony_consume`` mode, with
+  signing/pin_ceremony.py's ``reanchor_pin`` invoking the
+  required consumer before a ceremony record is constructed.
+  Qualification (R5): single-use consumption is a property
+  of the INTEGRATED SYSTEM under its production wiring —
+  authorise via the verifier client, re-anchor with the
+  verifier-backed consumer, adopt the returned pin
+  atomically — not a property of this envelope, or of
+  ``reanchor_pin`` for an arbitrary caller-supplied
+  callable, in the abstract. See signing/pin_ceremony.py
+  and trust/ledger.py for the built mechanism and its
+  residuals.
 * ``now=`` parameters exist for tests only; see the warning in
   gate_decision's module docstring.
 """
@@ -106,6 +120,7 @@ import math
 import os
 import re
 import secrets
+import stat
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -119,6 +134,7 @@ from signing.gate_decision import (
     _check_hex64,
     _check_id,
     _check_key_path,
+    _check_owner_only_mode,
     _check_text,
     _normalise_time,
     _now,
@@ -258,24 +274,69 @@ _MAX_SEED_FILE_BYTES = 1024
 
 def load_ceremony_seed(path, *, forbidden_roots=()) -> CeremonySigningKey:
     """Load a ceremony seed file under the same discipline as
-    gate_decision.load_signing_key (shared _check_key_path):
-    failing closed on a symlinked path component, a mode other
-    than exactly 0600, an oversize or non-hex file, content that
-    is not exactly 32 bytes, or a location inside this repo or a
-    caller-named forbidden root."""
+    gate_decision.load_signing_key (shared _check_key_path and,
+    since cycle 21, the shared _check_owner_only_mode predicate):
+    failing closed on a symlinked path component, a mode failing
+    the owner-only predicate (no group/world bits, owner-read
+    set — in practice 0400 or 0600; the retired "exactly 0600"
+    wording no longer applies), an oversize or non-hex file,
+    content that is not exactly 32 bytes, or a location inside
+    this repo or a caller-named forbidden root.
+
+    Cycle-21 fd discipline (this loader only; the gate loader's
+    equivalent is the follow-up signing-key-loader-fd-hardening):
+    the file is opened ONCE with O_NOFOLLOW|O_NONBLOCK, every
+    property (regular file, mode, size) is checked by fstat on
+    that fd, and the bytes are read bounded from the same fd —
+    there is no stat-then-read gap for a swap to hide in, and a
+    FIFO at the path is refused as non-regular instead of
+    hanging the read. Owner-uid check (seed loader only, NOT
+    applied to the gate loader): when the process euid is
+    non-zero, the file must be owned by that euid; as root the
+    check is vacuous and skipped."""
     target = _check_key_path(Path(path), forbidden_roots)
-    if not target.is_file():
-        raise SigningError("ceremony seed file is missing")
-    if target.stat().st_mode & 0o777 != 0o600:
-        raise SigningError(
-            "ceremony seed file mode must be exactly 0600")
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
     try:
-        if target.stat().st_size > _MAX_SEED_FILE_BYTES:
-            raise SigningError("ceremony seed file exceeds the size cap")
-        raw = target.read_bytes().strip()
+        fd = os.open(target, flags)
     except OSError as exc:
         raise SigningError(
-            f"ceremony seed file is unreadable: {exc}") from exc
+            f"ceremony seed file is missing or unreadable: "
+            f"{exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SigningError(
+                "ceremony seed file is not a regular file")
+        _check_owner_only_mode(info.st_mode,
+                               what="ceremony seed file")
+        euid = os.geteuid() if hasattr(os, "geteuid") else 0
+        if euid != 0 and info.st_uid != euid:
+            raise SigningError(
+                "ceremony seed file is not owned by the "
+                "current user")
+        if info.st_size > _MAX_SEED_FILE_BYTES:
+            raise SigningError(
+                "ceremony seed file exceeds the size cap")
+        chunks = []
+        remaining = _MAX_SEED_FILE_BYTES + 1
+        try:
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 4096))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        except OSError as exc:
+            raise SigningError(
+                f"ceremony seed file is unreadable: {exc}") from exc
+        raw = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if len(raw) > _MAX_SEED_FILE_BYTES:
+        raise SigningError("ceremony seed file exceeds the size cap")
+    raw = raw.strip()
     try:
         text = raw.decode("ascii")
     except UnicodeDecodeError as exc:

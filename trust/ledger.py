@@ -51,6 +51,26 @@ class CorruptLedgerError(LedgerError):
     chain, oversize, malformed entry."""
 
 
+class AlreadyConsumedError(LedgerError):
+    """A ceremony authorisation (or its exact target) is already
+    consumed. Machine-distinguishable from a head regression via
+    the ``reason`` attribute (cycle 21): the consume mode maps
+    this subclass to ``ceremony_already_consumed`` and
+    HeadRegressionError to ``ceremony_head_regression``; any
+    other LedgerError maps to ``ledger_failed``."""
+
+    reason = "already_consumed"
+
+
+class HeadRegressionError(LedgerError):
+    """A ceremony envelope's candidate or old pin does not
+    satisfy the monotonic head rules against the consumption
+    journal's current head. See AlreadyConsumedError for the
+    mode-mapping contract."""
+
+    reason = "head_regression"
+
+
 # Strict parsing (Trust Boundary v3.1, parser inventory): the
 # journal is parsed under the same contract as every other
 # security-relevant consumer — duplicate keys and non-finite
@@ -403,6 +423,40 @@ class SigningLedger(HashChainJournal):
             signer_id=signed.signer_id,
             format="ceremony-authorisation")
 
+    def append_ceremony_consumption(self, signed, *,
+                                    recorded_at) -> dict:
+        """Mirror a ceremony consumption (cycle 21) in the
+        EXISTING entry shape — EXTRA_KEYS is untouched, so no
+        journal format migration. This is an audit mirror, NOT
+        a second commit: it is invoked only after
+        CeremonyConsumptionLedger.append_consumption has
+        committed, and it puts the consumption fact into the
+        one journal that is externally anchored in production.
+        Column reuse follows append_ceremony_authorisation /
+        try_consume_eval_records' eval-consumption entries:
+        kind "consume", format "ceremony-consumption",
+        decision_id = authorisation_id, proposal_id =
+        ceremony_id, accepted=False. Any cross-check for
+        consumptions MUST scope to kind="consume" AND
+        format="ceremony-consumption": the issuance mirror
+        already writes decision_id = authorisation_id under
+        kind "sign", and an unscoped scan would refuse every
+        consume as already-consumed."""
+        from signing.ceremony_authorisation import \
+            SignedCeremonyAuthorisation
+        if not isinstance(signed, SignedCeremonyAuthorisation):
+            raise LedgerError(
+                "can only ledger a SignedCeremonyAuthorisation")
+        self._reload()
+        return self._append(
+            "consume", recorded_at, decision_id=signed.authorisation_id,
+            payload_hash=signed.payload_hash,
+            purpose="pin-ceremony-consumption",
+            proposal_id=signed.ceremony_id,
+            accepted=False,
+            signer_id=signed.signer_id,
+            format="ceremony-consumption")
+
     def append_claim(self, claim_document, *, recorded_at,
                      signer_id="") -> dict:
         """Ledger an UNSIGNED claim. A claim is a caller assertion
@@ -584,6 +638,13 @@ class CeremonyAuthorisationLedger(HashChainJournal):
                 return dict(entry)
         return None
 
+    def find_by_authorisation_id(self, authorisation_id):
+        self._reload()
+        for entry in self._entries:
+            if entry["authorisation_id"] == authorisation_id:
+                return dict(entry)
+        return None
+
     def append_authorisation(self, signed, *, recorded_at) -> dict:
         from signing.ceremony_authorisation import \
             SignedCeremonyAuthorisation
@@ -622,3 +683,217 @@ class CeremonyAuthorisationLedger(HashChainJournal):
             evidence_hash=signed.evidence_hash,
             operator_id=signed.operator_id,
             issued_at=recorded_at)
+
+
+class CeremonyConsumptionLedger(HashChainJournal):
+    """Verifier-owned consumption record for ceremony
+    authorisations (cycle 21): one entry per CONSUMED
+    authorisation, in its own file in the verifier home. This
+    journal is the authoritative monotonic consumption head:
+    its latest entry's (new_cycle_seq, new_payload_hash) is
+    the head target every later consumption is checked
+    against (DESIGN-FINAL R3). That head is a CEREMONY head —
+    it sees consumptions only; advance_pin movements never
+    pass through the verifier, so a pin advanced outside
+    ceremonies is invisible to this journal. The residual
+    class that leaves is named in
+    DECISION-CONSUMPTION-HEAD.md.
+
+    The append here is THE commit point for consumption.
+    append_consumption re-checks single-use AND the head
+    rules against freshly reloaded entries inside its
+    bounded reload-retry loop (the issuance-race lesson), so
+    the concurrent loser surfaces as already-consumed
+    (AlreadyConsumedError), not corruption. The signing
+    ledger's ceremony-consumption entry is an audit mirror
+    written only after this commit; it is never the
+    authority and must never be appended first.
+
+    Anchoring residual (cycle 21, R10, stated precisely):
+    this journal is NOT externally anchored this cycle. A
+    rollback of the verifier home cannot resurrect a
+    consumed envelope whose consumption is mirrored in the
+    anchored signing ledger (production), but can lower the
+    enforced head for never-consumed envelopes. The
+    follow-up ceremony-journal-anchoring covers both
+    journals (issuance + consumption) jointly. In research
+    mode (anchoring unconfigured) the mirror itself is
+    unanchored and this journal carries the same
+    research-mode residual as the ceremony journal: it can
+    be deleted or rolled back undetectably, and research
+    mode must never be described as rollback-protected.
+
+    Note on head(): this class does NOT override the base
+    class's head() — head() returns the hash-chain head hash
+    (GENESIS_HASH when empty) per the base contract, like
+    every HashChainJournal subclass. The consumed HEAD
+    TARGET is exposed separately as head_target(). The base
+    _append is overridden so the chain bookkeeping uses the
+    hash head explicitly via chain_head()."""
+
+    FILENAME = "ceremony-consumptions.json"
+    EXTRA_KEYS = frozenset({
+        "authorisation_id", "ceremony_id", "operator_id",
+        "old_cycle_seq", "old_payload_hash",
+        "new_cycle_seq", "new_payload_hash",
+        "evidence_hash", "consumed_at"})
+
+    # -- hash-chain plumbing (head() keeps the base contract)
+
+    def chain_head(self) -> str:
+        return HashChainJournal.head(self)
+
+    def _append(self, kind: str, recorded_at: str, **fields) -> dict:
+        entry = {
+            "seq": len(self._entries) + 1,
+            "kind": kind,
+            "recorded_at": recorded_at,
+            "prev_hash": self.chain_head(),
+        }
+        entry.update(fields)
+        entry["entry_hash"] = _sha256(_canonical(
+            {k: v for k, v in entry.items() if k != "entry_hash"}))
+        self._save(self._entries + [entry])
+        return dict(entry)
+
+    # -- reads ------------------------------------------------------
+
+    def head_target(self):
+        """The consumed head target: (new_cycle_seq,
+        new_payload_hash) of the latest entry, or None when
+        the journal is empty. This is NOT head(): the base
+        class's head() is inherited unchanged and returns the
+        hash-chain head hash, per the base contract."""
+        self._reload()
+        if not self._entries:
+            return None
+        last = self._entries[-1]
+        return (last["new_cycle_seq"], last["new_payload_hash"])
+
+    def find_by_authorisation(self, authorisation_id):
+        self._reload()
+        for entry in self._entries:
+            if entry["authorisation_id"] == authorisation_id:
+                return dict(entry)
+        return None
+
+    # -- head rules (DESIGN-FINAL R3, merged final form) ------------
+
+    @staticmethod
+    def check_head(entries, signed) -> None:
+        """Raise AlreadyConsumedError / HeadRegressionError if
+        consuming ``signed`` against ``entries`` (a consumption
+        journal snapshot, in append order) would violate the
+        head rules; return None if it may proceed. Single-use
+        by authorisation_id is checked by the caller /
+        append_consumption, not here — this is the target and
+        old-pin rules only:
+
+        * candidate behind the head seq -> head regression;
+          candidate AT the head seq with the head's hash ->
+          already consumed (the movement is consumed, even
+          under a fresh authorisation_id); at the head seq
+          with a different hash -> head regression (fork);
+          ahead -> passes.
+        * old pin (when present): behind the head seq ->
+          head regression; at the head seq requires the
+          head's hash, else head regression; ahead of the
+          head -> passes (advance_pin movements the verifier
+          never saw are legitimate). No old pin -> no
+          old-pin check.
+        * initial_anchor against a non-empty journal ->
+          head regression (a first-ever anchor claim after
+          recorded consumptions is a contradiction)."""
+        if not entries:
+            return
+        last = entries[-1]
+        head_seq = last["new_cycle_seq"]
+        head_hash = last["new_payload_hash"]
+        if signed.reason == "initial_anchor":
+            raise HeadRegressionError(
+                "initial_anchor against a non-empty consumption "
+                "journal")
+        cand_seq = signed.candidate["cycle_seq"]
+        cand_hash = signed.candidate["payload_hash"]
+        if cand_seq < head_seq:
+            raise HeadRegressionError(
+                "candidate is behind the consumed head")
+        if cand_seq == head_seq:
+            if cand_hash == head_hash:
+                raise AlreadyConsumedError(
+                    "candidate target already consumed: "
+                    f"{cand_seq}")
+            raise HeadRegressionError(
+                "candidate forks the consumed head at its "
+                "sequence")
+        if signed.old_pin is not None:
+            old_seq = signed.old_pin["cycle_seq"]
+            old_hash = signed.old_pin["payload_hash"]
+            if old_seq < head_seq:
+                raise HeadRegressionError(
+                    "old pin is behind the consumed head")
+            if old_seq == head_seq and old_hash != head_hash:
+                raise HeadRegressionError(
+                    "old pin forks the consumed head at its "
+                    "sequence")
+
+    # -- the commit point --------------------------------------------
+
+    def append_consumption(self, envelope, *, recorded_at) -> dict:
+        """Consume one ceremony authorisation. THE commit
+        point for consumption: before this append lands
+        nothing is consumed; after it lands the
+        authorisation_id is spent whether or not anything
+        else succeeds.
+
+        Re-checks, against freshly reloaded entries on every
+        attempt of the bounded reload-retry loop (the
+        composition the issuance ledger uses): single-use by
+        authorisation_id (AlreadyConsumedError) and the R3
+        head rules (HeadRegressionError, or
+        AlreadyConsumedError for the same-target case). A
+        CorruptLedgerError from _save's freshness check means
+        a competitor landed between reload and save: reload,
+        re-check, retry — so the concurrent loser surfaces as
+        already-consumed, not corruption.
+
+        Scope note: the duplicate check here is
+        consumption-journal-only by design — this journal is
+        the authority. The signing-ledger mirror cross-check
+        (a rolled-back journal whose consumption survives in
+        the anchored mirror) is a mode-level responsibility,
+        performed by trust/verifier_main's ceremony_consume
+        mode before it calls this method; direct callers of
+        this method do not get that cross-check."""
+        from signing.ceremony_authorisation import \
+            SignedCeremonyAuthorisation
+        if not isinstance(envelope, SignedCeremonyAuthorisation):
+            raise LedgerError(
+                "can only consume a SignedCeremonyAuthorisation")
+        last_error = None
+        for _attempt in range(_APPEND_RETRY_ATTEMPTS):
+            self._reload()
+            if any(e["authorisation_id"] == envelope.authorisation_id
+                   for e in self._entries):
+                raise AlreadyConsumedError(
+                    "authorisation already consumed: "
+                    f"{envelope.authorisation_id}")
+            self.check_head(self._entries, envelope)
+            old_pin = envelope.old_pin
+            try:
+                return self._append(
+                    "consume", recorded_at,
+                    authorisation_id=envelope.authorisation_id,
+                    ceremony_id=envelope.ceremony_id,
+                    operator_id=envelope.operator_id,
+                    old_cycle_seq=(None if old_pin is None
+                                   else old_pin["cycle_seq"]),
+                    old_payload_hash=("" if old_pin is None
+                                      else old_pin["payload_hash"]),
+                    new_cycle_seq=envelope.candidate["cycle_seq"],
+                    new_payload_hash=envelope.candidate["payload_hash"],
+                    evidence_hash=envelope.evidence_hash,
+                    consumed_at=recorded_at)
+            except CorruptLedgerError as exc:
+                last_error = exc
+        raise last_error

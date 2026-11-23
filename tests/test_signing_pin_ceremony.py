@@ -24,11 +24,24 @@ required keyword of ``reanchor_pin``; the helper below supplies
 an explicit ``ceremony_history=()`` default IN THE HELPER ONLY
 so existing cases stay readable — the function itself has no
 default (pinned by test T1).
+
+Cycle 21: ``consume_authorisation`` is likewise a required
+keyword of ``reanchor_pin`` with no default (T1b). The helper's
+DEFAULT consumer is a REAL CeremonyConsumptionLedger-backed
+consumer over a fixture-scoped temp dir (one ledger per test
+fixture, reset in each consuming class's setUp, NOT per call),
+never an always-succeed fake (DESIGN-FINAL R12). Tests needing
+continuity share one consumer explicitly; tests whose semantics
+assumed no consumption pass a fresh fixture consumer explicitly
+and are noted in the build report. Fakes appear only where the
+test's subject is the fake itself (spy/counting consumers,
+T-Cc's commit-then-raise consumer).
 """
 import inspect
 import json
 import re
 import sys
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -53,6 +66,7 @@ from signing.pin_ceremony import (
     advance_pin, classify_verification, reanchor_pin,
     verify_ceremony_record)
 from signing.state_snapshot import sign_state_snapshot
+from trust.ledger import CeremonyConsumptionLedger, LedgerError
 
 KEY = make_signing_key(bytes(range(32, 64)))
 
@@ -203,6 +217,63 @@ def hand_authorisation(old, cand, *, reason, evidence_hash=EVIDENCE):
         evidence_hash=evidence_hash))
 
 
+class LedgerBackedConsumer:
+    """Test-local adapter (R12): the real consumer over a
+    fixture-scoped temp dir. Each call opens a FRESH
+    CeremonyConsumptionLedger instance over the same on-disk
+    dir, so a refusal can only come from what the journal
+    persisted — never from in-memory state carried between
+    calls. LedgerError is translated to SigningError, which
+    is reanchor_pin's refusal vocabulary (the production
+    adapter in trust/client.py does the same translation
+    for Verifier* errors)."""
+
+    def __init__(self, journal_dir):
+        self.journal_dir = Path(journal_dir)
+
+    def __call__(self, authorisation):
+        ledger = CeremonyConsumptionLedger(self.journal_dir)
+        try:
+            ledger.append_consumption(authorisation,
+                                      recorded_at=NOW)
+        except LedgerError as exc:
+            raise SigningError(str(exc)) from exc
+        return None
+
+    def entries(self):
+        return CeremonyConsumptionLedger(self.journal_dir).entries()
+
+
+_fixture_tempdirs = []
+_DEFAULT_CONSUMER = None
+
+
+def _fresh_fixture_consumer():
+    """A real ledger-backed consumer over a NEW fixture temp
+    dir (kept alive for the process). Used explicitly by
+    tests whose semantics assumed no prior consumption."""
+    td = tempfile.TemporaryDirectory()
+    _fixture_tempdirs.append(td)
+    return LedgerBackedConsumer(td.name)
+
+
+def _reset_fixture_consumer():
+    """Per-fixture reset (each consuming class's setUp): the
+    helper default becomes a real ledger-backed consumer over
+    a fresh fixture-scoped temp dir, shared by every
+    reanchor() call within the test."""
+    global _DEFAULT_CONSUMER
+    _DEFAULT_CONSUMER = _fresh_fixture_consumer()
+    return _DEFAULT_CONSUMER
+
+
+def _default_consumer():
+    global _DEFAULT_CONSUMER
+    if _DEFAULT_CONSUMER is None:
+        _reset_fixture_consumer()
+    return _DEFAULT_CONSUMER
+
+
 def reanchor(old, cand, **kw):
     kw.setdefault("signing_key", KEY)
     kw.setdefault("state_bytes", state_bytes(cand.cycle_seq))
@@ -220,6 +291,11 @@ def reanchor(old, cand, **kw):
     # readable; reanchor_pin itself has NO default for
     # ceremony_history — omitting it there is a TypeError (T1).
     kw.setdefault("ceremony_history", ())
+    # Helper-only default (R12): a REAL ledger-backed consumer
+    # over the fixture-scoped temp dir — never an
+    # always-succeed fake; reanchor_pin itself has NO default
+    # for consume_authorisation (T1b).
+    kw.setdefault("consume_authorisation", _default_consumer())
     if "authorisation" not in kw:
         # Mint now= MUST equal the ceremony's now= (one clock per
         # call): cycle-16 tests reanchor at LATER, and a 900 s TTL
@@ -278,6 +354,9 @@ class AdvanceTests(unittest.TestCase):
 
 
 class ReanchorTests(unittest.TestCase):
+    def setUp(self):
+        _reset_fixture_consumer()
+
     def test_gap_recovery_happy(self):
         a = snap(1)
         cand = snap(4, prev="f" * 64)
@@ -556,6 +635,9 @@ class ReanchorTests(unittest.TestCase):
 
 
 class CeremonyAuthorisationTests(unittest.TestCase):
+    def setUp(self):
+        _reset_fixture_consumer()
+
     """Cycle 19, Part C: envelope consumption in reanchor_pin."""
 
     def test_signing_key_as_authorisation_public_key_refused_on_type(self):
@@ -688,6 +770,9 @@ def snap_at(seq, prev="", when=LATER):
 
 
 class Cycle16HardeningTests(unittest.TestCase):
+    def setUp(self):
+        _reset_fixture_consumer()
+
     def _first_ceremony(self):
         a = snap(1)
         cand = snap(4, prev="f" * 64)
@@ -820,7 +905,8 @@ class Cycle16HardeningTests(unittest.TestCase):
         # Forked history: two verified records, same target seq,
         # different hashes.
         _, rec2 = reanchor(None, rival, reason="initial_anchor",
-                           evidence_hash="b" * 64, now=LATER)
+                           evidence_hash="b" * 64, now=LATER,
+                           consume_authorisation=_fresh_fixture_consumer())
         nxt = snap_at(7, prev="f" * 64)
         with self.assertRaises(SigningError) as cm:
             reanchor(new_pin, nxt, now=LATER,
@@ -844,7 +930,8 @@ class Cycle16HardeningTests(unittest.TestCase):
             verify_ceremony_record(rec, signing_key=KEY,
                                    expected_old_pin=None))
         _, rec_init = reanchor(None, snap(2), reason="initial_anchor",
-                               evidence_hash="b" * 64)
+                               evidence_hash="b" * 64,
+                               consume_authorisation=_fresh_fixture_consumer())
         self.assertEqual(
             verify_ceremony_record(rec_init, signing_key=KEY,
                                    expected_old_pin=None), ())
@@ -858,7 +945,8 @@ class Cycle16HardeningTests(unittest.TestCase):
         # pin carries no bindings for the recomputation to bind.
         minimal = {"cycle_seq": a.cycle_seq,
                    "payload_hash": a.payload_hash}
-        pin3, _ = reanchor(minimal, cand, evidence_hash="c" * 64)
+        pin3, _ = reanchor(minimal, cand, evidence_hash="c" * 64,
+                           consume_authorisation=_fresh_fixture_consumer())
         self.assertEqual(pin3, pin_of(cand))
         # strict_reasons must be a list/tuple, captured once.
         for bad in [{"chain_gap": 1}, {"chain_gap"}]:
@@ -867,6 +955,9 @@ class Cycle16HardeningTests(unittest.TestCase):
 
 
 class Cycle20ConsumptionTests(unittest.TestCase):
+    def setUp(self):
+        _reset_fixture_consumer()
+
     """Cycle 20, seat C: required ceremony_history, per-reason
     admissibility, the duplicate-consumption matrix, and the
     honest residual pins (design-c §6 T1–T8 as amended by
@@ -1005,38 +1096,43 @@ class Cycle20ConsumptionTests(unittest.TestCase):
                       str(cm.exception))
 
     def test_consumption_replay_with_stale_history_succeeds_named_residual_protected_head(self):
-        """T7 — HONEST RESIDUAL PIN, not a feature. The same
-        envelope twice, the second call supplying the STALE
-        history (the same () as the first call) SUCCEEDS. This
-        pins design-c §5 / F1 (narrowed, still open): with a
-        stale or honestly-empty history the replay succeeds
-        within TTL; the protected monotonic consumption head
-        remains the fix. GPT's cycles 14–16 stale-history
-        condition is explicitly NOT met by this cycle."""
+        """T7' — the cycle-20 residual is CLOSED by the head.
+        (This test was the cycle-20 residual pin: it asserted
+        the replay SUCCEEDED with stale history. Cycle 21
+        flips it.) The same envelope twice, the second call
+        supplying the STALE history (the same () as the first
+        call) REFUSES — via the consumer, not the history:
+        the second call goes through a FRESH
+        CeremonyConsumptionLedger instance over the same
+        fixture dir, so the already-consumed refusal can only
+        come from the on-disk journal."""
         a, cand = snap(1), snap(4, prev="f" * 64)
         auth = mint_authorisation(pin_of(a), cand)
         pin1, rec1 = reanchor(pin_of(a), cand, authorisation=auth,
                               ceremony_history=())
-        pin2, rec2 = reanchor(pin_of(a), cand, authorisation=auth,
-                              ceremony_history=())
-        self.assertEqual(pin2, pin1)
-        self.assertEqual(rec2.authorisation_id,
-                         rec1.authorisation_id)
+        fresh_instance_consumer = LedgerBackedConsumer(
+            _default_consumer().journal_dir)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     ceremony_history=(),
+                     consume_authorisation=fresh_instance_consumer)
+        self.assertIn("already consumed", str(cm.exception))
 
     def test_t8_regression_scenario_stale_history_returns_regressed_pin(self):
-        """T8 — Gemini's regression attack, concrete, with the
-        concession stated plainly: this test concedes the
-        stale-history leg of the external consumption-replay
-        finding; it is pinned so the concession is executable,
-        not rhetorical. Consume seq1→seq4, advance the real pin
-        to seq6 by ordinary advance_pin steps (which leave NO
-        trace in the ceremony history), then replay the original
-        envelope with old_pin restaged to the seq-1 pin:
-        updated history refuses (replayed target); STALE
-        history SUCCEEDS and returns the seq-4 pin — asserted
-        as the regression value itself, behind the caller's
-        seq-6 pin. Stopping the stale leg is the protected
-        head's job, not this function's."""
+        """T8' — Gemini's regression attack, flipped by cycle
+        21. (This test was the cycle-20 regression pin: it
+        asserted the stale-history leg SUCCEEDED and returned
+        the regressed pin.) Consume seq1->seq4, advance the
+        real pin to seq6 by ordinary advance_pin steps (which
+        leave NO trace in the ceremony history), then replay
+        the original envelope with old_pin restaged to the
+        seq-1 pin: updated history refuses (replayed target,
+        the history leg, as before); stale history NOW
+        refuses via the consumer (already-consumed) and NO
+        regressed pin is returned. Added leg: a NEW envelope
+        for old=seq1/candidate=seq5 (head=4, live pin 6)
+        refuses at the consumer with the head-regression
+        refusal (old pin behind the consumed head)."""
         a = snap(1)
         cand = snap(4, prev="f" * 64)
         auth = mint_authorisation(pin_of(a), cand)
@@ -1046,19 +1142,29 @@ class Cycle20ConsumptionTests(unittest.TestCase):
         s6 = snap(6, prev=s5.payload_hash)
         pin6 = advance_pin(advance_pin(pin4, s5, ()), s6, ())
         self.assertEqual(pin6["cycle_seq"], 6)
-        # Updated history: refused.
+        # Updated history: refused (history leg, as before).
         with self.assertRaises(SigningError) as cm:
             reanchor(pin_of(a), cand, authorisation=auth,
                      ceremony_history=[rec1])
         self.assertIn("already a ceremonied target",
                       str(cm.exception))
-        # Stale history: succeeds, returning the REGRESSED pin.
-        regressed, _rec = reanchor(pin_of(a), cand,
-                                   authorisation=auth,
-                                   ceremony_history=())
-        self.assertEqual(regressed, pin_of(cand))
-        self.assertEqual(regressed["cycle_seq"], 4)
-        self.assertLess(regressed["cycle_seq"], pin6["cycle_seq"])
+        # Stale history: NOW refused via the consumer, and no
+        # regressed pin is returned (the call raises).
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     ceremony_history=())
+        self.assertIn("already consumed", str(cm.exception))
+        # Fresh-envelope leg: new envelope, old=seq1,
+        # candidate=seq5, head=4, live pin 6 — refuses at the
+        # consumer with the head-regression refusal.
+        cand5 = snap(5, prev="f" * 64)
+        auth5 = mint_authorisation(pin_of(a), cand5,
+                                   evidence_hash="f" * 64)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand5, authorisation=auth5,
+                     evidence_hash="f" * 64, ceremony_history=())
+        self.assertIn("old pin is behind the consumed head",
+                      str(cm.exception))
 
     def test_v1_golden_envelope_refused_with_version_wording(self):
         # R6: v1 refusal is EXPLICIT. A literal cycle-19 envelope
@@ -1090,6 +1196,225 @@ class Cycle20ConsumptionTests(unittest.TestCase):
         a, cand = snap(1), snap(4, prev="f" * 64)
         with self.assertRaises(SigningError):
             reanchor(pin_of(a), cand, authorisation=v1)
+
+
+
+class _CountingConsumer:
+    """Spy consumer: records every invocation; optionally
+    delegates to a real consumer. Used only where the test's
+    subject is the invocation discipline itself (R12)."""
+
+    def __init__(self, delegate=None):
+        self.calls = []
+        self._delegate = delegate
+
+    def __call__(self, authorisation):
+        self.calls.append(authorisation)
+        if self._delegate is not None:
+            return self._delegate(authorisation)
+        return None
+
+
+class Cycle21ConsumptionTests(unittest.TestCase):
+    """Cycle 21, seat C: required consume_authorisation (T1b),
+    invocation discipline (spy/counting consumers), and the
+    commit-then-raise crash contract (T-Cc)."""
+
+    def setUp(self):
+        _reset_fixture_consumer()
+
+    def _direct_kwargs(self, old, cand):
+        return dict(
+            signing_key=KEY,
+            state_bytes=state_bytes(cand.cycle_seq),
+            calibration_bytes=CAL,
+            expected_signer_id=SIGNER,
+            operator_id=OPERATOR,
+            reason="chain_gap_recovery",
+            strict_reasons=("chain_gap",),
+            evidence_hash=EVIDENCE,
+            authorisation=mint_authorisation(old, cand),
+            authorisation_public_key=VERIFIER_PUBLIC_KEY,
+            expected_verifier_signer_id=VERIFIER_SIGNER,
+            ceremony_history=(),
+            now=NOW)
+
+    def test_t1b_consume_authorisation_keyword_is_required(self):
+        # T1b: no default — omission is a TypeError at the
+        # call site, mirroring T1's ceremony_history pin.
+        param = inspect.signature(
+            reanchor_pin).parameters["consume_authorisation"]
+        self.assertIs(param.default, inspect.Parameter.empty)
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        with self.assertRaises(TypeError):
+            reanchor_pin(pin_of(a), cand,
+                         **self._direct_kwargs(pin_of(a), cand))
+
+    def test_t1b_none_and_noncallable_refuse_before_envelope_verification(self):
+        # T1b ordering: explicit None / a non-callable refuses
+        # EARLY, before envelope verification — pinned with an
+        # EXPIRED envelope (the T2 construction): the refusal
+        # reports the omission, never the expiry.
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand)  # minted at NOW
+        for bad in (None, 42, "consumer"):
+            with self.assertRaises(SigningError, msg=repr(bad)) as cm:
+                reanchor(pin_of(a), cand, authorisation=auth,
+                         consume_authorisation=bad,
+                         now="2026-11-20T12:16:00+00:00")
+            self.assertIn("fail-closed on omission",
+                          str(cm.exception), repr(bad))
+
+    def test_spy_consumer_exactly_one_invocation_on_success(self):
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        spy = _CountingConsumer(delegate=_default_consumer())
+        new_pin, _rec = reanchor(pin_of(a), cand,
+                                 consume_authorisation=spy)
+        self.assertEqual(new_pin, pin_of(cand))
+        self.assertEqual(len(spy.calls), 1)
+
+    def test_spy_consumer_zero_invocations_on_local_refusals(self):
+        # Zero invocations on each local refusal class: bad
+        # (expired) envelope, binding mismatch, history
+        # refusal, a strict-recomputation refusal (tampered
+        # candidate), the relation gates, the strict-shape
+        # gate, the evidence-independence refusal, and a
+        # no-pin bare-attestation refusal (rev-r4 MEDIUM-1).
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        # (i) bad envelope: expired.
+        spy = _CountingConsumer()
+        auth = mint_authorisation(pin_of(a), cand)
+        with self.assertRaises(SigningError):
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     consume_authorisation=spy,
+                     now="2026-11-20T12:16:00+00:00")
+        self.assertEqual(spy.calls, [])
+        # (ii) binding mismatch: envelope for another operator.
+        spy = _CountingConsumer()
+        auth9 = mint_authorisation(pin_of(a), cand,
+                                   operator_id="operator-9")
+        with self.assertRaises(SigningError):
+            reanchor(pin_of(a), cand, authorisation=auth9,
+                     consume_authorisation=spy)
+        self.assertEqual(spy.calls, [])
+        # (iii) history refusal: replay with updated history.
+        _pin, rec = reanchor(pin_of(a), cand)
+        spy = _CountingConsumer()
+        with self.assertRaises(SigningError):
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     ceremony_history=[rec],
+                     consume_authorisation=spy)
+        self.assertEqual(spy.calls, [])
+        # (iv) relation/recomputation refusal: tampered
+        # candidate signature.
+        spy = _CountingConsumer()
+        tampered = replace(snap(4, prev="f" * 64), signature="0" * 64)
+        with self.assertRaises(SigningError):
+            reanchor(pin_of(a), tampered, consume_authorisation=spy)
+        self.assertEqual(spy.calls, [])
+        # (v) relation gates. The chained-successor and
+        # successor-fork legs are refused by the envelope's
+        # gap-only payload validation (candidate must be at
+        # least old+2) before the relation gate itself — the
+        # re-scope the cycle-15 tests record — while
+        # gap_prev_is_pin carries a valid gap envelope and
+        # refuses AT the relation gate. All three are local
+        # refusals, so the consumer is never invoked.
+        spy = _CountingConsumer()
+        nxt = snap(2, prev=a.payload_hash)
+        auth_succ = hand_authorisation(
+            pin_of(a), nxt, reason="chain_gap_recovery")
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), nxt, authorisation=auth_succ,
+                     consume_authorisation=spy)
+        self.assertIn("malformed_payload", str(cm.exception))
+        self.assertEqual(spy.calls, [])
+        spy = _CountingConsumer()
+        fork = snap(2, prev="f" * 64)
+        auth_fork = hand_authorisation(
+            pin_of(a), fork, reason="chain_gap_recovery")
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), fork, authorisation=auth_fork,
+                     consume_authorisation=spy)
+        self.assertIn("malformed_payload", str(cm.exception))
+        self.assertEqual(spy.calls, [])
+        spy = _CountingConsumer()
+        gap_prev = snap(4, prev=a.payload_hash)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), gap_prev,
+                     consume_authorisation=spy)
+        self.assertIn(
+            "candidate claims the pin as its immediate "
+            "predecessor", str(cm.exception))
+        self.assertEqual(spy.calls, [])
+        # (vi) strict-shape gate: strict_reasons of a
+        # non-list/tuple type (a bare string) refuses before
+        # strict recomputation — and before consumption.
+        spy = _CountingConsumer()
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, strict_reasons="chain_gap",
+                     consume_authorisation=spy)
+        self.assertIn(
+            "requires a strict verification result of exactly "
+            "('chain_gap',)", str(cm.exception))
+        self.assertEqual(spy.calls, [])
+        # (vii) evidence-independence refusal: evidence_hash
+        # equal to a candidate hash (the candidate's state
+        # hash — the mintable leg that reaches the step-5
+        # non-equality check itself).
+        spy = _CountingConsumer()
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand,
+                     evidence_hash=cand.state_sha256,
+                     consume_authorisation=spy)
+        self.assertIn(
+            "ceremony evidence must be independent of the "
+            "candidate", str(cm.exception))
+        self.assertEqual(spy.calls, [])
+        # (viii) no-pin bare-attestation refusal: a lost_pin
+        # candidate failing attestation bindings (tampered
+        # signature). No strict recomputation runs on the
+        # no-pin path, so the bare verifier is the last local
+        # gate before consumption — and it refuses first.
+        spy = _CountingConsumer()
+        bad_cand = replace(snap(3), signature="0" * 64)
+        auth_lost = mint_authorisation(
+            None, bad_cand, reason="lost_pin", old_pin=None)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(None, bad_cand, reason="lost_pin",
+                     authorisation=auth_lost,
+                     consume_authorisation=spy)
+        self.assertIn("candidate fails attestation bindings",
+                      str(cm.exception))
+        self.assertEqual(spy.calls, [])
+
+    def test_tcc_commit_then_raise_consumer_burns_envelope(self):
+        # T-Cc: a fake consumer backed by a REAL ledger that
+        # commits, then raises (the lost-response crash,
+        # C-c). reanchor_pin returns nothing; a second attempt
+        # refuses already-consumed; exactly one consumption
+        # entry exists.
+        consumer = _fresh_fixture_consumer()
+        state = {"committed": False}
+
+        def commit_then_raise(authorisation):
+            if not state["committed"]:
+                consumer(authorisation)  # the durable commit
+                state["committed"] = True
+                raise SigningError("verifier timeout after commit")
+            return consumer(authorisation)
+
+        a, cand = snap(1), snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand)
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     consume_authorisation=commit_then_raise)
+        self.assertIn("timeout after commit", str(cm.exception))
+        with self.assertRaises(SigningError) as cm:
+            reanchor(pin_of(a), cand, authorisation=auth,
+                     consume_authorisation=commit_then_raise)
+        self.assertIn("already consumed", str(cm.exception))
+        self.assertEqual(len(consumer.entries()), 1)
 
 
 if __name__ == "__main__":

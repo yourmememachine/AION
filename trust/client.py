@@ -58,8 +58,10 @@ from pathlib import Path
 from signing.attestation import attestation_envelope_from_dict
 from signing.ceremony_authorisation import (
     CeremonyPublicKey,
+    SignedCeremonyAuthorisation,
     authorisation_id_for,
     ceremony_authorisation_envelope_from_dict,
+    ceremony_authorisation_envelope_to_dict,
     verify_ceremony_authorisation,
 )
 from signing.gate_decision import (
@@ -75,6 +77,7 @@ from trust.attestation import PAYLOAD_KEYS, answers_hash_for, \
     rebuild_eval_payload
 from trust.errors import (
     VerifierConfigError,
+    VerifierError,
     VerifierProtocolError,
     VerifierTimeout,
     VerifierUnavailable,
@@ -569,3 +572,120 @@ class VerifierClient:
                 "verify_envelope result is malformed")
         return Verdict(valid=result["valid"],
                        reasons=tuple(result["reasons"]))
+
+    def ceremony_consume(self, envelope_dict) -> dict:
+        """Consume a ceremony authorisation at the verifier.
+
+        The body is exactly ``{"signed_authorisation":
+        envelope_dict}`` (the ceremony_authorise wire
+        precedent). The verifier re-verifies the envelope
+        under its own derived public key, checks single-use
+        against its consumption journal, checks issuance
+        presence and the head rules, and commits the
+        consumption-journal append before responding.
+
+        Head-vs-pin-head narrowing: the head is a ceremony
+        head; it sees consumptions only; advance_pin
+        movements never pass through the verifier.
+
+        The result's exact key set is validated, and its
+        echoes must match the envelope THIS client sent —
+        authorisation_id, ceremony_id, and the candidate
+        seq/hash (as new_cycle_seq / new_payload_hash);
+        consumption_seq must be an int >= 1. Any mismatch is
+        a VerifierProtocolError: a receipt that does not bind
+        to the sent envelope is a protocol failure, and the
+        envelope is treated as burned (see ceremony_consumer).
+
+        Operator claim, narrowed as in ceremony_authorise:
+        this client asserts an envelope; it does not
+        authenticate the operator the envelope names, and
+        consumption checks no operator allowlist — allowlist
+        membership is an issuance fact, not a consumption
+        gate. Exit-3 state refusals (already-consumed,
+        not-issued, head regression, expired) surface as
+        VerifierConfigError via _run; for this mode that
+        class carries ceremony state refusals, and the
+        correct operator response is a new ceremony, not a
+        config fix."""
+        if not isinstance(envelope_dict, dict):
+            raise VerifierProtocolError(
+                "ceremony_consume requires the envelope dict")
+        try:
+            sent_id = envelope_dict["authorisation_id"]
+            sent_ceremony = envelope_dict["ceremony_id"]
+            sent_candidate = envelope_dict["candidate"]
+            sent_seq = sent_candidate["cycle_seq"]
+            sent_hash = sent_candidate["payload_hash"]
+        except (KeyError, TypeError) as exc:
+            raise VerifierProtocolError(
+                "ceremony_consume envelope dict is missing its "
+                "authorisation_id, ceremony_id or candidate") from exc
+        result = self._run(
+            "ceremony_consume",
+            {"signed_authorisation": envelope_dict})
+        if set(result) != {"authorisation_id", "ceremony_id",
+                           "consumption_seq", "new_cycle_seq",
+                           "new_payload_hash"}:
+            raise VerifierProtocolError(
+                "ceremony_consume result is malformed")
+        if result["authorisation_id"] != sent_id \
+                or result["ceremony_id"] != sent_ceremony \
+                or result["new_cycle_seq"] != sent_seq \
+                or result["new_payload_hash"] != sent_hash:
+            raise VerifierProtocolError(
+                "ceremony_consume result does not echo the "
+                "envelope sent (authorisation_id, ceremony_id "
+                "or candidate mismatch)")
+        seq = result["consumption_seq"]
+        if not isinstance(seq, int) or isinstance(seq, bool) \
+                or seq < 1:
+            raise VerifierProtocolError(
+                "ceremony_consume consumption_seq is not an "
+                "int >= 1")
+        return result
+
+    def ceremony_consumer(self):
+        """Return the production ``consume_authorisation``
+        callable for ``signing.pin_ceremony.reanchor_pin``.
+
+        The returned callable takes one argument — the
+        SignedCeremonyAuthorisation — converts it via
+        ceremony_authorisation_envelope_to_dict, calls
+        ceremony_consume, returns None on success, and
+        translates any Verifier* exception into SigningError
+        (cause chained), which is reanchor_pin's refusal
+        vocabulary. A non-envelope argument raises
+        SigningError from the conversion itself.
+
+        Never auto-retry (cycle 21, R7): Consumption is
+        committed at the verifier — a fsync'd
+        consumption-journal append — before reanchor_pin
+        returns anything. A crash after the commit but
+        before adoption leaves the authorisation burned and
+        the pin unmoved; a lost or ambiguous response is
+        treated as burned; the client never retries a consume
+        automatically. Recovery is a new ceremony (new
+        ceremony_id, new evidence), never an un-consume.
+        This callable therefore makes exactly one consume
+        attempt per invocation.
+
+        Head-vs-pin-head narrowing: the head the consumer
+        enforces is a ceremony head; it sees consumptions
+        only; advance_pin movements never pass through the
+        verifier."""
+        def _consume(authorisation):
+            if not isinstance(authorisation,
+                              SignedCeremonyAuthorisation):
+                raise SigningError(
+                    "consume_authorisation requires a "
+                    "SignedCeremonyAuthorisation")
+            envelope = ceremony_authorisation_envelope_to_dict(
+                authorisation)
+            try:
+                self.ceremony_consume(envelope)
+            except VerifierError as exc:
+                raise SigningError(
+                    f"ceremony consumption refused: {exc}") from exc
+            return None
+        return _consume

@@ -26,7 +26,8 @@ MAX_RESPONSE_BYTES = 1 << 20      # 1 MiB
 MAX_STDERR_BYTES = 64 << 10       # 64 KiB, capture-truncate
 
 MODES = ("gate", "sealed_eval", "verify_envelope", "submit_claim",
-         "issue_attestation", "ceremony_authorise")
+         "issue_attestation", "ceremony_authorise",
+         "ceremony_consume")
 
 _REQUEST_ID_RE = re.compile(r"[a-z0-9_-]{1,64}")
 _REQUEST_KEYS = {"v", "request_id", "mode", "body"}

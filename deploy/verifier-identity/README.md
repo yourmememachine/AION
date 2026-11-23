@@ -16,7 +16,7 @@ Created by `setup.sh` (root, idempotent):
 | Path | Owner / mode | Contents |
 |---|---|---|
 | `/var/lib/aion-verifier/home/` | `aion-verifier`, 0700 | `AION_VERIFIER_HOME`: the signing-ledger directory (`signing-ledger.json`) |
-| `/var/lib/aion-verifier/keys/` | `aion-verifier`, 0700 | The signing key file (`gate.key`, itself exactly 0600 — `load_signing_key` refuses any other mode) |
+| `/var/lib/aion-verifier/keys/` | `aion-verifier`, 0700 | The signing key file (`gate.key`, itself owner-only — `load_signing_key` accepts exactly modes {0400, 0600} under the shared owner-only predicate: no group/world bits, no setuid/setgid/sticky bits, owner-read required; it refuses any other mode) |
 | `/var/lib/aion-verifier/anchors/` | `aion-verifier`, 0700 | Ledger anchor files (`trust/anchoring.py`), e.g. `signing.anchor.json` |
 | `/var/lib/aion-verifier/registry/` | `aion-verifier`, 0700 | The verifier's own copy of the sealed registry (see below) |
 | `/var/lib/aion-verifier/evidence/` | `root`:`aion-verifier`, 0750 | Ceremony evidence SOURCE artifacts (`AION_CEREMONY_EVIDENCE_DIR`, cycle 20): root provisions real files here (no symlinks — the verifier refuses them); the verifier reads, never writes. Retained copies of hashed evidence live separately, under `home/ceremony-evidence/` |
@@ -248,6 +248,26 @@ announced here, identical in kind to the cycle-19
 `AION_CEREMONY_OPERATORS` migration. Seed rotation is the same
 act: new seed → new `pub-…` pin everywhere → all in-flight
 envelopes dead within 900 s.
+
+**Ceremony consumption (cycle 21).** Issuance alone no longer
+spends an authorisation: the `ceremony_consume` verifier mode
+records the single use of an issued envelope in the
+verifier-owned consumption journal
+(`home/ceremony-consumptions.json`), mirrors it into the
+signing ledger, and enforces the monotonic consumption head
+before any pin movement is adopted. Consumption is committed
+at the verifier before the ceremony returns anything, and the
+consumption journal lives in the verifier home alongside the
+other journals — no new configuration is needed for the mode
+beyond the cycle-20 ceremony provisioning above.
+**Burned-but-unmoved recovery:** because the consumption
+commit precedes pin adoption, a crash or a lost response
+after the commit leaves the authorisation burned and the pin
+unmoved — the consumed target is permanently spent and is
+never re-anchorable. Recovery is a NEW ceremony (new
+`ceremony_id`, new evidence bundle) whose candidate is ahead
+of the consumption head; there is no un-consume, and the
+client never retries a consume automatically.
 
 **Flag-day drain procedure (v1 → v2 ceremony authorisations).**
 Cycle 20 replaces the ceremony envelope's HMAC with Ed25519

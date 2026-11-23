@@ -51,10 +51,15 @@ them, not because naming them enforces them:
 - FRESH-PIN: ``old_pin`` must be read from the caller's pin
   store at the start of this ceremony attempt, not cached,
   reconstructed, or replayed from an earlier attempt.
-- COMPLETE-HISTORY: ``ceremony_history`` must contain every
-  ceremony record the caller has ever accepted, in particular
-  including the record of any prior consumption of this same
-  envelope.
+- COMPLETE-HISTORY (cycle 21: demoted from a security
+  precondition to an audit obligation): ``ceremony_history``
+  should contain every ceremony record the caller has ever
+  accepted, in particular including the record of any prior
+  consumption of this same envelope. Since cycle 21 the
+  history is an audit/consistency input that can only refuse,
+  never grant; the verifier's consumption head is
+  authoritative on any discrepancy (see the cycle-21 section
+  below).
 - ATOMIC-ADOPTION: on success the caller must persist the
   returned pin and append the returned record to its history
   as one step, before any further ceremony or advance; on
@@ -150,11 +155,21 @@ Honest limits:
   Issuance accounting, consumption enforcement and anchored
   provenance are three separate claims: issuance-side
   single-use is accounting at the verifier (it proves the pair
-  was burned when the envelope was minted); it is NOT
-  consumption enforcement (nothing burns when ``reanchor_pin``
-  runs — see the consumption limit below) and NOT anchored
-  provenance (the anchored store carries neither the evidence
-  hash nor the operator id).
+  was burned when the envelope was minted); it is NOT itself
+  consumption enforcement. Consumption enforcement is the
+  separate cycle-21 mechanism (see the cycle-21 section
+  below): under the mandated production wiring,
+  ``reanchor_pin`` invokes the required
+  ``consume_authorisation`` callable exactly once, after
+  every local check and before the ceremony record is
+  constructed, and the verifier-backed consumer burns the
+  authorisation in the verifier's consumption journal before
+  any record exists. That protection holds only under that
+  wiring — a caller-supplied no-op callable gets no
+  protection (the R5 integrated-system wording in the
+  cycle-21 section below). Issuance single-use is also NOT
+  anchored provenance (the anchored store carries neither
+  the evidence hash nor the operator id).
 - The returned pin is the ordinary pin shape, so downstream
   continuity looks clean unless the caller retains and checks
   the ceremony record; nothing in the pin itself marks the jump.
@@ -213,41 +228,69 @@ whose provenance this module could not prove — it is now
 bound, attributed and issuance-side single-use as described
 above, and since cycle 20 the verifier resolves and hashes
 the artefact itself at issuance.
-The REMAINING limits, stated plainly: consumption single-use
-is NOT achieved by this cycle — F1 is narrowed, still open.
-The verifier's ledger burns the (ceremony_id, evidence_hash)
-pair at ISSUANCE, not at consumption. Requiring
-``ceremony_history`` makes omission refuse (fail-closed on
-omission) and makes a second consumption refuse against a
-history the caller has updated with the first consumption's
-record; against a stale history — the same pre-consumption
-history supplied twice, or an honestly-empty history asserted
-twice — the same envelope presented to ``reanchor_pin`` twice
-within its TTL succeeds twice and returns the same pin again,
-and if the caller's real pin has since moved (by ceremony or
-by ``advance_pin``, which leaves no trace in the history at
-all) adopting that return regresses the pin. No in-process
-check can distinguish a stale history from a complete one,
-because the history is caller-supplied input and this module
-has no pin store, no ledger access, and no monotonic counter
-of its own. The real fix is unchanged from cycle 19's F1: a
-protected monotonic consumption head — a store outside the
-ceremony caller's control that records each consumed
-authorisation monotonically and is consulted, or written,
-atomically at consumption; its location remains an
-owner-level store decision. Until it lands, the cycles 14–16
-re-review condition on consumption (duplicate consumption
-fails with no/stale history) is NOT met for the stale-history
-leg — cycle 20 meets it only for the no-history leg — and no
-wording in this module may imply otherwise. No
-consumption-side ledger-presence check exists in-process (the
-ceremony cannot read the verifier's ledgers — limit M5); the
-ceremony journal's reuse memory is rollback-vulnerable until
-the follow-up ``ceremony-journal-anchoring`` lands (reuse is
-prevented against an intact journal; after a rollback it is
+The REMAINING limits, stated plainly (cycle 21): consumption
+single-use is achieved ONLY as an integrated-system property
+(see below), not by this function alone. The verifier's
+ledger burns the (ceremony_id, evidence_hash) pair at
+ISSUANCE, and — since cycle 21 — the verifier's consumption
+journal burns the authorisation at CONSUMPTION, consulted
+through the required ``consume_authorisation`` callable.
+
+Cycle 21 — consumption head and the integrated-system claim:
+
+- reanchor_pin is no longer an offline function — a
+  successful ceremony requires a live verifier round-trip
+  inside the envelope's TTL and fails closed when the
+  verifier is unreachable; every existing direct caller
+  breaks with TypeError until it supplies the keyword, and
+  that flag-day breakage is intended.
+- Single-use consumption and pin non-regression are
+  properties of the INTEGRATED SYSTEM under its production
+  wiring — authorise via VerifierClient, re-anchor with
+  the verifier-backed consumer, adopt the returned pin
+  atomically — not properties of reanchor_pin for an
+  arbitrary caller-supplied callable. A no-op callable gets
+  no protection, exactly as a caller supplying its own
+  signing key or a wrong public-key pin gets none; the
+  callable is not materially different from the inputs
+  reanchor_pin already trusts.
+- Crash-consistency contract: Consumption is committed at
+  the verifier — a fsync'd consumption-journal append —
+  before reanchor_pin returns anything. There is no
+  execution path in the integrated system in which a pin
+  movement succeeds without its consumption record durably
+  committed first. A crash after the commit but before
+  adoption leaves the authorisation burned and the pin
+  unmoved; a lost or ambiguous response is treated as
+  burned; the client never retries a consume automatically.
+  Recovery is a new ceremony (new ceremony_id, new
+  evidence), never an un-consume.
+- ``ceremony_history`` after the head: the history is an
+  audit/consistency input that can only refuse, never
+  grant; the verifier's consumption head is authoritative
+  on any discrepancy. A stale or empty history no longer
+  enables replay when the production consumer is wired,
+  because the consumer refuses already-consumed and
+  head-regression cases the history cannot see.
+
+Issuance-journal rollback residual (the ceremony
+authorisation — ISSUANCE — journal; NOT the consumption
+journal): no consumption-side ledger-presence check exists
+in-process (the ceremony cannot read the verifier's ledgers
+— limit M5); the issuance journal's reuse memory is
+rollback-vulnerable until the follow-up
+``ceremony-journal-anchoring`` lands (reuse is prevented
+against an intact issuance journal; after a rollback it is
 detectable only for same-ceremony_id reuse, and otherwise
-only by audit against retained envelopes — not prevented by
-one); nothing here persists the pin and the record atomically
+only by audit against retained envelopes — not prevented).
+The consumption journal's own rollback residual is
+different (R10, stated precisely in
+``CeremonyConsumptionLedger``'s docstring): a rollback of
+the verifier home cannot resurrect a consumed envelope
+whose consumption is mirrored in the anchored signing
+ledger (production), but can lower the enforced head for
+never-consumed envelopes. Nothing here persists the pin
+and the record atomically
 (ATOMIC-ADOPTION above is the caller's duty, not a property
 of this function); and the ceremony RECORD's MAC still uses
 the snapshot signing key, symmetric as elsewhere in
@@ -551,6 +594,7 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
                  authorisation_public_key: CeremonyPublicKey,
                  expected_verifier_signer_id,
                  ceremony_history,
+                 consume_authorisation,
                  strict_reasons=None,
                  now=None) \
         -> tuple[dict, PinCeremonyRecord]:
@@ -574,7 +618,53 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     keyword (cycle 20): omitting it is a TypeError at the call
     site, and an explicit ``None`` refuses early, before
     envelope verification, for every reason — fail-closed on
-    omission."""
+    omission.
+
+    Cycle 21: ``consume_authorisation`` is a REQUIRED keyword
+    with the same discipline — omitting it is a TypeError, and
+    an explicit ``None`` or a non-callable refuses early,
+    before envelope verification. It is a one-argument
+    callable taking the SignedCeremonyAuthorisation, returning
+    None on success and raising SigningError on any refusal.
+    It is invoked exactly once, after ALL local checks and
+    immediately before the ceremony record payload is
+    constructed; a consumer exception propagates as a refusal
+    and nothing is returned.
+
+    reanchor_pin is no longer an offline function — a
+    successful ceremony requires a live verifier round-trip
+    inside the envelope's TTL and fails closed when the
+    verifier is unreachable; every existing direct caller
+    breaks with TypeError until it supplies the keyword, and
+    that flag-day breakage is intended.
+
+    Crash-consistency contract: Consumption is committed at
+    the verifier — a fsync'd consumption-journal append —
+    before reanchor_pin returns anything. There is no
+    execution path in the integrated system in which a pin
+    movement succeeds without its consumption record durably
+    committed first. A crash after the commit but before
+    adoption leaves the authorisation burned and the pin
+    unmoved; a lost or ambiguous response is treated as
+    burned; the client never retries a consume automatically.
+    Recovery is a new ceremony (new ceremony_id, new
+    evidence), never an un-consume.
+
+    Claim wording: single-use consumption and pin
+    non-regression are properties of the INTEGRATED SYSTEM
+    under its production wiring — authorise via
+    VerifierClient, re-anchor with the verifier-backed
+    consumer, adopt the returned pin atomically — not
+    properties of reanchor_pin for an arbitrary
+    caller-supplied callable. A no-op callable gets no
+    protection, exactly as a caller supplying its own signing
+    key or a wrong public-key pin gets none; the callable is
+    not materially different from the inputs reanchor_pin
+    already trusts.
+
+    ``ceremony_history`` is an audit/consistency input that
+    can only refuse, never grant; the verifier's consumption
+    head is authoritative on any discrepancy."""
     if not isinstance(signing_key, SigningKey) \
             or signing_key.key_id != key_id_for(signing_key.key):
         raise SigningError("signing key is inconsistent")
@@ -605,6 +695,20 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
         raise SigningError(
             "authorisation public key is inconsistent: its key_id "
             "does not match its public key (key_id_inconsistent)")
+    # (1b) CONSUMPTION PRESENCE (cycle 21): the type check sits
+    # with the other type gates above. An explicit
+    # consume_authorisation=None, or a non-callable, refuses
+    # HERE — before envelope verification, mirroring the
+    # ceremony_history=None ordering below — for every reason.
+    # (Omitting the keyword entirely is a TypeError: the
+    # parameter has no default.)
+    if consume_authorisation is None or not callable(consume_authorisation):
+        raise SigningError(
+            "consume_authorisation is required: reanchor_pin is "
+            "fail-closed on omission, so consume_authorisation=None "
+            "or a non-callable refuses for every reason; supply the "
+            "verifier-backed consumer (see "
+            "VerifierClient.ceremony_consumer)")
     # (2) HISTORY PRESENCE (cycle 20): an explicit
     # ceremony_history=None refuses HERE — before envelope
     # verification, so the fail-closed-on-omission refusal is
@@ -792,6 +896,22 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     if reasons != ():
         raise SigningError(
             f"candidate fails attestation bindings: {list(reasons)}")
+    # (last fallible step, cycle 21) CONSUMPTION: every local
+    # check has passed — type gates, history presence and
+    # content, envelope verification, exact binding, relation
+    # gates, strict recomputation, bare attestation
+    # verification — so the consumer is invoked exactly once,
+    # immediately before the ceremony record payload is
+    # constructed. Any exception propagates as a refusal
+    # (a non-SigningError is converted, cause chained) and
+    # nothing is returned: no pin, no record.
+    try:
+        consume_authorisation(authorisation)
+    except SigningError:
+        raise
+    except Exception as exc:
+        raise SigningError(
+            f"ceremony consumption failed: {exc}") from exc
     performed_at = _normalise_time(moment, "performed_at")
     _parse_time(performed_at, "performed_at")
     payload = {

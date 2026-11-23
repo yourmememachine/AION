@@ -46,7 +46,8 @@ envelope. The boundary is key placement, not cryptography, and key
 placement is a deployment requirement this code only partly
 enforces: generate/load refuse a key inside this repo by default
 (caller-supplied forbidden_roots extend that), refuse symlinks in
-the path, and require a 0600 file — but make_signing_key accepts raw
+the path, and require an owner-only, owner-readable key file
+(0400 or 0600; generate creates 0600) — but make_signing_key accepts raw
 bytes with no placement check at all, and a 0600 file is readable by
 any code running as the same OS user, so a separate OS user (or
 equivalent isolation) for the signer is REQUIRED for a boundary,
@@ -94,6 +95,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -225,6 +227,33 @@ def _all_forbidden_roots(extra) -> tuple:
     return (_REPO_ROOT,) + tuple(extra)
 
 
+def _check_owner_only_mode(mode: int, *, what: str = "key file") -> None:
+    """The ONE shared key-file permission predicate (cycle 21, R9),
+    used by load_signing_key here and by
+    signing.ceremony_authorisation.load_ceremony_seed.
+
+    Accept iff ALL of the following hold: NO special bits at
+    all (``mode & 0o7000 == 0`` — no setuid, setgid or sticky
+    bit), NO group/world bits at all (``mode & 0o077 == 0``),
+    the owner-read bit is set, AND the owner-execute bit is
+    clear — the accepted set is therefore literally exactly
+    {0400, 0600}. (``stat.S_IMODE`` retains the special bits,
+    so they must be refused explicitly: 04600 and 01600 would
+    otherwise pass the permission-bit checks below.)
+    0600 is what the generators create; 0400 (a read-only key file)
+    is a legitimate hardened deployment and is accepted. 0200
+    (write-only, no owner read) and every group/world-readable or
+    -writable mode refuse. This replaces the retired "exactly
+    0600" rule, which refused the more restrictive 0400 for no
+    security gain."""
+    perm = stat.S_IMODE(mode)
+    if perm & 0o7000 or perm & 0o077 or not perm & 0o400 \
+            or perm & 0o100:
+        raise SigningError(
+            f"{what} mode must be owner-only and owner-readable "
+            f"(0400 or 0600); got {perm:04o}")
+
+
 def _check_key_path(target: Path, forbidden_roots) -> Path:
     """Shared placement rules for generate/load: never inside a
     forbidden root (this repo by default), never through a symlink
@@ -288,14 +317,24 @@ def generate_key_file(path, *, forbidden_roots=()) -> SigningKey:
 
 def load_signing_key(path, *, forbidden_roots=()) -> SigningKey:
     """Load a key file, failing closed on every unsafe property:
-    a symlinked path component, a mode other than exactly 0600, an
-    oversize or non-hex file, content that is not exactly 32 bytes,
-    or a location inside this repo or a forbidden root."""
+    a symlinked path component, a mode failing the shared
+    owner-only predicate (_check_owner_only_mode: no group/world
+    bits, owner-read set — in practice 0400 or 0600; the retired
+    "exactly 0600" wording no longer applies), an oversize or
+    non-hex file, content that is not exactly 32 bytes, or a
+    location inside this repo or a forbidden root.
+
+    Follow-up (cycle 21, R9): this loader still stats-then-reads
+    by path. The fd discipline the ceremony seed loader gained
+    this cycle (O_NOFOLLOW|O_NONBLOCK open, fstat on the fd,
+    bounded fd read) is the named follow-up
+    ``signing-key-loader-fd-hardening`` for THIS loader; only the
+    permission predicate was widened here, as a separate
+    bisectable change."""
     target = _check_key_path(Path(path), forbidden_roots)
     if not target.is_file():
         raise SigningError("key file is missing")
-    if target.stat().st_mode & 0o777 != 0o600:
-        raise SigningError("key file mode must be exactly 0600")
+    _check_owner_only_mode(target.stat().st_mode, what="key file")
     try:
         if target.stat().st_size > _MAX_KEY_FILE_BYTES:
             raise SigningError("key file exceeds the size cap")

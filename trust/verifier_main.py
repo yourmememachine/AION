@@ -266,14 +266,18 @@ from eval.registry import CorruptRegistryError, EvalRegistry, \
     EvaluationError
 from signing.attestation import attestation_envelope_from_dict, \
     attestation_envelope_to_dict, sign_attestation
+from signing import ed25519 as _ed25519
 from signing.ceremony_authorisation import (
     CEREMONY_AUTHORISATION_TTL_MAX_SECONDS,
     REASONS as _CEREMONY_REASONS,
     _NO_PIN_REASONS as _CEREMONY_NO_PIN_REASONS,
     REFUSED_TEST_SEEDS as _REFUSED_TEST_SEEDS,
+    ceremony_authorisation_envelope_from_dict,
     ceremony_authorisation_envelope_to_dict,
+    ceremony_public_key_for,
     load_ceremony_seed,
     sign_ceremony_authorisation,
+    verify_ceremony_authorisation,
 )
 from signing.gate_decision import (
     PURPOSE_MEMORY_COMMIT,
@@ -301,8 +305,9 @@ from trust.anchoring import AnchorError, initialise_anchor, \
 from trust.budgets import BudgetError, BudgetStore, \
     DEFAULT_PER_IDENTITY_CAP, DEFAULT_PER_PROPOSAL_CAP, \
     GENESIS_CHAIN_HASH
-from trust.ledger import CeremonyAuthorisationLedger, \
-    CorruptLedgerError, SigningLedger
+from trust.ledger import AlreadyConsumedError, \
+    CeremonyAuthorisationLedger, CeremonyConsumptionLedger, \
+    CorruptLedgerError, HeadRegressionError, SigningLedger
 from trust.pathpolicy import canonicalise as _policy_canonicalise
 
 GENESIS_HASH = "0" * 64
@@ -563,6 +568,58 @@ def _load_config() -> _Config:
                 and seed_bytes in _REFUSED_TEST_SEEDS:
             raise _config("verifier_misconfigured",
                           "refusing a known test ceremony seed")
+        # Derivation-overlap pair checks (cycle 21, R9): the
+        # closed set below, checked here because this is the
+        # one place both secrets exist. Each relation refuses
+        # startup as verifier_misconfigured with a detail that
+        # names neither secret value:
+        #   (2) seed == sha256(key)
+        #   (3) key == sha256(seed)
+        #   (4) key == ceremony public key (public material as
+        #       the HMAC secret — the most dangerous relation)
+        #   (5) seed == sha256(ceremony public key)
+        #   (6) key == sha256(ceremony public key)
+        #   (7) seed == sha256(own public key): "own" is read
+        #       both ways the designs used it — the ceremony
+        #       key's own public key (the same bytes as (5),
+        #       kept explicit) and the public key derived by
+        #       treating the HMAC key bytes as an Ed25519
+        #       seed; both are publicly derivable values a
+        #       seed must never equal.
+        #   (8) key in REFUSED_TEST_SEEDS (live exactly for
+        #       the RFC 8032 vector seeds, which the HMAC
+        #       refused list does not cover).
+        # ((1) seed == key is the byte-equality check above,
+        # and the independent refused-list checks stand.)
+        # Residual wording (mandatory, R9): these relations
+        # catch accidents and known derivations, not arbitrary
+        # KDF overlap; no stronger claim is made. Provisioning
+        # discipline — independent random draws — remains the
+        # real defence.
+        if seed_bytes is not None:
+            key_bytes = signing_key.key
+            ceremony_public = ceremony_signing_key.public_key
+            key_public = _ed25519.public_key_from_seed(key_bytes) \
+                if len(key_bytes) == _ed25519.SEED_BYTES else None
+            overlap = (
+                seed_bytes == hashlib.sha256(key_bytes).digest()
+                or key_bytes == hashlib.sha256(seed_bytes).digest()
+                or key_bytes == ceremony_public
+                or seed_bytes
+                == hashlib.sha256(ceremony_public).digest()
+                or key_bytes
+                == hashlib.sha256(ceremony_public).digest()
+                or (key_public is not None
+                    and seed_bytes
+                    == hashlib.sha256(key_public).digest())
+                or key_bytes in _REFUSED_TEST_SEEDS)
+            if overlap:
+                raise _config(
+                    "verifier_misconfigured",
+                    "the ceremony signing seed and the verifier "
+                    "signing key fail the derivation-overlap "
+                    "check; provision them as independent random "
+                    "draws")
         # Scrub the seed path from the environment after load,
         # like the key path.
         env.pop("AION_CEREMONY_SIGNING_SEED_PATH", None)
@@ -2334,11 +2391,203 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
             ceremony_authorisation_envelope_to_dict(signed)}
 
 
+def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
+    """Consume a ceremony authorisation (cycle 21): record the
+    single-use consumption of an issued envelope in the
+    verifier-owned consumption journal and enforce the
+    monotonic consumption head (DESIGN-FINAL R2/R3/R4).
+
+    Crash-consistency contract (R7, exact wording): Consumption
+    is committed at the verifier — a fsync'd consumption-journal
+    append — before reanchor_pin returns anything. There is no
+    execution path in the integrated system in which a pin
+    movement succeeds without its consumption record durably
+    committed first. A crash after the commit but before
+    adoption leaves the authorisation burned and the pin
+    unmoved; a lost or ambiguous response is treated as burned;
+    the client never retries a consume automatically. Recovery
+    is a new ceremony (new ceremony_id, new evidence), never an
+    un-consume.
+
+    The head enforced here is a CEREMONY head — it sees
+    consumptions only; advance_pin movements never pass through
+    the verifier, so a pin advanced outside ceremonies is
+    invisible to this journal. The residual class that leaves
+    is named in DECISION-CONSUMPTION-HEAD.md.
+
+    Liveness figures, stated numerically: the envelope TTL is
+    hard-capped at 900 s, and every ceremony now needs TWO
+    verifier-availability windows inside that life — one to
+    authorise, one to consume. A failed or lost consume burns
+    the issuance pair, and recovery needs a new ceremony_id
+    plus a new evidence artefact; the client never retries a
+    consume automatically.
+
+    Commit order: (1) consumption-journal append — THE commit
+    point; (2) signing-ledger mirror (kind "consume",
+    format "ceremony-consumption"); (3) anchor update. A mirror
+    failure after the commit is ledger_failed and the envelope
+    stays burned, with no success response. The shared
+    directory flock serialises the three steps against the
+    other verifier-home journals but is NOT cross-ledger
+    atomicity: a concurrent ceremony_authorise may interleave
+    between the steps, which is benign (the journals are
+    independent chains and the mirror entry's content does not
+    depend on issuance state).
+
+    Validation order (R2): (1) config gate — the ceremony seed
+    only; the operator allowlist and evidence configuration
+    are issuance facts and are NOT consumption gates; (2)
+    strict body key set, exactly {"signed_authorisation"};
+    (3) envelope parse; (4) verifier-side signature
+    verification + expiry under the public key derived from
+    the configured ceremony seed — ONE failure code
+    (ceremony_authorisation_invalid) for all non-temporal
+    failures, so there is no per-reason forger oracle, and
+    ceremony_authorisation_expired for expiry; (5)
+    already-consumed (consumption journal, plus the signing
+    ledger scoped to kind="consume" +
+    format="ceremony-consumption" — the issuance mirror's
+    kind="sign" entry for the same authorisation_id must
+    never trip this check); (6) issuance presence in the
+    ceremony journal with payload/ceremony/evidence field
+    match, else ceremony_not_issued; (7) the R3 head rules,
+    else ceremony_head_regression; (8) commit. An
+    unreadable/corrupt journal at any step is ledger_failed —
+    fail closed, never scan partial state. Explicitly NOT
+    re-checked here: operator allowlist membership and
+    evidence resolution (issuance facts; retention is not a
+    consumption input)."""
+    # (1) Config gate: the seed only.
+    if config.ceremony_signing_key is None:
+        raise _config(
+            "ceremony_seed_unconfigured",
+            "AION_CEREMONY_SIGNING_SEED_PATH is not configured; "
+            "the ceremony_consume mode is disabled")
+    # (2) Strict body key set.
+    if set(body) != {"signed_authorisation"}:
+        raise _malformed(
+            "malformed_request",
+            "ceremony_consume body must carry exactly "
+            "signed_authorisation")
+    # (3) Envelope parse.
+    try:
+        signed = ceremony_authorisation_envelope_from_dict(
+            body["signed_authorisation"])
+    except SigningError as exc:
+        raise _malformed("malformed_request", str(exc))
+    # (4) Signature + expiry, verifier-side, under the public
+    # key derived from the configured seed.
+    reasons = verify_ceremony_authorisation(
+        signed,
+        public_key=ceremony_public_key_for(
+            config.ceremony_signing_key),
+        expected_signer_id=config.signer_id)
+    if reasons:
+        # No per-reason output anywhere — not even stderr: the
+        # client embeds stderr excerpts in its exception
+        # messages, so a reason tuple printed here would reach
+        # the caller and defeat R2's single-code rule
+        # (ceremony_authorisation_invalid, no forger oracle).
+        if set(reasons) <= {"expired", "signed_in_future"}:
+            raise _config(
+                "ceremony_authorisation_expired",
+                "the ceremony authorisation is expired")
+        raise _malformed(
+            "ceremony_authorisation_invalid",
+            "the ceremony authorisation failed verification")
+    # (5) Already-consumed: consumption journal first, then
+    # the signing-ledger mirror, scoped to consume entries.
+    try:
+        consumption_ledger = CeremonyConsumptionLedger(config.home)
+        consumption_entries = consumption_ledger.entries()
+        signing_entries = SigningLedger(config.home).entries()
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the consumption state could not be read; refusing "
+            "to consume from partial state")
+    if any(e["authorisation_id"] == signed.authorisation_id
+           for e in consumption_entries):
+        raise _config(
+            "ceremony_already_consumed",
+            "this authorisation was already consumed")
+    if any(e["kind"] == "consume"
+           and e["format"] == "ceremony-consumption"
+           and e["decision_id"] == signed.authorisation_id
+           for e in signing_entries):
+        raise _config(
+            "ceremony_already_consumed",
+            "this authorisation was already consumed")
+    # (6) Issuance presence, with field match.
+    try:
+        issued = CeremonyAuthorisationLedger(
+            config.home).find_by_authorisation_id(
+                signed.authorisation_id)
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the ceremony journal could not be read; refusing "
+            "to consume from partial state")
+    if issued is None \
+            or issued["payload_hash"] != signed.payload_hash \
+            or issued["ceremony_id"] != signed.ceremony_id \
+            or issued["evidence_hash"] != signed.evidence_hash:
+        raise _config(
+            "ceremony_not_issued",
+            "this authorisation is absent from the ceremony "
+            "journal, or its issued fields do not match")
+    # (7) Head rules against the consumption snapshot (the
+    # commit append re-checks them against fresh entries).
+    try:
+        CeremonyConsumptionLedger.check_head(
+            consumption_entries, signed)
+    except AlreadyConsumedError:
+        raise _config(
+            "ceremony_already_consumed",
+            "this authorisation's target was already consumed")
+    except HeadRegressionError as exc:
+        raise _config("ceremony_head_regression", str(exc))
+    # (8) Commit: consumption append, then the signing-ledger
+    # mirror, then the anchor.
+    recorded_at = _now()
+    try:
+        entry = consumption_ledger.append_consumption(
+            signed, recorded_at=recorded_at)
+    except AlreadyConsumedError:
+        raise _config(
+            "ceremony_already_consumed",
+            "this authorisation was already consumed")
+    except HeadRegressionError as exc:
+        raise _config("ceremony_head_regression", str(exc))
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the consumption could not be committed")
+    try:
+        SigningLedger(config.home).append_ceremony_consumption(
+            signed, recorded_at=recorded_at)
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the consumption was committed in the consumption "
+            "journal but could not be mirrored in the signing "
+            "ledger; the authorisation stays burned and no "
+            "success is returned — recovery is a new ceremony")
+    _update_anchor(config)
+    return {"authorisation_id": signed.authorisation_id,
+            "ceremony_id": signed.ceremony_id,
+            "consumption_seq": entry["seq"],
+            "new_cycle_seq": signed.candidate["cycle_seq"],
+            "new_payload_hash": signed.candidate["payload_hash"]}
+
+
 _MODES = {"gate": _mode_gate, "sealed_eval": _mode_sealed_eval,
           "verify_envelope": _mode_verify_envelope,
           "submit_claim": _mode_submit_claim,
           "issue_attestation": _mode_issue_attestation,
-          "ceremony_authorise": _mode_ceremony_authorise}
+          "ceremony_authorise": _mode_ceremony_authorise,
+          "ceremony_consume": _mode_ceremony_consume}
 
 
 def _emit(request_id, mode, status, *, result=None, error=None,

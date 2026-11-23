@@ -17,6 +17,11 @@ and verifies envelope signatures client-side; consumption
 passes authorisation_public_key= (the same pin object) and an
 explicit ceremony_history=() to reanchor_pin.
 
+Cycle 21: the E2E reanchor helper supplies the REAL
+client-backed consumer (VerifierClient.ceremony_consumer())
+by default, so the E2E exercises mode + client + ledger
+end to end; a test may override it via **over.
+
 Clock discipline (critique-c catch): the verifier signs with its
 real clock, so the happy paths omit now= end-to-end (live clock
 on both sides); fixed-time snapshots would read as
@@ -173,6 +178,7 @@ class CeremonyAuthorisationFixture(unittest.TestCase):
             authorisation_public_key=self.pub,
             expected_verifier_signer_id=SIGNER,
             ceremony_history=(),
+            consume_authorisation=self.client.ceremony_consumer(),
             strict_reasons=("chain_gap",))
         args.update(over)
         return reanchor_pin(old_pin, cand, **args)
