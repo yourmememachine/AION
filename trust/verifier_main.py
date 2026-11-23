@@ -334,7 +334,8 @@ from trust.anchoring import AnchorError, initialise_anchor, \
 from trust.budgets import BudgetError, BudgetStore, \
     DEFAULT_PER_IDENTITY_CAP, DEFAULT_PER_PROPOSAL_CAP, \
     GENESIS_CHAIN_HASH
-from trust.ledger import AlreadyConsumedError, \
+from trust.ledger import MAX_RECOVERY_DEPTH, \
+    AlreadyConsumedError, \
     CeremonyAuthorisationLedger, CeremonyConsumptionLedger, \
     CorruptLedgerError, HeadRegressionError, SigningLedger
 from trust.pathpolicy import canonicalise as _policy_canonicalise
@@ -2527,6 +2528,14 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
     # predicate failure, with no sub-case detail: distinguishing
     # "no burn", "burn for a different target" and "old-pin
     # mismatch" would hand a presenter a journal-state oracle.
+    # (5b) also binds the recovery (cycle 23, R3): the matched
+    # burn's authorisation_id becomes the issuance entry's
+    # recovery_of (schema v2), computed here from the verifier's
+    # own journal — never read from the request. And it refuses
+    # when the matched burn's derived depth has reached
+    # MAX_RECOVERY_DEPTH: never issue an envelope that cannot
+    # consume. Same single refusal code, no sub-case detail.
+    recovery_of = ""
     if reason == _CEREMONY_REASON_BURNED_UNADOPTED:
         try:
             consumption_entries = CeremonyConsumptionLedger(
@@ -2539,10 +2548,13 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
         burn = CeremonyConsumptionLedger.match_head_burn(
             consumption_entries, candidate=candidate,
             old_pin=old_pin)
-        if burn is None or burn["ceremony_id"] == ceremony_id:
+        if burn is None or burn["ceremony_id"] == ceremony_id \
+                or CeremonyConsumptionLedger.derived_head_depth(
+                    consumption_entries) >= MAX_RECOVERY_DEPTH:
             raise _config(
                 "ceremony_recovery_unproven",
                 "no recorded consumption proves this recovery")
+        recovery_of = burn["authorisation_id"]
     # (6) Sign with the ceremony seed, with the ceremony TTL
     # hard cap applied over the configured verifier TTL. The
     # COMPUTED hash is signed, never the body value.
@@ -2571,7 +2583,8 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
     try:
         CeremonyAuthorisationLedger(
             config.home).append_authorisation(
-                signed, recorded_at=recorded_at)
+                signed, recorded_at=recorded_at,
+                recovery_of=recovery_of)
     except Exception:
         raise _config(
             "ledger_failed",
@@ -2773,11 +2786,20 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
             "ceremony_not_issued",
             "this authorisation is absent from the ceremony "
             "journal, or its issued fields do not match")
+    # Issuance binding (cycle 23, R3): the issuance entry's
+    # recovery_of — verifier-written at authorise step (5b),
+    # never a request field — is threaded into the head check
+    # and the commit append, which derive the consumption's
+    # lineage from it. A v1 issuance entry carries no
+    # recovery_of: .get yields None, the legacy sentinel in
+    # the ledger's lineage derivation.
+    bound_recovery_of = issued.get("recovery_of")
     # (7) Head rules against the consumption snapshot (the
     # commit append re-checks them against fresh entries).
     try:
         CeremonyConsumptionLedger.check_head(
-            consumption_entries, signed)
+            consumption_entries, signed,
+            recovery_of=bound_recovery_of)
     except AlreadyConsumedError:
         raise _config(
             "ceremony_already_consumed",
@@ -2790,7 +2812,8 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     recorded_at = _now()
     try:
         entry = consumption_ledger.append_consumption(
-            signed, recorded_at=recorded_at)
+            signed, recorded_at=recorded_at,
+            recovery_of=bound_recovery_of)
     except AlreadyConsumedError:
         raise _config(
             "ceremony_already_consumed",

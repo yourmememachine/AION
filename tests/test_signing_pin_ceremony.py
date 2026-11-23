@@ -65,6 +65,7 @@ from signing.ed25519 import public_key_from_seed, sign as _ed25519_sign
 from signing.pin_ceremony import (
     advance_pin, classify_verification, reanchor_pin,
     verify_ceremony_record)
+from signing.pin_store import PinStore
 from signing.state_snapshot import sign_state_snapshot
 from trust.ledger import CeremonyConsumptionLedger, LedgerError
 
@@ -1130,9 +1131,24 @@ class Cycle20ConsumptionTests(unittest.TestCase):
         the history leg, as before); stale history NOW
         refuses via the consumer (already-consumed) and NO
         regressed pin is returned. Added leg: a NEW envelope
-        for old=seq1/candidate=seq5 (head=4, live pin 6)
-        refuses at the consumer with the head-regression
-        refusal (old pin behind the consumed head)."""
+        for old=seq1/candidate=seq5 (head=4, live pin 6) —
+        cycle 23 RE-PIN (supersede rule, coordinator, pending
+        war-room ratification): this leg's shape (candidate
+        strictly ahead of the head, old pin behind it) is the
+        supersede shape, so the consumption now LANDS and
+        reanchor returns the seq-5 pin. The verifier cannot
+        distinguish this stale-pin envelope from the genuine
+        supersede case (an adopter whose pin sits behind the
+        head after a discarded, cap-exhausted burn), because
+        the verifier cannot observe the pin. What prevents a
+        regression of the LIVE pin is adoption-side, as it
+        has been since cycle 22: PinStore.adopt context-binds
+        the record to the store's actual pin (seq 6 here) and
+        refuses a record minted against seq 1 — pinned in
+        tests/test_signing_pin_store.py (the cycle-22
+        context-binding tests). At this raw library level the
+        would-be regressed pin is returned; the integrated
+        system never adopts it."""
         a = snap(1)
         cand = snap(4, prev="f" * 64)
         auth = mint_authorisation(pin_of(a), cand)
@@ -1155,16 +1171,85 @@ class Cycle20ConsumptionTests(unittest.TestCase):
                      ceremony_history=())
         self.assertIn("already consumed", str(cm.exception))
         # Fresh-envelope leg: new envelope, old=seq1,
-        # candidate=seq5, head=4, live pin 6 — refuses at the
-        # consumer with the head-regression refusal.
+        # candidate=seq5, head=4, live pin 6 — cycle 23
+        # supersede re-pin (see docstring): the consumption
+        # LANDS and the seq-5 pin is returned at this level;
+        # adoption against the live seq-6 pin is refused by
+        # the store's context binding, not by the head.
         cand5 = snap(5, prev="f" * 64)
         auth5 = mint_authorisation(pin_of(a), cand5,
                                    evidence_hash="f" * 64)
-        with self.assertRaises(SigningError) as cm:
-            reanchor(pin_of(a), cand5, authorisation=auth5,
-                     evidence_hash="f" * 64, ceremony_history=())
-        self.assertIn("old pin is behind the consumed head",
-                      str(cm.exception))
+        pin5, _rec5 = reanchor(pin_of(a), cand5,
+                               authorisation=auth5,
+                               evidence_hash="f" * 64,
+                               ceremony_history=())
+        self.assertEqual(pin5["cycle_seq"], 5)
+
+    def test_t8_composed_supersede_adopt_refusal_ahead_variant(self):
+        """Composed supersede -> adopt-refusal (cycle 23 fix
+        round, r2-F1): the load-bearing AHEAD variant T8'
+        itself does not exercise. Consumption head at seq 4;
+        a PinStore whose LIVE pin is at seq 6 (advance-only);
+        a fresh envelope minted old=seq1 / candidate=seq7
+        consumes via supersede and reanchor_pin returns
+        (pin7, record). PinStore.adopt(pin7, record,
+        expected_old_pin=<seq-6 pin>) must REFUSE — context
+        binding: the record's old side is seq 1, not the
+        store's pin — even though CAS (expected == current)
+        and non-regression (7 > 6) both pass. The store's pin
+        is still seq 6 afterwards."""
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        auth = mint_authorisation(pin_of(a), cand)
+        pin4, rec1 = reanchor(pin_of(a), cand, authorisation=auth,
+                              ceremony_history=())
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            state_dir = base / "state"
+            state_dir.mkdir()
+            store = PinStore(base / "pins", state_dir=state_dir)
+            # Store creation needs a no-pin genesis record:
+            # anchor the seq-1 snapshot itself first (its own
+            # fixture consumer/journal — a fresh consumer, so
+            # the seq-4 head above is untouched), then adopt
+            # the seq-4 ceremony against the seq-1 pin.
+            genesis_consumer = _fresh_fixture_consumer()
+            pin1, rec_genesis = reanchor(
+                None, a, reason="initial_anchor",
+                evidence_hash="9" * 64,
+                consume_authorisation=genesis_consumer,
+                ceremony_history=())
+            store.adopt(pin1, rec_genesis, expected_old_pin=None,
+                        signing_key=KEY)
+            store.adopt(pin4, rec1, expected_old_pin=pin1,
+                        signing_key=KEY)
+            s5 = snap(5, prev=cand.payload_hash)
+            s6 = snap(6, prev=s5.payload_hash)
+            pin5 = advance_pin(pin4, s5, ())
+            store.adopt(pin5, None, expected_old_pin=pin4,
+                        signing_key=KEY)
+            pin6 = advance_pin(pin5, s6, ())
+            store.adopt(pin6, None, expected_old_pin=pin5,
+                        signing_key=KEY)
+            self.assertEqual(
+                store.read_pin(signing_key=KEY)["cycle_seq"], 6)
+            # Fresh envelope, old=seq1, candidate=seq7: the
+            # supersede consume LANDS (7 ahead of head 4) and
+            # reanchor returns the seq-7 pair.
+            cand7 = snap(7, prev="f" * 64)
+            auth7 = mint_authorisation(
+                pin_of(a), cand7, evidence_hash="d" * 64)
+            pin7, rec7 = reanchor(
+                pin_of(a), cand7, authorisation=auth7,
+                evidence_hash="d" * 64, ceremony_history=())
+            self.assertEqual(pin7["cycle_seq"], 7)
+            # Adoption against the seq-6 store refuses on
+            # context binding alone.
+            with self.assertRaises(SigningError):
+                store.adopt(pin7, rec7, expected_old_pin=pin6,
+                            signing_key=KEY)
+            self.assertEqual(
+                store.read_pin(signing_key=KEY)["cycle_seq"], 6)
 
     def test_v1_golden_envelope_refused_with_version_wording(self):
         # R6: v1 refusal is EXPLICIT. A literal cycle-19 envelope

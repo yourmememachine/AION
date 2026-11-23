@@ -265,6 +265,42 @@ class VerifierClient:
             raise VerifierProtocolError(
                 "verifier response is under an unexpected key")
 
+    def _check_ceremony_pins(self, signer_id, key_id):
+        """Pin check for ceremony authorisation envelopes ONLY.
+
+        Ceremony envelopes live in a DIFFERENT key-id namespace
+        from gate decisions / attestations: they carry the
+        Ed25519 ceremony public key id (pub-<16 hex>,
+        CeremonySigningKey.key_id =
+        public_key_id_for(...)), never the HMAC gate key id
+        (key-<16 hex>) that _check_pins enforces. Applying the
+        single expected_key_id pin to a ceremony envelope
+        therefore refuses every correctly issued envelope
+        whenever the client is pinned for gate use (the
+        production wiring mandates the key- form) — the
+        namespace collision this method exists to close.
+        The ceremony pin is the pinned CeremonyPublicKey
+        OBJECT: its key_id is derived from its bytes, so it
+        cannot be re-pointed independently of the key material
+        the signature is verified against below. The signer
+        pin is shared with the gate path (one verifier
+        identity). A client with NO ceremony public key pinned
+        cannot verify ceremony envelopes at all and refuses —
+        ceremony_authorise already refuses locally in that
+        case; this check makes the refusal explicit at the
+        pin layer too, rather than silently skipping it."""
+        if self._expected_signer_id is not None \
+                and signer_id != self._expected_signer_id:
+            raise VerifierProtocolError(
+                "verifier response is from an unexpected signer")
+        if self._authorisation_public_key is None:
+            raise VerifierConfigError(
+                "ceremony response cannot be pin-checked: no "
+                "ceremony public key is pinned on this client")
+        if key_id != self._authorisation_public_key.key_id:
+            raise VerifierProtocolError(
+                "verifier response is under an unexpected key")
+
     @staticmethod
     def _check_not_expired(expires_at):
         try:
@@ -515,7 +551,7 @@ class VerifierClient:
                 signed.payload_hash, signed.key_id):
             raise VerifierProtocolError(
                 "ceremony authorisation id is inconsistent")
-        self._check_pins(signed.signer_id, signed.key_id)
+        self._check_ceremony_pins(signed.signer_id, signed.key_id)
         self._check_not_expired(signed.expires_at)
         # Cryptographic verification (cycle 20, R8): verify the
         # Ed25519 signature with the pinned CeremonyPublicKey —

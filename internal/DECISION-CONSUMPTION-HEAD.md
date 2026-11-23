@@ -175,3 +175,80 @@ at the next snapshot sequence. The primary burned-but-
 unmoved path is unaffected: an adopter holding the returned
 pair completes adoption via `adopt_returned` with no new
 consumption at all.
+
+## Addendum 3 — 2026-11-23, cycle 23: schema v2 lineage, bounded recovery (cap 2), and the supersede rule
+
+This addendum SUPERSEDES Addendum 2's one-shot ruling.
+Recovery is no longer one-shot; it is a bounded chain,
+ruled by the cycle-23 war room (DESIGN-FINAL R3) on top of
+a versioned journal schema that records lineage explicitly
+— the resolution both external seats' cycle-22 texts
+pointed at (seat-gpt listed a lineage schema as the
+improvement path; seat-gemini demanded the schema be fixed
+properly). External ratification of THIS re-rule is still
+pending: seat-gpt ratified one-shot in cycle 22, so the
+change of bound is put to both seats explicitly in
+CROSS-CHECK-BRIEF-CYCLE-23.md, and the cycle-23 verdict is
+provisional until they answer.
+
+Schema v2 (trust/ledger.py): consumption-journal entries
+carry consumption_kind ("primary"/"recovery"), recovery_of
+(the authorisation_id of the burn recovered), and
+recovery_depth. Versioning is per-entry: the loader accepts
+the v1 and v2 key sets with positional monotonicity (no v1
+entry after a v2 entry); v1 entries are never rewritten
+(their hashes are anchor-covered). The issuance
+(CeremonyAuthorisationLedger) journal carries the binding:
+authorise step (5b) records recovery_of from the verifier's
+own match_head_burn result — never from the request — and
+consume threads it into the lineage derivation, which runs
+inside append_consumption's retry loop on freshly reloaded
+entries. Load-time coherence (fix round + re-review): a
+recovery grounds only on its IMMEDIATE PREDECESSOR (the
+burn is the head at consume time in every append-reachable
+history), a v2 primary may not re-root an already-consumed
+pair, duplicate authorisation_ids are corrupt, and a v1
+pair may occur at most twice.
+
+Bound: MAX_RECOVERY_DEPTH = 2 — a movement is consumable
+at most 3 times (primary + 2 recoveries). Depth 1 covers a
+single adopt fault, depth 2 one full incident's double
+fault; a third interruption indicates a broken adopter.
+Authorise refuses at the cap (ceremony_recovery_unproven);
+consume refuses as AlreadyConsumedError. Exactly-one
+success under concurrency is preserved and now pinned by a
+true multiprocess race test (two authorisations bound to
+the same burn: exactly one consumption lands; a fresh
+recovery bound to the WINNER's burn may land at depth + 1).
+
+The supersede rule (designed ruling, recorded here in
+plain words): the rule arrived in cycle 23's build phase
+(seat 3's scenario-6 deadlock) and was narrowed in the war
+room's fix round; it is a BROAD rule for primary movements,
+not a terminal-case exception. In check_head, a fresh
+non-recovery consumption whose candidate is STRICTLY AHEAD
+of the consumed head may carry an old pin BEHIND the head:
+the burned head movement is superseded — abandoned, never
+adopted; its burn remains a permanent journal fact. The
+rule never applies to burned_unadopted envelopes, and when
+the old pin's sequence is recorded anywhere in the journal
+(as a target or as an old side) its hash must match the
+recorded hash. Narrowing the rule to depth == MAX was
+considered and rejected in the war room: depth measures
+the recovery chain, not artefact retention (which the
+verifier cannot observe) — a depth-0 head whose adoption
+pair and journal lines were lost is exactly the proven
+deadlock, so no depth condition separates deadlock from
+abandonment. The rule's cost is liveness/fairness, not
+safety: an authorised primary can abandon a retained,
+adoptable burn; the pin itself can never regress through
+it (strictly-ahead candidate; PinStore CAS + non-
+regression + context-bound record verification). Two
+residuals are named: (i) an old-pin sequence NOT recorded
+in the journal cannot be hash-checked by the verifier
+(the verifier cannot observe the pin; adoption-side
+context binding is the control); (ii) a resurfaced
+superseded pair adopted later can stall one sequence at
+AlreadyConsumedError before self-healing via the next
+supersede. The rule is put to the external seats as its
+own numbered question in the cycle-23 brief.

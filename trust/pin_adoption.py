@@ -42,11 +42,14 @@ closed (an integrity refusal) rather than reporting
 No ``now=`` parameter anywhere in this flow: freshness stays
 on the host clock (the ``commit_production`` precedent).
 
-Honest scope: this is production code exercised end-to-end in
-temp dirs against the real verifier subprocess. No live run
-against the live state dir happens here; the first live
-adoption is an ``initial_anchor`` ceremony gated on verifier
-provisioning (design C §4).
+Honest scope: production code exercised end-to-end in temp
+dirs against the real verifier subprocess, and, since cycle 23,
+in a live run against a byte copy of the real state/ directory
+(seq 13 → 16, two consumptions) in a sandbox under a
+production-mode verifier home. The real state/ directory itself
+has never been adopted against and is not advanced by any of
+this; there is no production deployment (no separate OS user;
+the wrapper launch is refused by design).
 """
 
 from __future__ import annotations
@@ -655,6 +658,34 @@ class PinAdopter:
             "cycle_seq": signed.cycle_seq,
             "payload_hash": signed.payload_hash,
             "signer_id": signed.signer_id, "key_id": signed.key_id}
+        old_seq, old_hash = self._old_pin_projection(old_pin)
+        # (1b) Authorise-pending journal line (cycle 23, R4): a
+        # detection/audit aid appended BEFORE the authorise call,
+        # so a crash between authorise and the authorised line
+        # still leaves a trace naming the ceremony and candidate.
+        # It carries NO envelope and does NOT count as a burn in
+        # _unadopted_burns (only authorised/consumed phases do):
+        # program order — the authorised-line append completes
+        # before consume begins — means a pending line with no
+        # authorised line proves nothing could have consumed, and
+        # the next attempt proceeds with a fresh primary ceremony.
+        try:
+            self._append_journal({
+                "phase": "authorise_pending",
+                "ceremony_id": ceremony_id,
+                "candidate_seq": signed.cycle_seq,
+                "candidate_hash": signed.payload_hash,
+                "old_cycle_seq": old_seq, "old_payload_hash": old_hash})
+        except OSError as exc:
+            # Fix round (r6-F6): the pending append's failure
+            # surfaces in this function's refusal typing, not
+            # as a raw OSError — pin_cycle_hook's alert
+            # contract keys off PinAdoptionRefused /
+            # PinAdoptionBurned and attaches the cycle entry
+            # only to those.
+            raise PinAdoptionRefused(
+                f"authorise-pending journal append failed: {exc}"
+            ) from exc
         # (2) Authorise.
         try:
             envelope_dict = self._client.ceremony_authorise(
@@ -669,7 +700,6 @@ class PinAdopter:
         except Exception as exc:
             raise PinAdoptionRefused(
                 f"ceremony authorisation failed: {exc}") from exc
-        old_seq, old_hash = self._old_pin_projection(old_pin)
         journal_base = {
             "ceremony_id": ceremony_id,
             "authorisation_id": signed_env.authorisation_id,
@@ -763,18 +793,51 @@ class PinAdopter:
         return AdoptionResult("reanchored", new_pin, record)
 
 
+def pin_cycle_hook(adopter):
+    """The integrated wiring (cycle 23, R1): a ``cycle_hook``
+    for ``CoreLoop(state_dir, cycle_hook=pin_cycle_hook(adopter))``
+    that adopts the recorded cycle's snapshot pin.
+
+    The returned callable takes the recorded cycle entry, calls
+    ``adopter.snapshot_and_adopt()``, and returns its
+    AdoptionResult. On PinAdoptionBurned / PinAdoptionRefused the
+    entry is attached as ``.cycle_entry`` before re-raising —
+    the run_one_cycle_and_pin contract, preserved: "cycle
+    recorded, pin pending, alert". The hook is the integrated
+    path; run_one_cycle_and_pin remains only for unhooked
+    composition and refuses a hooked loop."""
+    def _hook(entry):
+        try:
+            return adopter.snapshot_and_adopt()
+        except (PinAdoptionBurned, PinAdoptionRefused) as exc:
+            exc.cycle_entry = entry
+            raise
+    return _hook
+
+
 def run_one_cycle_and_pin(loop, adopter, *, coders, reviewers,
                           verdict, verify_passed, delta):
     """The loop driver (design C §5): run one loop cycle, then
-    adopt its snapshot pin. ``core/loop.py`` stays untouched —
-    its contract is stdlib-only/no-network, and the adopter is
-    neither. Ordering is forced: the cycle persists in state
-    BEFORE the pin can move (a snapshot attests bytes that
-    exist). On an adoption exception the cycle entry is
-    attached as ``.cycle_entry`` and the exception propagates:
-    the contract is "cycle recorded, pin pending, alert". The
-    wrapper never rolls back loop state — un-saving a shipped
-    cycle would falsify the loop's history."""
+    adopt its snapshot pin. Ordering is forced: the cycle
+    persists in state BEFORE the pin can move (a snapshot
+    attests bytes that exist). On an adoption exception the
+    cycle entry is attached as ``.cycle_entry`` and the
+    exception propagates: the contract is "cycle recorded, pin
+    pending, alert". The wrapper never rolls back loop state —
+    un-saving a shipped cycle would falsify the loop's history.
+
+    Cycle 23 (R1): the integrated path is the loop hook —
+    ``CoreLoop(state_dir, cycle_hook=pin_cycle_hook(adopter))``
+    — and this driver remains for unhooked composition only.
+    A loop that already carries a cycle_hook is REFUSED
+    (ValueError): running the driver on it would wire the
+    adoption twice for one cycle (double wiring)."""
+    if loop.cycle_hook is not None:
+        raise ValueError(
+            "run_one_cycle_and_pin refuses a loop with a "
+            "cycle_hook already wired (double wiring); the hook "
+            "(pin_cycle_hook) is the integrated path — run the "
+            "cycle through the loop directly")
     entry = loop.run_one_cycle(coders, reviewers, verdict,
                                verify_passed, delta)
     if entry is None:

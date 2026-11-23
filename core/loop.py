@@ -5,6 +5,12 @@ JSON document written atomically and validated deeply on load and save;
 a corrupt document fails closed and is never silently replaced with
 empty state. A cycle is computed in memory and persisted in one save,
 so an interruption can never strand the loop mid-cycle.
+
+An optional constructor-injected ``cycle_hook`` is called once per
+recorded cycle, after the cycle has been persisted: the contract is
+"cycle recorded, pin pending, alert" — a hook failure never
+un-records the cycle and never corrupts state; it propagates to the
+caller, who owns whatever the hook was pending on.
 """
 
 from __future__ import annotations
@@ -133,13 +139,27 @@ def _check_participants(values, field: str, minimum: int) -> list:
 
 
 class CoreLoop:
-    """One state file, sequential gated cycles, atomic persistence."""
+    """One state file, sequential gated cycles, atomic persistence.
 
-    def __init__(self, state_dir):
+    ``cycle_hook`` (keyword-only, default None) is an opaque
+    callable invoked by run_one_cycle once per recorded cycle,
+    after persistence — see run_one_cycle for the contract. The
+    loop neither knows nor cares what the hook does; integrations
+    that must react to a recorded cycle (e.g. pinning its
+    snapshot) inject one instead of wrapping the loop.
+    """
+
+    def __init__(self, state_dir, *, cycle_hook=None):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.state_dir / "state.json"
+        self._cycle_hook = cycle_hook
         self.state = self._load()
+
+    @property
+    def cycle_hook(self):
+        """The constructor-injected cycle hook, or None (read-only)."""
+        return self._cycle_hook
 
     # -- persistence -----------------------------------------------------
 
@@ -420,6 +440,14 @@ class CoreLoop:
         All gates are checked before anything is persisted, and the cycle
         is written in a single save: a failed or interrupted cycle leaves
         the stored state exactly as it was.
+
+        When a cycle_hook was injected, it is called exactly once
+        with the recorded entry, AFTER the persistence above has
+        completed — the snapshot-restore path does not run for hook
+        failures. The contract is "cycle recorded, pin pending,
+        alert": a hook exception propagates unwrapped, the cycle
+        stays recorded, and stored state is exactly what the save
+        wrote. Idle cycles (no pickable item) never fire the hook.
         """
         if self.state["phase"] != "SCAN":
             raise InvalidTransition(f"cycle must start at SCAN, not {self.state['phase']}")
@@ -468,6 +496,8 @@ class CoreLoop:
         except BaseException:
             self.state = snapshot
             raise
+        if self._cycle_hook is not None:
+            self._cycle_hook(copy.deepcopy(entry))
         return copy.deepcopy(entry)
 
     def _check_delta(self, delta, builders: set, reviewers: set) -> dict:

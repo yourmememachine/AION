@@ -355,7 +355,18 @@ class CeremonyConsumeTests(ConsumeFixture):
         self.assertEqual(self.error_code(doc),
                          "ceremony_head_regression")
 
-    def test_old_pin_behind_head_regression(self):
+    def test_old_pin_behind_head_superseded_when_candidate_ahead(self):
+        # Re-pinned by the cycle-23 fix seat (check_head
+        # SUPERSEDE rule): this test previously asserted that
+        # a primary whose old pin is behind the head refuses
+        # even with its candidate ahead. That rule deadlocked
+        # the adopter once a movement was consumed to its
+        # recovery cap with its pair discarded (pin behind
+        # the head forever). Now: candidate STRICTLY AHEAD
+        # of the head + non-recovery + old pin behind the
+        # head LANDS (the burned head movement is superseded;
+        # the envelope is fresh and single-use and the pin
+        # can only move forward to the ahead candidate).
         self.consume(self.authorise())
         envelope2 = self.authorise(
             ceremony_id="ceremony-2026-11-28-002",
@@ -363,6 +374,19 @@ class CeremonyConsumeTests(ConsumeFixture):
             evidence_hash=EVIDENCE_HASH2,
             evidence_ref="case-file-2")
         code, doc, _ = self.consume(envelope2)
+        self.assertEqual(code, 0, msg=str(doc))
+        self.assertEqual(doc["result"]["new_cycle_seq"], 50)
+        ledger = CeremonyConsumptionLedger(self.ledger_home)
+        self.assertEqual(ledger.head_target(), (50, "d" * 64))
+        # The non-supersede shape still refuses: candidate
+        # BEHIND the (new) head with a behind-head old pin is
+        # a head regression, unchanged.
+        envelope3 = self.authorise(
+            ceremony_id="ceremony-2026-11-28-003",
+            candidate=self.candidate(48, "e" * 64),
+            evidence_hash=EVIDENCE_HASH3,
+            evidence_ref="case-file-3")
+        code, doc, _ = self.consume(envelope3)
         self.assertEqual(code, 3)
         self.assertEqual(self.error_code(doc),
                          "ceremony_head_regression")
@@ -563,7 +587,7 @@ import sys
 import trust.verifier_main as vm
 
 
-def _kill(self, envelope, *, recorded_at):
+def _kill(self, envelope, *, recorded_at, recovery_of=None):
     os._exit(70)
 
 
@@ -580,8 +604,9 @@ import trust.verifier_main as vm
 _orig = vm.CeremonyConsumptionLedger.append_consumption
 
 
-def _kill(self, envelope, *, recorded_at):
-    _orig(self, envelope, recorded_at=recorded_at)
+def _kill(self, envelope, *, recorded_at, recovery_of=None):
+    _orig(self, envelope, recorded_at=recorded_at,
+          recovery_of=recovery_of)
     os._exit(70)
 
 

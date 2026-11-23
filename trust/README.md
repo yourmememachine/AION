@@ -78,6 +78,20 @@ Sanctioned paths, and what "sanctioned" means:
   every signature it makes — gate decisions, attestation
   envelopes, and sealed-eval attestations — before returning
   it; the verifier refuses to run without its ledger home.
+* Pin adoption (`trust/pin_adoption.py`): `PinAdopter` is the
+  production adopter for snapshot-pin ceremonies — it captures
+  the pin from `signing.pin_store.PinStore`, advances it on the
+  dense path or runs the ceremony and adopts the returned pair
+  through the store. Integrated into the loop via the
+  constructor-injected cycle hook
+  (`CoreLoop(state_dir, cycle_hook=pin_cycle_hook(adopter))`;
+  `record_ship` and `run_one_cycle_and_pin` refuse a hooked
+  loop), and `trust.shipcheck.anchored_record_ship` is the
+  production recording path (caller-pin-free: the expected
+  ledger head is derived from verified, current anchors).
+  Scope, kept exact: this proves production MODE under
+  same-user spawn on one machine (live run against a byte copy
+  of the real state dir); it is not a production deployment.
 * Query budgets (`trust/budgets.py`): sealed_eval queries are
   capped per proposal and per identity INSIDE the verifier,
   with near-duplicate/adaptive-query detection and replay

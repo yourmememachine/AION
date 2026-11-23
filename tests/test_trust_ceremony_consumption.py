@@ -375,19 +375,17 @@ class CeremonyRecoveryIntegrationTests(CeremonyConsumptionFixture):
         self.assertIn("ceremony_recovery_unproven",
                       str(cm2.exception))
 
-    def test_recovery_is_one_shot_second_recovery_refused(self):
-        """One-shot recovery (cycle-22 war-room fix round,
-        rev-r6 F1): a burned_unadopted recovery is one-shot
-        per burned movement — the first recovery authorises,
-        consumes, and succeeds, but a SECOND burned_unadopted
-        ceremony for the same target/old-pin pair is refused
-        at authorise with the single code
-        ceremony_recovery_unproven, because a recovery
-        consumption cannot ground another recovery. This
-        supersedes the iterated-chain semantics (design-A
-        §6.2) this test previously pinned, under which a
-        second recovery recovering the first recovery's head
-        entry succeeded."""
+    def test_recovery_is_bounded_second_lands_third_refused(self):
+        """Bounded recovery, re-pinned — cycle 23 /
+        DECISION-CONSUMPTION-HEAD Addendum 3 (pending),
+        superseding the cycle-22 one-shot pin: recovery is
+        bounded at MAX_RECOVERY_DEPTH = 2, not one-shot. The
+        first recovery (depth 1) authorises, consumes, and
+        succeeds; a SECOND burned_unadopted ceremony bound to
+        the first recovery's burn also lands (depth 2); a
+        THIRD is refused at authorise with the single code
+        ceremony_recovery_unproven, because the head burn's
+        derived depth has reached the cap."""
         a, cand = snap(1), snap(4, prev="f" * 64)
         auth = self.authorise(pin_of(a), cand)
         self.burn_via_reanchor_crash(pin_of(a), cand, auth, EVIDENCE)
@@ -403,8 +401,20 @@ class CeremonyRecoveryIntegrationTests(CeremonyConsumptionFixture):
         self.assertEqual(rec.reason, "burned_unadopted")
         self.assertEqual(
             verify_ceremony_record(rec, signing_key=SNAP_KEY), ())
-        consumed_before = len(self.consumption_entries())
-        self.assertEqual(consumed_before, 2)
+        # Second recovery: bound to recovery1's burn, lands
+        # at depth 2 (the caller "crashes" after its commit,
+        # leaving it as the unadopted head burn).
+        recovery2, _ev2 = self.recovery_authorise(
+            pin_of(a), cand, "evidence-bounded-2",
+            b"bounded evidence bundle two\n")
+        self.client.ceremony_consumer()(recovery2)
+        entries = self.consumption_entries()
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[-1]["consumption_kind"], "recovery")
+        self.assertEqual(entries[-1]["recovery_depth"], 2)
+        self.assertEqual(entries[-1]["recovery_of"],
+                         recovery1.authorisation_id)
+        consumed_before = len(entries)
         with self.assertRaises(VerifierConfigError) as cm:
             self.recovery_authorise(
                 pin_of(a), cand, "evidence-one-shot-2",

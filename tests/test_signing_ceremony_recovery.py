@@ -364,13 +364,29 @@ class CheckHeadTests(unittest.TestCase):
         with self.assertRaises(HeadRegressionError):
             CeremonyConsumptionLedger.check_head(
                 [dict(BURN_WITH_PIN)], behind)
-        # Old pin behind head (candidate ahead) -> regression.
+        # Old pin behind head with candidate ahead ->
+        # SUPERSEDE passes (re-pinned by the cycle-23 fix
+        # seat): the burned head movement is abandoned and
+        # the fresh primary moves the pin forward to the
+        # ahead candidate. This block previously asserted a
+        # regression here; that rule deadlocked the adopter
+        # once a movement was consumed to its recovery cap
+        # with its pair discarded.
         stale_old = mint_envelope(
             candidate=dict(CANDIDATE, cycle_seq=52,
                            payload_hash="d" * 64))
+        self.assertIsNone(CeremonyConsumptionLedger.check_head(
+            [dict(BURN_WITH_PIN)], stale_old))
+        # Old pin AT the head seq with a different hash
+        # (fork of the head target) still refuses, even with
+        # the candidate ahead — supersede does not rescue it.
+        fork_old = mint_envelope(
+            candidate=dict(CANDIDATE, cycle_seq=52,
+                           payload_hash="d" * 64),
+            old_pin={"cycle_seq": 47, "payload_hash": "f" * 64})
         with self.assertRaises(HeadRegressionError):
             CeremonyConsumptionLedger.check_head(
-                [dict(BURN_WITH_PIN)], stale_old)
+                [dict(BURN_WITH_PIN)], fork_old)
         # Empty journal passes anything.
         self.assertIsNone(CeremonyConsumptionLedger.check_head(
             [], mint_envelope()))
@@ -523,14 +539,18 @@ class VerifyRecordRecoveryTests(unittest.TestCase):
             forged, signing_key=SNAPSHOT_KEY))
 
 
-# -- one-shot recovery (cycle 22, rev-r6 F1) ------------------------------
+# -- bounded recovery (cycle 23, superseding cycle-22 one-shot) -----------
 
 class OneShotRecoveryTests(unittest.TestCase):
-    """Recovery is one-shot per burned movement: a recovery
-    consumption writes a journal entry with the identical
-    old->new pair as the original burn (no reason field in
-    the strict entry schema), so match_head_burn must refuse
-    to treat that recovery entry as a fresh burn."""
+    """Re-pinned to cap-2 semantics — cycle 23 /
+    DECISION-CONSUMPTION-HEAD Addendum 3 (pending): recovery
+    is BOUNDED at MAX_RECOVERY_DEPTH = 2, not one-shot. A
+    recovery consumption is a schema-v2 entry recording its
+    lineage (recovery_of = the burn it consumes, depth =
+    head depth + 1), so a recovery head CAN ground a further
+    recovery up to the cap; match_head_burn is identification
+    only. The cycle-22 one-shot pins in this class are
+    superseded by the tests below."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -541,52 +561,73 @@ class OneShotRecoveryTests(unittest.TestCase):
         burn = mint_envelope()
         self.ledger.append_consumption(burn, recorded_at=NOW)
         recovery = mint_envelope(reason="burned_unadopted")
-        self.ledger.append_consumption(recovery, recorded_at=NOW)
+        self.ledger.append_consumption(
+            recovery, recorded_at=NOW,
+            recovery_of=burn.authorisation_id)
         return burn, recovery
 
-    def test_match_head_burn_refuses_recovery_head(self):
+    def test_match_head_burn_identifies_recovery_head(self):
+        # Cycle 23 / DECISION-CONSUMPTION-HEAD Addendum 3
+        # (pending): the pair-scan refusal is removed — a
+        # recovery head is identified as a burn like any head
+        # whose target/old exactly match; the CAP, not
+        # identification, bounds the chain.
         entries = [dict(BURN_WITH_PIN), dict(BURN_WITH_PIN)]
-        self.assertIsNone(CeremonyConsumptionLedger.match_head_burn(
+        head = CeremonyConsumptionLedger.match_head_burn(
             entries, candidate=dict(CANDIDATE),
-            old_pin=dict(OLD_PIN_PROJ)))
+            old_pin=dict(OLD_PIN_PROJ))
+        self.assertIs(head, entries[-1])
 
-    def test_second_authorise_predicate_fails_after_recovery(self):
-        # Predicate level (the authorise step 5b predicate):
-        # after a recovery consumption lands, a second
-        # burned_unadopted authorise for the same target can
-        # no longer be proven — match_head_burn returns None,
-        # which step (5b) maps to ceremony_recovery_unproven.
+    def test_second_authorise_predicate_passes_below_cap(self):
+        # Predicate level (authorise step 5b): after a depth-1
+        # recovery lands, a second burned_unadopted authorise
+        # for the same target IS proven (match + depth 1 < 2);
+        # step (5b) refuses only at depth >= MAX_RECOVERY_DEPTH
+        # (pinned at the cap in the schema-v2 suite).
         self._burn_then_recover()
         second = mint_envelope(reason="burned_unadopted")
-        self.assertIsNone(CeremonyConsumptionLedger.match_head_burn(
+        self.assertIsNotNone(CeremonyConsumptionLedger.match_head_burn(
             self.ledger.entries(), candidate=second.candidate,
             old_pin=second.old_pin))
+        self.assertEqual(
+            CeremonyConsumptionLedger.derived_head_depth(
+                self.ledger.entries()), 1)
 
-    def test_second_recovery_consume_raises_already_consumed(self):
-        self._burn_then_recover()
+    def test_second_recovery_lands_at_depth_2_third_refused(self):
+        # Cycle 23 / DECISION-CONSUMPTION-HEAD Addendum 3
+        # (pending): the second recovery, bound to the first
+        # recovery's burn, lands at depth 2; a third, bound to
+        # the depth-2 burn, hits the cap and refuses
+        # AlreadyConsumedError at consume.
+        _burn, recovery = self._burn_then_recover()
         second = mint_envelope(reason="burned_unadopted")
+        entry = self.ledger.append_consumption(
+            second, recorded_at=NOW,
+            recovery_of=recovery.authorisation_id)
+        self.assertEqual(entry["consumption_kind"], "recovery")
+        self.assertEqual(entry["recovery_depth"], 2)
+        self.assertEqual(entry["recovery_of"],
+                         recovery.authorisation_id)
+        third = mint_envelope(reason="burned_unadopted")
         with self.assertRaises(AlreadyConsumedError):
             CeremonyConsumptionLedger.check_head(
-                self.ledger.entries(), second)
+                self.ledger.entries(), third,
+                recovery_of=second.authorisation_id)
         with self.assertRaises(AlreadyConsumedError):
-            self.ledger.append_consumption(second, recorded_at=NOW)
-        self.assertEqual(len(self.ledger.entries()), 2)
+            self.ledger.append_consumption(
+                third, recorded_at=NOW,
+                recovery_of=second.authorisation_id)
+        self.assertEqual(len(self.ledger.entries()), 3)
 
     def test_two_recoveries_race_pinned_outcome(self):
-        # Design-a §4.4.5 race: BOTH recoveries are authorised
-        # (here: minted and predicate-checked) BEFORE either
-        # consumes — both authorisations land against the
-        # original burn head, bounded to the identical pin
-        # value under two distinct authorisations.
-        # DEVIATION pinned deliberately: §4.4.5 also specified
-        # both CONSUMPTIONS land. The rev-r6 F1 one-shot rule
-        # supersedes that consume-side outcome — the first
-        # recovery consumption lands; the second, whenever it
-        # was authorised, is refused AlreadyConsumedError,
-        # because its head entry is itself a recovery and
-        # cannot ground another recovery. This test pins the
-        # current (tightened) semantics so a future change
-        # cannot silently flip them in either direction.
+        # Race re-pinned — cycle 23 / DECISION-CONSUMPTION-HEAD
+        # Addendum 3 (pending): BOTH recoveries are authorised
+        # BEFORE either consumes, both bound (via their
+        # issuance entries' recovery_of) to the SAME original
+        # burn. Exactly one consumption lands: the winner at
+        # depth 1; the loser, whose bound burn is no longer
+        # head, refuses AlreadyConsumedError. A FRESH recovery
+        # bound to the WINNER's burn then lands at depth 2.
         burn = mint_envelope()
         self.ledger.append_consumption(burn, recorded_at=NOW)
         rec_a = mint_envelope(reason="burned_unadopted")
@@ -600,12 +641,24 @@ class OneShotRecoveryTests(unittest.TestCase):
                     entries, candidate=rec.candidate,
                     old_pin=rec.old_pin))
             self.assertIsNone(CeremonyConsumptionLedger.check_head(
-                entries, rec))
-        self.ledger.append_consumption(rec_a, recorded_at=NOW)
+                entries, rec, recovery_of=burn.authorisation_id))
+        winner = self.ledger.append_consumption(
+            rec_a, recorded_at=NOW,
+            recovery_of=burn.authorisation_id)
+        self.assertEqual(winner["recovery_depth"], 1)
         with self.assertRaises(AlreadyConsumedError):
-            self.ledger.append_consumption(rec_b, recorded_at=NOW)
+            self.ledger.append_consumption(
+                rec_b, recorded_at=NOW,
+                recovery_of=burn.authorisation_id)
+        fresh = mint_envelope(reason="burned_unadopted")
+        landed = self.ledger.append_consumption(
+            fresh, recorded_at=NOW,
+            recovery_of=rec_a.authorisation_id)
+        self.assertEqual(landed["recovery_depth"], 2)
+        self.assertEqual(landed["recovery_of"],
+                         rec_a.authorisation_id)
         entries = self.ledger.entries()
-        self.assertEqual(len(entries), 2)
+        self.assertEqual(len(entries), 3)
         self.assertEqual(
             {(e["old_cycle_seq"], e["old_payload_hash"],
               e["new_cycle_seq"], e["new_payload_hash"])

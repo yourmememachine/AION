@@ -37,6 +37,7 @@ from pathlib import Path
 from signing.gate_decision import _canonical, _sha256
 
 GENESIS_HASH = "0" * 64
+MAX_RECOVERY_DEPTH = 2
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
 _ENTRY_KEYS = {"seq", "kind", "recorded_at", "prev_hash", "entry_hash"}
 
@@ -116,6 +117,17 @@ class HashChainJournal:
         self.journal_path = self.journal_dir / self.FILENAME
         self._entries = self._load()
 
+    def _allowed_entry_key_sets(self):
+        """Entry key sets _load accepts (cycle 23, R3 seam).
+
+        Default: the single current set (_ENTRY_KEYS |
+        EXTRA_KEYS), so default behaviour is byte-identical
+        for every existing journal. Subclasses with a schema
+        version (the ceremony ledgers) override this to accept
+        their v1 and v2 sets, plus positional monotonicity and
+        value validation in their own _load."""
+        return (frozenset(_ENTRY_KEYS | set(self.EXTRA_KEYS)),)
+
     # -- persistence ----------------------------------------------------
 
     def _load(self) -> list:
@@ -141,10 +153,11 @@ class HashChainJournal:
                 or not isinstance(data["entries"], list):
             raise CorruptLedgerError("journal shape is wrong")
         entries = data["entries"]
+        allowed = self._allowed_entry_key_sets()
         prev = GENESIS_HASH
         for position, entry in enumerate(entries, start=1):
             if not isinstance(entry, dict) \
-                    or set(entry) != _ENTRY_KEYS | set(self.EXTRA_KEYS):
+                    or frozenset(entry) not in allowed:
                 raise CorruptLedgerError("journal entry has wrong keys")
             if entry["seq"] != position:
                 raise CorruptLedgerError("journal entry seq is broken")
@@ -628,6 +641,44 @@ class CeremonyAuthorisationLedger(HashChainJournal):
     EXTRA_KEYS = frozenset({"authorisation_id", "payload_hash",
                             "ceremony_id", "evidence_hash",
                             "operator_id", "issued_at"})
+    _V2_EXTRA_KEYS = EXTRA_KEYS | {"recovery_of"}
+
+    def _allowed_entry_key_sets(self):
+        # Schema v2 (cycle 23 / DECISION-CONSUMPTION-HEAD
+        # Addendum 3, pending): v1 entries (EXTRA_KEYS) and v2
+        # entries (v1 + recovery_of). New appends are always v2.
+        return (frozenset(_ENTRY_KEYS | set(self.EXTRA_KEYS)),
+                frozenset(_ENTRY_KEYS | set(self._V2_EXTRA_KEYS)))
+
+    def _load(self) -> list:
+        entries = HashChainJournal._load(self)
+        seen_v2 = False
+        for entry in entries:
+            is_v2 = "recovery_of" in entry
+            if is_v2:
+                seen_v2 = True
+                if not isinstance(entry["recovery_of"], str):
+                    raise CorruptLedgerError(
+                        "authorisation v2 recovery_of must be a "
+                        "string")
+                # Cycle 23 fix round (r1-F4): the binding is
+                # an authorisation id or nothing — "" (not a
+                # recovery issuance) or a 64-char lowercase hex
+                # authorisation id; anything else is corrupt.
+                rec_of = entry["recovery_of"]
+                if rec_of != "" and not (
+                        len(rec_of) == 64 and all(
+                            c in "0123456789abcdef"
+                            for c in rec_of)):
+                    raise CorruptLedgerError(
+                        "authorisation v2 recovery_of must be "
+                        "empty or a 64-char lowercase hex "
+                        "authorisation id")
+            elif seen_v2:
+                raise CorruptLedgerError(
+                    "authorisation journal has a v1 entry after "
+                    "a v2 entry (positional monotonicity)")
+        return entries
 
     def find_by_ceremony(self, ceremony_id):
         self._reload()
@@ -650,12 +701,24 @@ class CeremonyAuthorisationLedger(HashChainJournal):
                 return dict(entry)
         return None
 
-    def append_authorisation(self, signed, *, recorded_at) -> dict:
+    def append_authorisation(self, signed, *, recorded_at,
+                             recovery_of="") -> dict:
+        """Append an issuance as a schema-v2 entry (cycle 23).
+
+        recovery_of is the authorisation_id of the consumption
+        (burn) this issuance recovers, computed by the verifier
+        from its own consumption journal at authorise step (5b)
+        for reason burned_unadopted, and "" otherwise. It is
+        never read from the request. The consume path reads it
+        back from this entry to bind a recovery consumption to
+        exactly that burn."""
         from signing.ceremony_authorisation import \
             SignedCeremonyAuthorisation
         if not isinstance(signed, SignedCeremonyAuthorisation):
             raise LedgerError(
                 "can only ledger a SignedCeremonyAuthorisation")
+        if not isinstance(recovery_of, str):
+            raise LedgerError("recovery_of must be a string")
         self._reload()
         # Duplicate re-check against the FRESHLY loaded entries
         # (cycle 20 fix round): the mode's anti-replay scan ran
@@ -687,7 +750,8 @@ class CeremonyAuthorisationLedger(HashChainJournal):
             ceremony_id=signed.ceremony_id,
             evidence_hash=signed.evidence_hash,
             operator_id=signed.operator_id,
-            issued_at=recorded_at)
+            issued_at=recorded_at,
+            recovery_of=recovery_of)
 
 
 class CeremonyConsumptionLedger(HashChainJournal):
@@ -703,6 +767,18 @@ class CeremonyConsumptionLedger(HashChainJournal):
     ceremonies is invisible to this journal. The residual
     class that leaves is named in
     DECISION-CONSUMPTION-HEAD.md.
+
+    Schema v2 (cycle 23, R3): entries carry lineage —
+    consumption_kind ("primary"/"recovery"), recovery_of
+    (the authorisation_id of the burn a recovery consumes,
+    "" for primary) and recovery_depth (0 for primary,
+    1..MAX_RECOVERY_DEPTH for recovery). A movement is
+    consumable at most 1 + MAX_RECOVERY_DEPTH times: a
+    primary consumption plus bounded recoveries of its
+    successive burns. v1 entries (cycles 21-22, no lineage
+    fields) load unchanged and are never rewritten; a v1
+    entry after a v2 entry is corrupt (positional
+    monotonicity).
 
     The append here is THE commit point for consumption.
     append_consumption re-checks single-use AND the head
@@ -746,6 +822,224 @@ class CeremonyConsumptionLedger(HashChainJournal):
         "old_cycle_seq", "old_payload_hash",
         "new_cycle_seq", "new_payload_hash",
         "evidence_hash", "consumed_at"})
+    _V2_EXTRA_KEYS = EXTRA_KEYS | {
+        "consumption_kind", "recovery_of", "recovery_depth"}
+
+    def _allowed_entry_key_sets(self):
+        # Schema v2 (cycle 23 / DECISION-CONSUMPTION-HEAD
+        # Addendum 3, pending): v1 entries (EXTRA_KEYS) and v2
+        # entries (v1 + consumption_kind/recovery_of/
+        # recovery_depth). v1 entries are never rewritten or
+        # normalised (their hashes are anchor-covered); new
+        # appends are always v2.
+        return (frozenset(_ENTRY_KEYS | set(self.EXTRA_KEYS)),
+                frozenset(_ENTRY_KEYS | set(self._V2_EXTRA_KEYS)))
+
+    @staticmethod
+    def _pair_of(entry):
+        return (entry["old_cycle_seq"], entry["old_payload_hash"],
+                entry["new_cycle_seq"], entry["new_payload_hash"])
+
+    @staticmethod
+    def _recorded_depth(entries, index) -> int:
+        """Depth of entries[index] within a loaded journal:
+        v2 entries carry it; a v1 entry's depth is pair-derived
+        (the number of EARLIER entries with its exact pair —
+        the derived_head_depth rule, applied per entry)."""
+        entry = entries[index]
+        if "consumption_kind" in entry:
+            return entry["recovery_depth"]
+        pair = CeremonyConsumptionLedger._pair_of(entry)
+        return sum(
+            1 for e in entries[:index]
+            if CeremonyConsumptionLedger._pair_of(e) == pair)
+
+    def _load(self) -> list:
+        entries = HashChainJournal._load(self)
+        seen_v2 = False
+        # Single-use at load (cycle 23 re-review, r1): an
+        # authorisation_id may occur at most once in the
+        # journal; append_consumption refuses duplicates at
+        # the commit point, and the loader refuses a journal
+        # that somehow contains one.
+        seen_authorisations = set()
+        for entry in entries:
+            if entry["authorisation_id"] in seen_authorisations:
+                raise CorruptLedgerError(
+                    "consumption journal contains a duplicate "
+                    "authorisation_id")
+            seen_authorisations.add(entry["authorisation_id"])
+        # v1 pair cap (cycle 23 fix round, r1-F3): the v1
+        # pair-scan derivation is exact only while a v1 pair
+        # occurs at most twice; a third occurrence is corrupt.
+        v1_pair_counts = {}
+        for entry in entries:
+            if "consumption_kind" not in entry:
+                pair = self._pair_of(entry)
+                v1_pair_counts[pair] = v1_pair_counts.get(pair, 0) + 1
+                if v1_pair_counts[pair] >= 3:
+                    raise CorruptLedgerError(
+                        "v1 consumption pair occurs 3 or more "
+                        "times (pair-scan derivation is exact "
+                        "only up to two occurrences)")
+        for index, entry in enumerate(entries):
+            is_v2 = "consumption_kind" in entry
+            if is_v2:
+                seen_v2 = True
+                kind = entry["consumption_kind"]
+                depth = entry["recovery_depth"]
+                rec_of = entry["recovery_of"]
+                if kind not in ("primary", "recovery") \
+                        or not isinstance(depth, int) \
+                        or isinstance(depth, bool) \
+                        or not isinstance(rec_of, str):
+                    raise CorruptLedgerError(
+                        "consumption v2 entry has incoherent "
+                        "lineage fields")
+                if kind == "primary":
+                    if depth != 0 or rec_of != "":
+                        raise CorruptLedgerError(
+                            "primary consumption must have "
+                            "recovery_depth 0 and empty recovery_of")
+                    # A movement's pair is consumed as a
+                    # primary at most once (cycle 23 re-review,
+                    # r1): check_head refuses a second primary
+                    # of an already-consumed pair in every
+                    # position (at head: already-consumed;
+                    # behind head: regression; the supersede
+                    # branch requires a strictly ahead
+                    # candidate, which the same pair is not).
+                    # A v2 primary whose pair occurred in ANY
+                    # earlier entry is therefore a second root
+                    # the append path can never write — corrupt.
+                    pair = self._pair_of(entry)
+                    if any(self._pair_of(earlier) == pair
+                           for earlier in entries[:index]):
+                        raise CorruptLedgerError(
+                            "primary consumption re-roots an "
+                            "already-consumed pair (cross-entry "
+                            "lineage)")
+                else:
+                    if not (1 <= depth <= MAX_RECOVERY_DEPTH) \
+                            or not rec_of:
+                        raise CorruptLedgerError(
+                            "recovery consumption must have "
+                            "recovery_depth in 1..MAX_RECOVERY_DEPTH "
+                            "and a non-empty recovery_of")
+                    # Cross-entry lineage (cycle 23 fix round,
+                    # r1-F1, strengthened at re-review): a
+                    # recovery must name, via recovery_of, its
+                    # IMMEDIATE PREDECESSOR entry (v1 or v2)
+                    # with the SAME old->new pair whose depth
+                    # is exactly this entry's depth - 1. The
+                    # burn a recovery consumes is the head at
+                    # consume time, so in every append-reachable
+                    # history the burn is the entry directly
+                    # before the recovery; grounding on any
+                    # earlier entry would admit branched
+                    # lineages ([primary, recovery d1, recovery
+                    # d1, recovery d2]) the append path can
+                    # never write. Ghost bindings, wrong-pair
+                    # recoveries and depth jumps are corrupt,
+                    # not merely unusual.
+                    pair = self._pair_of(entry)
+                    grounded = index > 0 and (
+                        entries[index - 1]["authorisation_id"]
+                        == rec_of
+                        and self._pair_of(entries[index - 1]) == pair
+                        and self._recorded_depth(entries, index - 1)
+                        == depth - 1)
+                    if not grounded:
+                        raise CorruptLedgerError(
+                            "recovery consumption is not grounded "
+                            "on its immediate predecessor at "
+                            "depth - 1 named by recovery_of "
+                            "(cross-entry lineage)")
+            elif seen_v2:
+                raise CorruptLedgerError(
+                    "consumption journal has a v1 entry after a "
+                    "v2 entry (positional monotonicity)")
+        return entries
+
+    @staticmethod
+    def _is_v2(entry) -> bool:
+        return "consumption_kind" in entry
+
+    @staticmethod
+    def derived_head_depth(entries) -> int:
+        """Recovery depth of the head entry in ``entries``.
+
+        v2 head: its recorded recovery_depth. v1 head: derived
+        by the pair-scan, retained ONLY as this v1 derivation
+        (cycle 23, R3) — exact under cycles 21-22 history,
+        where a v1 old->new pair occurs at most twice: first
+        occurrence is depth 0, second is depth 1 (so the depth
+        is the number of earlier entries with the head's exact
+        old->new pair). Empty journal: 0."""
+        if not entries:
+            return 0
+        head = entries[-1]
+        if CeremonyConsumptionLedger._is_v2(head):
+            return head["recovery_depth"]
+        head_pair = (head["old_cycle_seq"], head["old_payload_hash"],
+                     head["new_cycle_seq"], head["new_payload_hash"])
+        return sum(
+            1 for e in entries[:-1]
+            if (e["old_cycle_seq"], e["old_payload_hash"],
+                e["new_cycle_seq"], e["new_payload_hash"]) == head_pair)
+
+    @staticmethod
+    def _derive_lineage(entries, signed, recovery_of):
+        """Derive (consumption_kind, recovery_of, recovery_depth)
+        for consuming ``signed`` against ``entries``.
+
+        Rules (cycle 23, R3):
+        * reason != burned_unadopted -> ("primary", "", 0).
+        * reason == burned_unadopted -> ("recovery", bound_id,
+          head_depth + 1) IFF the bound recovery_of equals the
+          CURRENT head entry's authorisation_id AND candidate +
+          old pin exactly equal the head's target/old
+          (match_head_burn semantics) AND head depth <
+          MAX_RECOVERY_DEPTH. ``recovery_of=None`` is the
+          legacy/direct-caller sentinel: the bound id is taken
+          as the head entry's own authorisation_id (no issuance
+          entry exists to thread in that path); an explicit
+          string — including "" — is enforced exactly.
+        * Otherwise (bound burn not head, bound mismatch, or
+          cap reached) a burned_unadopted envelope is NEVER
+          reclassified as a primary (cycle 23 fix round,
+          r1-F2): the lineage is the non-primary marker
+          ("unrecoverable", "", 0), and check_head refuses
+          every such envelope (AlreadyConsumedError when the
+          candidate equals the head target; HeadRegressionError
+          at every other candidate position, and against an
+          empty journal). The marker is therefore never what
+          append_consumption writes — check_head runs first
+          in its retry loop and raises."""
+        if signed.reason != "burned_unadopted":
+            return ("primary", "", 0)
+        if not entries:
+            return ("unrecoverable", "", 0)
+        burn = CeremonyConsumptionLedger.match_head_burn(
+            entries, candidate=signed.candidate,
+            old_pin=signed.old_pin)
+        if burn is None:
+            return ("unrecoverable", "", 0)
+        if recovery_of is None:
+            # Legacy sentinel: no issuance binding was threaded
+            # in, so the head entry itself is the bound burn
+            # (synthetic head dicts in unit tests may not even
+            # carry an authorisation_id).
+            bound = burn.get("authorisation_id", "")
+        else:
+            bound = recovery_of
+            if bound != burn.get("authorisation_id"):
+                return ("unrecoverable", "", 0)
+        head_depth = CeremonyConsumptionLedger.derived_head_depth(
+            entries)
+        if head_depth >= MAX_RECOVERY_DEPTH:
+            return ("unrecoverable", "", 0)
+        return ("recovery", bound, head_depth + 1)
 
     # -- hash-chain plumbing (head() keeps the base contract)
 
@@ -795,19 +1089,18 @@ class CeremonyConsumptionLedger(HashChainJournal):
         candidate / old_pin are the projected shapes
         (old_pin None or {cycle_seq, payload_hash}).
 
-        One-shot rule (cycle 22, rev-r6 F1): the head entry
-        is returned ONLY IF no earlier journal entry carries
-        the same (old_cycle_seq, old_payload_hash,
-        new_cycle_seq, new_payload_hash) pair. A recovery
-        consumption writes an entry indistinguishable from
-        the original burn (same old->new pair; the strict
-        entry schema carries no reason field), so the
-        original burn is the FIRST consumption of that
-        movement and any later identical-pair head entry is
-        itself a recovery consumption — it cannot ground
-        another recovery. Recovery is therefore one-shot per
-        burned movement at both the authorise step (5b) and
-        consume (check_head), which both go through here."""
+        Cycle 23 (R3, superseding the cycle-22 one-shot rule /
+        DECISION-CONSUMPTION-HEAD Addendum 3, pending): this is
+        burn IDENTIFICATION only — candidate + old pin must
+        exactly equal the head entry's recorded target and old
+        pin. Whether that burn may ground a recovery is decided
+        by the depth rules (derived_head_depth / _derive_lineage
+        and authorise step 5b's cap refusal), not here: a
+        recovery consumption (schema v2) records its lineage,
+        so a recovery head CAN ground a further recovery up to
+        MAX_RECOVERY_DEPTH. The old pair-scan clause is removed
+        as the ruling mechanism and survives only inside
+        derived_head_depth for v1 heads."""
         if not entries:
             return None
         head = entries[-1]
@@ -821,20 +1114,10 @@ class CeremonyConsumptionLedger(HashChainJournal):
         elif (old_pin["cycle_seq"], old_pin["payload_hash"]) \
                 != (head["old_cycle_seq"], head["old_payload_hash"]):
             return None
-        head_pair = (head["old_cycle_seq"],
-                     head["old_payload_hash"],
-                     head["new_cycle_seq"],
-                     head["new_payload_hash"])
-        for earlier in entries[:-1]:
-            if (earlier["old_cycle_seq"],
-                    earlier["old_payload_hash"],
-                    earlier["new_cycle_seq"],
-                    earlier["new_payload_hash"]) == head_pair:
-                return None
         return head
 
     @staticmethod
-    def check_head(entries, signed) -> None:
+    def check_head(entries, signed, recovery_of=None) -> None:
         """Raise AlreadyConsumedError / HeadRegressionError if
         consuming ``signed`` against ``entries`` (a consumption
         journal snapshot, in append order) would violate the
@@ -850,33 +1133,100 @@ class CeremonyConsumptionLedger(HashChainJournal):
           with a different hash -> head regression (fork);
           ahead -> passes.
         * old pin (when present): behind the head seq ->
-          head regression; at the head seq requires the
-          head's hash, else head regression; ahead of the
-          head -> passes (advance_pin movements the verifier
-          never saw are legitimate). No old pin -> no
-          old-pin check.
+          head regression, EXCEPT the supersede case below;
+          at the head seq requires the head's hash, else
+          head regression; ahead of the head -> passes
+          (advance_pin movements the verifier never saw are
+          legitimate). No old pin -> no old-pin check.
+        * supersede (cycle 23 fix seat; narrowed in the fix
+          round, r1-F2 / r2-F3): the exception's EXACT scope
+          is — the candidate is STRICTLY AHEAD of the head
+          (cand_seq > head_seq), the old pin is BEHIND the
+          head (old_seq < head_seq), the recovery exception
+          above does NOT fire for this envelope, the
+          envelope's reason is NOT burned_unadopted (a
+          burned_unadopted envelope that does not validly
+          match the head burn NEVER rides supersede and is
+          never reclassified as a primary: candidate ahead
+          -> HeadRegressionError, candidate at the head
+          target -> AlreadyConsumedError, behind -> head
+          regression), and, when the old pin's seq is
+          recorded in the journal (as some entry's
+          new_cycle_seq, bound to that entry's
+          new_payload_hash, or as an entry's old_cycle_seq,
+          bound to its old_payload_hash), the old pin's hash
+          must equal the recorded hash for that seq, else
+          HeadRegressionError. Within that scope a fresh
+          primary may pass the behind-head old pin: the
+          burned head movement is superseded — abandoned,
+          never adopted; its burn remains a permanent journal
+          fact. This closes the adopter-level deadlock where
+          a movement consumed to its recovery cap with its
+          adoption pair discarded left the pin behind the
+          consumed head forever (every later primary refused
+          here, and advance_pin cannot cross the gap).
+          Justification: the envelope is fresh and
+          single-use, and the pin can only move FORWARD to
+          the ahead candidate (PinStore CAS + non-regression),
+          so no regression or replay is enabled; the head
+          becoming behind the pin is already a tolerated
+          state (advance_pin movements do it). Candidate
+          at/behind the head with a behind-head old pin still
+          refuses, and an old pin AT the head seq with a
+          different hash still refuses (fork of the head
+          target) at any candidate position.
+          Two named residuals of this rule: (i) an old-pin
+          seq NOT recorded in the journal cannot be
+          hash-checked by the verifier — the verifier cannot
+          observe the pin, so a behind-head old pin at an
+          unrecorded seq is unchecked at this layer;
+          adoption-side context binding (PinStore.adopt binds
+          the ceremony record to the store's actual pin) is
+          the control for that case. (ii) A resurfaced
+          superseded pair adopted later can stall one
+          sequence at AlreadyConsumedError before
+          self-healing via the next supersede (r2-F4): the
+          superseded movement's retained pair remains
+          adoptable against a pin that still equals its old
+          pin, moving the pin to a genuine ceremonied target
+          behind the head; the head's own movement then
+          cannot re-consume (its candidate equals the head
+          target), and liveness resumes at the next sequence
+          via supersede again. No regression and no replay
+          in either residual.
         * initial_anchor against a non-empty journal ->
           head regression (a first-ever anchor claim after
           recorded consumptions is a contradiction).
-        * burned_unadopted recovery is ONE-SHOT per burned
-          movement (rev-r6 F1): the scoped exception below
-          applies only when match_head_burn returns the head
-          entry, which it does only for the first consumption
-          of an old->new movement; once a recovery consumption
-          of that same pair has landed (it becomes the head,
-          with an identical earlier entry behind it), a
-          further burned_unadopted envelope for the same
-          target raises AlreadyConsumedError here instead of
-          riding the exception again."""
+        * burned_unadopted recovery is BOUNDED, not one-shot
+          (cycle 23, R3 / Addendum 3, pending): the scoped
+          exception below applies only when the lineage derived
+          by _derive_lineage is a recovery — the issuance-bound
+          recovery_of (threaded in by the caller; None = the
+          legacy direct-caller sentinel) equals the CURRENT
+          head entry's authorisation_id, candidate + old pin
+          exactly equal the head's target/old, and the head's
+          derived depth is < MAX_RECOVERY_DEPTH. A bound burn
+          that is no longer head (the race loser) and a bound
+          burn at head whose depth has reached the cap both
+          raise AlreadyConsumedError here (candidate == head
+          target, not a recovery). recovery_of is the issuance
+          entry's recovery_of, read by the consume mode from
+          the CeremonyAuthorisationLedger — never from the
+          request."""
         if not entries:
+            if signed.reason == "burned_unadopted":
+                # No head burn exists to recover (fix round,
+                # r1-F2): a recovery envelope against an empty
+                # journal is never reclassified as a primary.
+                raise HeadRegressionError(
+                    "burned_unadopted against an empty "
+                    "consumption journal (no head burn)")
             return
         last = entries[-1]
         head_seq = last["new_cycle_seq"]
         head_hash = last["new_payload_hash"]
-        recovery = signed.reason == "burned_unadopted" and \
-            CeremonyConsumptionLedger.match_head_burn(
-                entries, candidate=signed.candidate,
-                old_pin=signed.old_pin) is not None
+        recovery = CeremonyConsumptionLedger._derive_lineage(
+            entries, signed, recovery_of)[0] == "recovery"
         if signed.reason == "initial_anchor":
             raise HeadRegressionError(
                 "initial_anchor against a non-empty consumption "
@@ -896,12 +1246,52 @@ class CeremonyConsumptionLedger(HashChainJournal):
                 raise HeadRegressionError(
                     "candidate forks the consumed head at its "
                     "sequence")
+        if signed.reason == "burned_unadopted" and not recovery:
+            # Fix round (r1-F2): supersede NEVER applies to a
+            # burned_unadopted envelope. Candidate at/behind
+            # the head has already refused above (already
+            # consumed / fork / regression); the ahead position
+            # refuses here rather than landing as a primary.
+            if cand_seq > head_seq:
+                raise HeadRegressionError(
+                    "burned_unadopted envelope does not match "
+                    "the head burn and its candidate is ahead "
+                    "of the consumed head (supersede does not "
+                    "apply to recovery envelopes)")
         if not recovery and signed.old_pin is not None:
             old_seq = signed.old_pin["cycle_seq"]
             old_hash = signed.old_pin["payload_hash"]
             if old_seq < head_seq:
-                raise HeadRegressionError(
-                    "old pin is behind the consumed head")
+                # Supersede: a fresh primary whose candidate
+                # is strictly ahead of the head may pass a
+                # behind-head old pin — the burned head
+                # movement is abandoned, never adopted (see
+                # the docstring). Any other candidate position
+                # (at/behind the head) still refuses.
+                if cand_seq <= head_seq:
+                    raise HeadRegressionError(
+                        "old pin is behind the consumed head")
+                # Hash binding (fix round, r1-F2): when the
+                # old pin's seq is recorded in the journal —
+                # as an entry's new_cycle_seq (bound to its
+                # new_payload_hash) or as an entry's
+                # old_cycle_seq (bound to its
+                # old_payload_hash) — the claimed old hash
+                # must equal a recorded hash for that seq; a
+                # fabricated old-pin hash at a journal-known
+                # seq refuses. A seq recorded nowhere cannot
+                # be checked here (named residual (i)).
+                recorded = set()
+                for entry in entries:
+                    if entry["new_cycle_seq"] == old_seq:
+                        recorded.add(entry["new_payload_hash"])
+                    if entry["old_cycle_seq"] == old_seq:
+                        recorded.add(entry["old_payload_hash"])
+                if recorded and old_hash not in recorded:
+                    raise HeadRegressionError(
+                        "old pin hash does not match the "
+                        "journal-recorded hash for its sequence "
+                        "(supersede hash binding)")
             if old_seq == head_seq and old_hash != head_hash:
                 raise HeadRegressionError(
                     "old pin forks the consumed head at its "
@@ -909,19 +1299,30 @@ class CeremonyConsumptionLedger(HashChainJournal):
 
     # -- the commit point --------------------------------------------
 
-    def append_consumption(self, envelope, *, recorded_at) -> dict:
+    def append_consumption(self, envelope, *, recorded_at,
+                           recovery_of=None) -> dict:
         """Consume one ceremony authorisation. THE commit
         point for consumption: before this append lands
         nothing is consumed; after it lands the
         authorisation_id is spent whether or not anything
-        else succeeds.
+        else succeeds. New appends are always schema v2.
 
         Re-checks, against freshly reloaded entries on every
         attempt of the bounded reload-retry loop (the
         composition the issuance ledger uses): single-use by
         authorisation_id (AlreadyConsumedError) and the R3
         head rules (HeadRegressionError, or
-        AlreadyConsumedError for the same-target case). A
+        AlreadyConsumedError for the same-target case). The
+        v2 lineage (consumption_kind / recovery_of /
+        recovery_depth) is derived INSIDE that loop, from the
+        freshly reloaded entries on the same attempt, via
+        _derive_lineage — never from a stale snapshot — so a
+        race loser's bound burn is no longer head when its
+        lineage is derived and it refuses as
+        AlreadyConsumedError, while exactly one racer lands.
+        recovery_of is the issuance entry's recovery_of
+        threaded in by the consume mode (None = legacy
+        direct-caller sentinel, see _derive_lineage). A
         CorruptLedgerError from _save's freshness check means
         a competitor landed between reload and save: reload,
         re-check, retry — so the concurrent loser surfaces as
@@ -948,7 +1349,23 @@ class CeremonyConsumptionLedger(HashChainJournal):
                 raise AlreadyConsumedError(
                     "authorisation already consumed: "
                     f"{envelope.authorisation_id}")
-            self.check_head(self._entries, envelope)
+            self.check_head(self._entries, envelope,
+                            recovery_of=recovery_of)
+            kind, rec_of, depth = \
+                CeremonyConsumptionLedger._derive_lineage(
+                    self._entries, envelope, recovery_of)
+            if kind not in ("primary", "recovery"):
+                # Defensive (cycle 23 re-review, r6-N1):
+                # _derive_lineage's "unrecoverable" marker for a
+                # non-matching burned_unadopted envelope must
+                # never be written — check_head has already
+                # raised for it, and a journal containing the
+                # marker would fail its own load forever. This
+                # guard keeps the commit point safe even if a
+                # future check_head change lets it through.
+                raise LedgerError(
+                    "derived consumption kind is not writable: "
+                    f"{kind}")
             old_pin = envelope.old_pin
             try:
                 return self._append(
@@ -963,7 +1380,10 @@ class CeremonyConsumptionLedger(HashChainJournal):
                     new_cycle_seq=envelope.candidate["cycle_seq"],
                     new_payload_hash=envelope.candidate["payload_hash"],
                     evidence_hash=envelope.evidence_hash,
-                    consumed_at=recorded_at)
+                    consumed_at=recorded_at,
+                    consumption_kind=kind,
+                    recovery_of=rec_of,
+                    recovery_depth=depth)
             except CorruptLedgerError as exc:
                 last_error = exc
         raise last_error

@@ -80,7 +80,12 @@ from signing.gate_decision import (
     _parse_time,
     verify_signed_decision,
 )
-from trust.anchoring import AnchorError, update_anchor, verify_anchor
+from trust.anchoring import (
+    AnchorError,
+    load_anchor,
+    update_anchor,
+    verify_anchor,
+)
 from trust.errors import ShipRefused
 from trust.ledger import LedgerError
 from trust.manifest import ManifestError, verify_manifest
@@ -218,7 +223,24 @@ def record_ship(loop, *, root, manifest, signed, signing_key, ledger,
     likewise REQUIRED: it is the document that ties the ship to
     the loop's pre-ship state, and shipping without one skips
     every pre-burn state check.
+
+    The production recording path is anchored_record_ship
+    (below), which derives expected_ledger_head from the ship
+    anchor instead of taking a caller's word for it.
+
+    A loop carrying a cycle_hook is REFUSED before the
+    transaction opens (cycle 23, R1): the hook would fire inside
+    run_one_cycle — after the burn, before the finalise — and a
+    hook failure there (a PinAdoptionBurned is a SigningError,
+    not an InvalidTransition) would strand this transaction at
+    BURN_PENDING with the cycle recorded. Hooked loops and ship
+    recording do not compose; refuse instead.
     """
+    if getattr(loop, "cycle_hook", None) is not None:
+        raise ShipRefused(
+            "record_ship refuses a loop with a cycle_hook wired: "
+            "the hook would fire after the burn and could strand "
+            "the ship transaction; nothing was burned")
     if expected_ledger_head is None:
         raise ShipRefused(
             "record_ship requires an externally pinned ledger "
@@ -397,6 +419,88 @@ def record_ship(loop, *, root, manifest, signed, signing_key, ledger,
                 f"cycle {entry['cycle_id']} recorded and decision "
                 f"{signed.decision_id} finalised, but the "
                 f"ship-ledger anchor update failed: {exc}") from exc
+    return entry
+
+
+def anchored_record_ship(loop, *, root, manifest, signed, signing_key,
+                         ledger, coders, reviewers, delta, release,
+                         anchor_path, tx_anchor_path,
+                         expected_signer_id=None,
+                         expected_attestation=None,
+                         recorded_at="") -> dict:
+    """The production recording path (cycle 23, R5): record_ship
+    with the ledger head derived from the ship anchor, never
+    from a caller.
+
+    There is deliberately NO expected_ledger_head parameter —
+    its absence is the cross-check. Both anchors are verified
+    AND required to be CURRENT before anything is spent: the
+    ship anchor (kind="ship", at ``anchor_path``) against the
+    ship ledger, and the ship-tx anchor (kind="ship-tx", at
+    ``tx_anchor_path``) against the ShipTxJournal in the ship
+    ledger's directory. Currency means the anchor's recorded
+    head and seq equal the journal's CURRENT head and length: a
+    merely-verifying stale prefix anchor refuses, because
+    deriving the expected head from a prefix would bless a
+    ledger that has grown past its pin — the derivation would
+    be circular. Any refusal here is pre-burn: nothing is spent
+    and no ship transaction is opened.
+
+    The expected head is then the ship anchor's head, passed to
+    record_ship (which re-verifies the ship anchor itself and
+    advances it after the finalise). After record_ship returns
+    — the transaction COMMITTED — this wrapper advances the
+    ship-tx anchor with update_anchor: record_ship's own tx
+    journal appends are exactly what that anchor pins. If that
+    advance fails, the ship stands recorded and finalised; the
+    refusal says so, and the stale tx anchor is the anomaly
+    signal (the currency check above refuses the next anchored
+    recording until an operator reconciles).
+    """
+    stamp = recorded_at or _now()
+    tx_journal = ShipTxJournal(ledger.journal_dir)
+    for journal, path, kind, label in (
+            (ledger, anchor_path, "ship", "ship"),
+            (tx_journal, tx_anchor_path, "ship-tx", "ship-tx")):
+        try:
+            reasons = verify_anchor(journal, path, kind=kind)
+        except AnchorError as exc:
+            raise ShipRefused(
+                f"{label} anchor refused: {exc}") from exc
+        if reasons:
+            raise ShipRefused(
+                f"{label} anchor refused: " + ", ".join(reasons),
+                reasons)
+        anchor = load_anchor(path)
+        journal._reload()
+        if anchor is None or anchor["head"] != journal.head() \
+                or anchor["seq"] != len(journal.entries()):
+            raise ShipRefused(
+                f"{label} anchor is not current: it pins seq "
+                f"{anchor['seq'] if anchor else '?'}/"
+                f"{anchor['head'] if anchor else '?'} but the "
+                f"journal's current head is seq "
+                f"{len(journal.entries())}/{journal.head()}; "
+                "refusing to derive an expected head from a "
+                "stale prefix",
+                (f"{label}_anchor_not_current",))
+    expected_head = load_anchor(anchor_path)["head"]
+    entry = record_ship(
+        loop, root=root, manifest=manifest, signed=signed,
+        signing_key=signing_key, ledger=ledger, coders=coders,
+        reviewers=reviewers, delta=delta, release=release,
+        expected_signer_id=expected_signer_id,
+        expected_attestation=expected_attestation,
+        expected_ledger_head=expected_head, recorded_at=stamp,
+        anchor_path=anchor_path)
+    try:
+        update_anchor(tx_journal, tx_anchor_path, kind="ship-tx",
+                      recorded_at=stamp)
+    except AnchorError as exc:
+        raise ShipRefused(
+            f"cycle {entry['cycle_id']} recorded and decision "
+            f"{signed.decision_id} finalised, but the ship-tx "
+            f"anchor update failed: {exc}") from exc
     return entry
 
 

@@ -295,7 +295,20 @@ old pin exactly equals the head entry's recorded old
 pin, proven by the verifier against its consumption
 journal at authorise and again at consume. There is no
 un-consume, and the client never retries a consume
-automatically.
+automatically. Since cycle 23, recovery is a BOUNDED
+chain, not one-shot: a recovery whose own adoption fails
+may itself be recovered under `burned_unadopted`, with
+each consumption recording its lineage in the schema-v2
+consumption journal (`recovery_of` = the authorisation
+id of the burn it recovers, `recovery_depth`), up to
+`MAX_RECOVERY_DEPTH = 2` — a movement is consumable at
+most three times (primary + two recoveries). At the cap
+the movement is terminal: authorise refuses an unproven
+recovery and consume refuses the target as already
+consumed, and liveness resumes at the next snapshot
+sequence via a fresh primary `chain_gap_recovery` (via
+the supersede head rule when the pin sits behind the
+consumed head).
 
 **Flag-day drain procedure (v1 → v2 ceremony authorisations).**
 Cycle 20 replaces the ceremony envelope's HMAC with Ed25519
