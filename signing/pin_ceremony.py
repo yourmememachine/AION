@@ -15,9 +15,12 @@ This module is that ceremony, and nothing else:
   only when the candidate chains to the current pin. Same-sequence
   same-hash is an idempotent no-op; everything else is refused.
 - ``reanchor_pin`` is the exceptional movement. It requires ALL
-  of: an operator on a caller-supplied authorised list; an
-  allowlisted reason; independent evidence (a hex64 hash that is
-  NOT derived from the candidate itself — a pin must never be
+  of: a verifier-issued ceremony authorisation envelope (cycle
+  19 — operator authority comes from the verifier's own
+  protected operator list, never from the caller; there is no
+  caller-supplied list and no fallback path); an allowlisted
+  reason; independent evidence (a hex64 hash that is NOT derived
+  from the candidate itself — a pin must never be
   reconstructed from the snapshot being verified); and a candidate
   that passes every attestation binding (exact state bytes, exact
   calibration bytes, signer pin, calibration required) under the
@@ -53,18 +56,38 @@ Honest limits:
   expected and each one costs a ceremony — that cost is the
   stated price of fail-closed step-observation, not a defect
   this module hides.
-- Authorisation is a caller-supplied list checked in-process;
-  this module cannot prove the operator is a distinct human,
-  and the MAC is symmetric (any key holder can forge a record),
-  exactly as elsewhere in ``signing/``. The boundary remains key
-  placement and an operator list held outside the rollback domain.
-- Evidence independence is enforced only as non-equality with
-  the candidate's own hashes (war-room cycle 15, forced-dissent
-  seat): a re-hash of the candidate, or an invented hex64, passes
-  the check. That the evidence genuinely comes from an
-  independent source is a caller/operator duty this code cannot
-  prove; the record binds whatever hash was supplied so the
-  claim is at least auditable after the fact.
+- Authorisation (cycle 19) comes from a verifier-issued,
+  event-bound ceremony authorisation envelope: the operator list
+  lives in the verifier's protected config, and the envelope —
+  MACed under the verifier's key, in its own domain, under key
+  separation from the snapshot key (enforced in-process) —
+  binds the operator, the ceremony id, the reason, the old pin,
+  the candidate and the evidence hash. This module verifies the
+  envelope's MAC and expiry on the ceremony's single captured
+  clock and checks EXACT binding against the ceremony's captured
+  parameters; an envelope for any other operator, pin, candidate
+  or evidence is refused, and an envelope failure never falls
+  back to any other authority path. Operator identity is list
+  membership via the verifier's launch channel, not
+  authentication of a human, and the MAC is symmetric (any
+  holder of the verifier key can forge an envelope), exactly as
+  elsewhere in ``signing/``.
+- Evidence provenance (cycle 19) is attribution + event binding
+  + issuance-side single-use + a signed binding — NOT artefact
+  inspection. The verifier never inspects the evidence artefact
+  the hash names; a random hex64 presented by a LISTED operator
+  is still issuable. What the envelope proves is that a listed
+  operator presented this evidence hash bound to this exact
+  event, that the presentation was ledgered single-use at
+  issuance, and that the binding is signed by the verifier's
+  key. In-process, evidence independence is additionally
+  enforced as non-equality with the candidate's own hashes
+  (war-room cycle 15, forced-dissent seat): a re-hash of the
+  candidate is refused at the ceremony as defence in depth.
+  The envelope's ``evidence_ref`` is not (and cannot be)
+  equality-checked in-process — the caller has no independent
+  value for it; it is bound transitively through the audit
+  record's ``authorisation_id``.
 - The returned pin is the ordinary pin shape, so downstream
   continuity looks clean unless the caller retains and checks
   the ceremony record; nothing in the pin itself marks the jump.
@@ -101,15 +124,31 @@ issued, not that it applies to the caller's pin state.
 ``verify_ceremony_record`` refuses one-step records (which this
 ceremony can never issue) and, when the caller supplies the
 expected pin context, records replayed against a different pin
-state. What cycle 16 does NOT fix, stated plainly: operator
-authority is still a caller-supplied list (independent authority
-needs a protected source — an owner decision, not a local
-check); evidence is still a bare digest whose provenance this
-module cannot prove (history reuse checks apply only when a
-history is supplied); nothing here persists the pin and the
-record atomically; and the ceremony MAC uses the snapshot
-signing key — key separation is stated as required future work,
-not enforced here.
+state. What cycle 16 did NOT fix, and cycle 19 now addresses via
+the protected path: (1) operator authority was a caller-supplied
+list — it now comes from a verifier-issued, event-bound
+authorisation whose operator list lives in the verifier's
+protected config; (2) evidence was a bare digest whose
+provenance this module could not prove — it is now bound,
+attributed and issuance-side single-use as described above.
+The REMAINING limits, stated plainly: consumption-side replay —
+the verifier's ledger burns the (ceremony_id, evidence_hash)
+pair at ISSUANCE, not at consumption, so the same envelope
+presented to ``reanchor_pin`` twice within its TTL succeeds if
+``ceremony_history`` is omitted (history stays optional this
+cycle; making it mandatory belongs to the held cycles'
+re-review); no consumption-side ledger-presence check exists
+in-process (the ceremony cannot read the verifier's ledgers —
+limit M5); the ceremony journal's reuse memory is
+rollback-vulnerable until the follow-up
+``ceremony-journal-anchoring`` lands (reuse is prevented against
+an intact journal; after a rollback it is detectable only for
+same-ceremony_id reuse, and otherwise only by audit against
+retained envelopes — not prevented by one); nothing here
+persists the pin and the record atomically; and the ceremony
+RECORD's MAC still uses the snapshot signing key — key
+separation is enforced for the
+AUTHORISATION (cycle 19), the record's own key is unchanged.
 """
 
 from __future__ import annotations
@@ -131,6 +170,10 @@ from signing.gate_decision import (
     _parse_time,
     _sha256,
     key_id_for,
+)
+from signing.ceremony_authorisation import (
+    SignedCeremonyAuthorisation,
+    verify_ceremony_authorisation,
 )
 from signing.state_snapshot import (
     SignedStateSnapshot,
@@ -298,6 +341,11 @@ class PinCeremonyRecord:
     performed_at: str
     payload_hash: str
     signature: str
+    # Cycle 19: the authorisation that governed this ceremony,
+    # bound under the record MAC. Both fields are REQUIRED — a
+    # record that claims no authorisation is unrepresentable.
+    ceremony_id: str
+    authorisation_id: str
 
     def payload(self) -> dict:
         return {
@@ -311,6 +359,8 @@ class PinCeremonyRecord:
             "candidate_signer_id": self.candidate_signer_id,
             "candidate_key_id": self.candidate_key_id,
             "key_id": self.key_id, "performed_at": self.performed_at,
+            "ceremony_id": self.ceremony_id,
+            "authorisation_id": self.authorisation_id,
         }
 
     @property
@@ -389,8 +439,11 @@ def _check_ceremony_history(ceremony_history, *, signing_key,
 
 def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
                  state_bytes, calibration_bytes, expected_signer_id,
-                 operator_id, authorised_operators, reason,
-                 evidence_hash, strict_reasons=None,
+                 operator_id, reason,
+                 evidence_hash, authorisation,
+                 authorisation_key: SigningKey,
+                 expected_verifier_signer_id,
+                 strict_reasons=None,
                  now=None, ceremony_history=None) \
         -> tuple[dict, PinCeremonyRecord]:
     """Ceremonied re-anchor: returns (new_pin, audit_record).
@@ -398,34 +451,104 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     See the module docstring for the full rule set. Every refusal
     is a SigningError with the specific failed condition; nothing
     is returned on refusal, so a failed ceremony cannot be
-    mistaken for a moved pin."""
+    mistaken for a moved pin.
+
+    Cycle 19: authority is the ``authorisation`` envelope — a
+    ``SignedCeremonyAuthorisation`` object (a raw dict is
+    refused) issued by the verifier under ``authorisation_key``
+    for the verifier identity ``expected_verifier_signer_id``.
+    There is no caller-supplied operator list and no fallback:
+    an envelope that fails verification or exact binding refuses
+    the ceremony outright."""
     if not isinstance(signing_key, SigningKey) \
             or signing_key.key_id != key_id_for(signing_key.key):
         raise SigningError("signing key is inconsistent")
     if not isinstance(signed, SignedStateSnapshot):
         raise SigningError("signed must be a SignedStateSnapshot")
+    # (1) Type checks (cycle 19): the authorisation must be the
+    # typed envelope object, never a raw dict a caller assembled.
+    if not isinstance(authorisation, SignedCeremonyAuthorisation):
+        raise SigningError(
+            "authorisation must be a SignedCeremonyAuthorisation")
+    if not isinstance(authorisation_key, SigningKey):
+        raise SigningError("authorisation_key must be a SigningKey")
+    # (2) KEY SEPARATION (cycle 19): the authorisation key must
+    # differ from the snapshot signing key, checked BEFORE
+    # envelope verification so the refusal is unambiguous. Two
+    # keys with the same key_id are the same key for every
+    # purpose this module recognises.
+    if authorisation_key.key_id == signing_key.key_id:
+        raise SigningError(
+            "ceremony authorisation key must differ from the "
+            "snapshot signing key (key separation)")
     _check_id(operator_id, "operator id")
-    if not isinstance(authorised_operators, (list, tuple, set, frozenset)) \
-            or operator_id not in authorised_operators:
-        raise SigningError("operator is not authorised for a pin ceremony")
     if reason not in REASONS:
         raise SigningError(f"ceremony reason must be one of {sorted(REASONS)}")
     _check_hex64(evidence_hash, "evidence hash")
+    # One clock capture for the whole ceremony (cycle 16): the
+    # verifier's freshness check, the authorisation envelope's
+    # expiry and the record's performed_at must never straddle
+    # an expiry boundary by reading the clock twice.
+    moment = _now() if now is None else now
+    old_seq = old_hash = None
+    old_captured = None
+    if old_pin is not None:
+        # Capture the old pin ONCE, before binding: the envelope
+        # is compared against these captured values, never a
+        # re-read of the caller's dict.
+        old_seq, old_hash, old_captured = _check_pin(old_pin, "old pin")
+    # (3) Envelope verification under the verifier's key, pinned
+    # to the expected verifier signer, judged on the ceremony's
+    # single captured clock.
+    auth_reasons = verify_ceremony_authorisation(
+        authorisation, signing_key=authorisation_key,
+        expected_signer_id=expected_verifier_signer_id, now=moment)
+    if auth_reasons != ():
+        raise SigningError(
+            "ceremony authorisation does not verify: "
+            f"{list(auth_reasons)}")
+    # (4) EXACT binding equality against the captured actuals.
+    # Each envelope field is read ONCE; every mismatch is its
+    # own refusal. The envelope's top-level signer_id/key_id are
+    # the VERIFIER's; the candidate's are the SNAPSHOT's — never
+    # conflated. evidence_ref is NOT equality-checked here (no
+    # ceremony-side counterpart); it is bound transitively via
+    # the record's authorisation_id.
+    env_operator_id = authorisation.operator_id
+    env_reason = authorisation.reason
+    env_old_pin = authorisation.old_pin
+    env_candidate = authorisation.candidate
+    env_evidence_hash = authorisation.evidence_hash
+    if env_operator_id != operator_id:
+        raise SigningError(
+            "ceremony authorisation is for a different operator")
+    if env_reason != reason:
+        raise SigningError(
+            "ceremony authorisation is for a different reason")
+    expected_old_pin = None if old_captured is None else {
+        "cycle_seq": old_seq, "payload_hash": old_hash}
+    if env_old_pin != expected_old_pin:
+        raise SigningError(
+            "ceremony authorisation is bound to a different old pin")
+    expected_candidate = {
+        "cycle_seq": signed.cycle_seq,
+        "payload_hash": signed.payload_hash,
+        "signer_id": signed.signer_id, "key_id": signed.key_id}
+    if env_candidate != expected_candidate:
+        raise SigningError(
+            "ceremony authorisation is bound to a different candidate")
+    if env_evidence_hash != evidence_hash:
+        raise SigningError(
+            "ceremony authorisation is bound to different evidence")
+    # (5) The evidence non-equality check still runs — defence
+    # in depth behind the envelope binding.
     if evidence_hash in (signed.payload_hash, signed.snapshot_id,
                          signed.state_sha256, signed.calibration_sha256):
         raise SigningError(
             "ceremony evidence must be independent of the candidate; "
             "a pin must never be reconstructed from the snapshot "
             "being verified")
-    # One clock capture for the whole ceremony (cycle 16): the
-    # verifier's freshness check and the record's performed_at
-    # must never straddle an expiry boundary by reading the
-    # clock twice.
-    moment = _now() if now is None else now
-    old_seq = old_hash = None
-    old_captured = None
     if old_pin is not None:
-        old_seq, old_hash, old_captured = _check_pin(old_pin, "old pin")
         if reason != REASON_CHAIN_GAP_RECOVERY:
             # Gate on state, not label (war-room cycle 15, rev-r2):
             # with a usable pin present, chain_gap_recovery is the
@@ -519,6 +642,8 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
         "candidate_signer_id": signed.signer_id,
         "candidate_key_id": signed.key_id,
         "key_id": signing_key.key_id, "performed_at": performed_at,
+        "ceremony_id": authorisation.ceremony_id,
+        "authorisation_id": authorisation.authorisation_id,
     }
     payload_hash = _payload_hash(payload)
     record = PinCeremonyRecord(
@@ -528,7 +653,9 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
         candidate_signer_id=signed.signer_id, candidate_key_id=signed.key_id,
         key_id=signing_key.key_id, performed_at=performed_at,
         payload_hash=payload_hash,
-        signature=_mac(signing_key.key, payload_hash, signing_key.key_id))
+        signature=_mac(signing_key.key, payload_hash, signing_key.key_id),
+        ceremony_id=authorisation.ceremony_id,
+        authorisation_id=authorisation.authorisation_id)
     return _pin_of(signed), record
 
 
@@ -588,6 +715,19 @@ def verify_ceremony_record(record, *, signing_key: SigningKey,
     if not isinstance(record.evidence_hash, str) \
             or not _HEX64_RE.fullmatch(record.evidence_hash):
         reasons.append("invalid_evidence")
+    # Cycle 19: the record must name the authorisation that
+    # governed the ceremony — a well-formed ceremony id and a
+    # hex64 authorisation id, under one shared reason.
+    authorisation_ok = True
+    try:
+        _check_id(record.ceremony_id, "ceremony id")
+    except SigningError:
+        authorisation_ok = False
+    if not isinstance(record.authorisation_id, str) \
+            or not _HEX64_RE.fullmatch(record.authorisation_id):
+        authorisation_ok = False
+    if not authorisation_ok:
+        reasons.append("invalid_authorisation")
     if not _is_seq(record.new_cycle_seq) \
             or (record.old_cycle_seq is not None
                 and not _is_seq(record.old_cycle_seq)):

@@ -68,7 +68,11 @@ a known limit, not a guarantee.
 Protected scope
 ---------------
 Tier A (the gate's, authoritative): check_protected_paths refuses any
-path under eval/ and core/loop.py exactly. Paths are canonicalised
+path under eval/ and exactly core/loop.py, oversight/__init__.py,
+oversight/approval.py, trust/__init__.py and trust/pathpolicy.py
+(the last four added in cycle 19: the canonicaliser chain the gate's
+verdict trusts, plus the package __init__ files on its import path).
+Paths are canonicalised
 BEFORE that check (backslashes and duplicate separators collapsed,
 "." segments dropped); this local canonicalisation is now redundant
 defence-in-depth, since the gate's adoption of path-policy/1 in

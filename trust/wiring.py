@@ -85,9 +85,8 @@ Production client rules (production_client): the env mapping
 is copied and the copy is validated BEFORE any client exists
 and before anything can be spawned. Keys are restricted to the
 wrapper's allowlist as shipped in
-deploy/verifier-identity/run-verifier.sh (ALLOWED_KEYS, 14
-names — the design note's count of 15 does not match the
-shipped wrapper; the shipped wrapper governs). An unknown key
+deploy/verifier-identity/run-verifier.sh (ALLOWED_KEYS, 15
+names — the shipped wrapper governs). An unknown key
 refuses, including AION_SHIP_ANCHOR_PATH, which does not exist
 anywhere in the verifier's configuration. The five core names,
 the deployment mode and both anchor paths are required
@@ -171,7 +170,7 @@ __all__ = [
 ]
 
 # The wrapper's allowlist, copied from ALLOWED_KEYS in
-# deploy/verifier-identity/run-verifier.sh as shipped (14
+# deploy/verifier-identity/run-verifier.sh as shipped (15
 # names). A key outside this set is not verifier configuration
 # and refuses; the verifier itself would ignore or reject it,
 # and a wiring layer that passed it through would be smuggling
@@ -191,6 +190,7 @@ ALLOWED_ENV_KEYS = frozenset({
     "AION_BUDGETS_ANCHOR_PATH",
     "AION_BUDGETS_ANCHOR_INIT",
     "AION_DEPLOYMENT_MODE",
+    "AION_CEREMONY_OPERATORS",
 })
 
 # Required non-empty for a production client: the five core

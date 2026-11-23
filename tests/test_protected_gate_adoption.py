@@ -39,8 +39,11 @@ from eval.calibration import (
 from eval.gate import (
     GateInputError,
     VerifierAttestation,
+    check_protected_paths,
     evaluate_self_change,
 )
+from oversight.approval import is_protected_path
+from trust import pathpolicy
 from eval.registry import CorruptRegistryError, EvalRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +116,86 @@ class GateAdoptionIntegrationTests(unittest.TestCase):
         # rather than returning a (potentially signed) verdict.
         with self.assertRaises(GateInputError):
             _evaluate(["a/../../eval/gate.py"])
+
+
+class GateClosureNegativeTests(unittest.TestCase):
+    """Cycle 19 negative tests (DESIGN-FINAL A5, external seats'
+    requirement): the canonicaliser chain is protected by the gate
+    itself, so the two-step canonicaliser-poisoning attack is
+    broken at step 1.
+
+    The oversight flip is also pinned here (seat A's choice of
+    home): because oversight's is_protected_path delegates to the
+    gate, trust/pathpolicy.py — previously NOT oversight-protected
+    — now reports protected through that delegation too."""
+
+    CANONICALISER_SET = ("trust/pathpolicy.py", "oversight/approval.py",
+                         "trust/__init__.py", "oversight/__init__.py")
+
+    def test_oversight_flip_trust_pathpolicy_now_protected(self):
+        self.assertTrue(is_protected_path("trust/pathpolicy.py"))
+        self.assertTrue(is_protected_path("trust/__init__.py"))
+
+    # N1: a change editing only the canonicaliser is refused by
+    # the gate itself, for each file in the canonicaliser set.
+    def test_n1_each_canonicaliser_file_flagged_by_gate(self):
+        for path in self.CANONICALISER_SET:
+            with self.subTest(path=path):
+                self.assertEqual(check_protected_paths([path]), (path,))
+
+    def test_n1_each_canonicaliser_file_refused_end_to_end(self):
+        for path in self.CANONICALISER_SET:
+            with self.subTest(path=path):
+                decision = _evaluate([path])
+                self.assertFalse(decision.accepted)
+                self.assertIn("protected_path", decision.reasons)
+                self.assertEqual(decision.protected_violations, (path,))
+
+    def test_n1_noncanonical_variants_flag_with_canonical_spelling(self):
+        self.assertEqual(check_protected_paths(["trust//pathpolicy.py"]),
+                         ("trust/pathpolicy.py",))
+        self.assertEqual(check_protected_paths(["oversight/./approval.py"]),
+                         ("oversight/approval.py",))
+
+    def test_n1_policy_classify_reports_gate_and_overlap(self):
+        self.assertEqual(
+            pathpolicy.classify("trust/pathpolicy.py")["protected_by"],
+            ["gate"])
+        # The gate/oversight overlap is reported honestly, not hidden.
+        self.assertEqual(
+            pathpolicy.classify("oversight/approval.py")["protected_by"],
+            ["gate", "oversight"])
+
+    # N2 (two-step): step 1 — a change editing only the
+    # canonicaliser is refused protected_path, so there is no
+    # accepted tree state in which the canonicaliser differs;
+    # step 2 — with the canonicaliser unmodified, the former
+    # gate-miss spellings that would have been the bypass payload
+    # are still refused. No in-process monkeypatch theatre: the
+    # gate is a pure function over path strings and never reads
+    # the candidate bytes of the canonicaliser, so "modification"
+    # is modelled exactly as the threat model poses it — as a
+    # proposed change naming the file.
+    def test_n2_two_step_canonicaliser_attack_broken_at_step_1(self):
+        # Step 1: the poison attempt is itself refused.
+        for path in ("trust/pathpolicy.py", "oversight/approval.py"):
+            with self.subTest(step=1, path=path):
+                decision = _evaluate([path])
+                self.assertFalse(decision.accepted)
+                self.assertIn("protected_path", decision.reasons)
+                self.assertEqual(decision.protected_violations, (path,))
+        # Step 2: former gate-miss spellings still refused by the
+        # canonicaliser as shipped.
+        for raw, canonical in (("core//loop.py", "core/loop.py"),
+                               ("eval//gate.py", "eval/gate.py"),
+                               ("trust//pathpolicy.py",
+                                "trust/pathpolicy.py")):
+            with self.subTest(step=2, raw=raw):
+                self.assertEqual(check_protected_paths([raw]), (canonical,))
+        decision = _evaluate(["core//loop.py"])
+        self.assertFalse(decision.accepted)
+        self.assertIn("protected_path", decision.reasons)
+        self.assertEqual(decision.protected_violations, ("core/loop.py",))
 
 
 # --- Duplicate-key artefact: P-1 / P-2 after the cycle-13 fix. --

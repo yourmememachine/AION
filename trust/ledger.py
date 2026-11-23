@@ -375,6 +375,34 @@ class SigningLedger(HashChainJournal):
             signer_id=record["payload"]["signer_id"],
             format="sealed-eval")
 
+    def append_ceremony_authorisation(self, signed, *,
+                                      recorded_at) -> dict:
+        """Ledger a ceremony authorisation envelope (cycle 19) in
+        the EXISTING entry shape — EXTRA_KEYS is untouched, so no
+        journal format migration. Column reuse, documented: the
+        proposal_id column holds the authorisation's scope id,
+        which for a ceremony authorisation is its ceremony_id
+        (precedent: append_claim stores the claimant in signer_id;
+        append_eval_attestation stores proposal_id="").
+        decision_id is the authorisation_id, purpose is the
+        envelope's purpose, format "ceremony-authorisation",
+        accepted=True (an authorisation is an issuance, never a
+        rejection artefact — refusals are unledgered)."""
+        from signing.ceremony_authorisation import \
+            SignedCeremonyAuthorisation
+        if not isinstance(signed, SignedCeremonyAuthorisation):
+            raise LedgerError(
+                "can only ledger a SignedCeremonyAuthorisation")
+        self._reload()
+        return self._append(
+            "sign", recorded_at, decision_id=signed.authorisation_id,
+            payload_hash=signed.payload_hash,
+            purpose="pin-ceremony-authorisation",
+            proposal_id=signed.ceremony_id,
+            accepted=True,
+            signer_id=signed.signer_id,
+            format="ceremony-authorisation")
+
     def append_claim(self, claim_document, *, recorded_at,
                      signer_id="") -> dict:
         """Ledger an UNSIGNED claim. A claim is a caller assertion
@@ -494,3 +522,80 @@ class SigningLedger(HashChainJournal):
         self._reload()
         return any(e["kind"] == "sign" and e["decision_id"] == decision_id
                    for e in self._entries)
+
+
+class CeremonyAuthorisationLedger(HashChainJournal):
+    """Single-use store of record for ceremony authorisations
+    (cycle 19): one entry per ISSUED authorisation, in its own
+    file in the verifier home.
+
+    The signing ledger's entry shape carries neither ceremony_id
+    nor evidence_hash, and widening its EXTRA_KEYS would be a
+    journal format migration (every historical entry would fail
+    the exact-key-set load check) — so anti-replay lives here, in
+    a sibling journal, and the signing ledger records the same
+    issuance in its own shape via
+    SigningLedger.append_ceremony_authorisation.
+
+    The verifier's ceremony_authorise mode appends here FIRST:
+    this append is the commit point for single-use. After it
+    lands, the (ceremony_id, evidence_hash) pair is spent whether
+    or not anything else succeeds; a later failure withholds the
+    envelope and the pair stays burned (recovery is a NEW
+    ceremony_id with a NEW evidence bundle).
+
+    Entries are kind "authorise" — never "sign": the signature
+    inference ("a signature with no ledger entry is evidence of
+    a second signer") lives in the signing ledger; this journal
+    is the reuse memory.
+
+    Rollback residual, stated plainly: no external anchor covers
+    this journal yet (follow-up: ceremony-journal-anchoring).
+    Rolling this file back erases the reuse memory — a listed
+    operator could then obtain a second authorisation for the
+    same evidence under a new ceremony_id. The anchored signing
+    ledger preserves the issuance record (authorisation_id,
+    payload_hash, ceremony_id as proposal_id), so a duplicate
+    issuance under the SAME ceremony_id leaves a visible
+    duplicate trace there; but it stores neither evidence_hash
+    nor operator_id, so evidence reuse under a NEW ceremony_id
+    is NOT detectable from the anchored store without the
+    retained envelopes. The evidence-reuse guarantee is:
+    prevented against an intact journal; after a rollback,
+    detectable only for same-ceremony_id reuse, and otherwise
+    only by audit against retained envelopes."""
+
+    FILENAME = "ceremony-authorisations.json"
+    EXTRA_KEYS = frozenset({"authorisation_id", "payload_hash",
+                            "ceremony_id", "evidence_hash",
+                            "operator_id", "issued_at"})
+
+    def find_by_ceremony(self, ceremony_id):
+        self._reload()
+        for entry in self._entries:
+            if entry["ceremony_id"] == ceremony_id:
+                return dict(entry)
+        return None
+
+    def find_by_evidence(self, evidence_hash):
+        self._reload()
+        for entry in self._entries:
+            if entry["evidence_hash"] == evidence_hash:
+                return dict(entry)
+        return None
+
+    def append_authorisation(self, signed, *, recorded_at) -> dict:
+        from signing.ceremony_authorisation import \
+            SignedCeremonyAuthorisation
+        if not isinstance(signed, SignedCeremonyAuthorisation):
+            raise LedgerError(
+                "can only ledger a SignedCeremonyAuthorisation")
+        self._reload()
+        return self._append(
+            "authorise", recorded_at,
+            authorisation_id=signed.authorisation_id,
+            payload_hash=signed.payload_hash,
+            ceremony_id=signed.ceremony_id,
+            evidence_hash=signed.evidence_hash,
+            operator_id=signed.operator_id,
+            issued_at=recorded_at)

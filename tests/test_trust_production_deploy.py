@@ -543,6 +543,7 @@ class LiveDeploymentTests(unittest.TestCase):
             "AION_VERIFIER_IDENTITY_BUDGET", "AION_ANCHOR_PATH",
             "AION_ANCHOR_INIT", "AION_BUDGETS_ANCHOR_PATH",
             "AION_BUDGETS_ANCHOR_INIT", "AION_DEPLOYMENT_MODE",
+            "AION_CEREMONY_OPERATORS",
         }
         # LC_CTYPE is injected by runuser/PAM itself, after the
         # wrapper's env -i scrub: it is not caller-controlled and
@@ -938,6 +939,10 @@ class ProductionModeSpecTests(unittest.TestCase):
             "AION_DEPLOYMENT_MODE": "production",
             "AION_ANCHOR_PATH": str(anchor),
             "AION_BUDGETS_ANCHOR_PATH": str(budgets_anchor),
+            # Cycle 19: production also requires the ceremony
+            # operator list at startup (the 15th allowlisted
+            # name); a "full production gate" fixture carries it.
+            "AION_CEREMONY_OPERATORS": "operator-uma",
         })
         self.assertEqual(
             result.returncode, 0,

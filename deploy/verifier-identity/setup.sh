@@ -92,6 +92,14 @@ AION_ANCHOR_PATH=/var/lib/aion-verifier/anchors/signing.anchor.json
 AION_ANCHOR_INIT=
 AION_BUDGETS_ANCHOR_PATH=/var/lib/aion-verifier/anchors/budgets.anchor.json
 AION_BUDGETS_ANCHOR_INIT=
+# Ceremony operator authority (cycle 19): comma-separated
+# operator ids authorised to obtain ceremony authorisations
+# (mode ceremony_authorise). The list lives ONLY in this
+# protected env file — a request can never carry it. Production
+# refuses startup while this is empty; research loads with the
+# mode disabled. Fill with the operator ids, e.g.
+# AION_CEREMONY_OPERATORS=operator-uma
+AION_CEREMONY_OPERATORS=
 # Production steady state (after the one-time anchor ceremony):
 # anchoring is mandatory and fail-closed, and the INIT flags
 # above are refused. Research deployments must set this variable

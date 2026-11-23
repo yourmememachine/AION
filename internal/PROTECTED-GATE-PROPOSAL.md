@@ -1,5 +1,7 @@
 STATUS: APPROVED by Dilip, 2026-11-20. Implemented in the combined cycle-13 run in the Round-C form (function-local import in eval.gate.check_protected_paths; the option-(a) delegation flip was NOT taken), plus P-1/P-2 duplicate-key rejection and the gate negative-integration test. One war-room finding is NOT closed by this implementation and is escalated to Dilip: the gate now trusts trust/pathpolicy.py and oversight/approval.py, which are outside the gate's own protected list (eval/ + core/loop.py); closing it needs a further owner-approved protected change (backlog: protected-list-reconciliation). See internal/REVIEW-CYCLE-13.md. Item A's ship is withheld pending that decision.
 
+ADDENDUM, 2026-11-22/23: the escalated decision was taken (internal/DECISION-PROTECTED-GATE-EXTENSION.md — EXTEND) and closed by cycle 19 (internal/BUILD-CYCLE-19.md, REVIEW-CYCLE-19.md): the gate's protected list now covers trust/pathpolicy.py, oversight/approval.py and both import-path package __init__ files, with the layered closure analysis in docs/GATE-CLOSURE.md (L3 residual open, follow-up gate-import-isolation). Item A SHIPPED with cycle 19, provisional on the external seats. One interpretation from that cycle is flagged for owner ratification: the operator-authority list lives in the verifier's protected env config, not inside the gate (see BUILD-CYCLE-19.md, F4).
+
 # Protected Gate Rule proposal — gate adoption of path-policy/1
 
 Item: CROSS-CHECK-4 item 4 (Trust Boundary v3). Both external

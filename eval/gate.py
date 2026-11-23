@@ -52,8 +52,22 @@ SUITES = ("public", "sealed", "capability")
 # Protected scope: the evaluator, this gate, the calibration log and the
 # cycle state machine are the judges of every change, so no self-change
 # may target them. A change that edits its own judge can fake any gain.
+# Cycle 19 extension: the gate also protects the files that define the
+# canonicalisation its protected-path verdict uses, plus the two package
+# __init__ files executed to reach them — the verdict-defining chain,
+# not an unqualified dependency closure. trust/pathpolicy.py is
+# protected because the gate judges canonical spellings through its
+# canonicalise; oversight/approval.py is protected because that
+# canonicalise delegates to its canonicalise_path, the single source of
+# spelling rules; trust/__init__.py and oversight/__init__.py are
+# protected because both execute on that import path and control what
+# the canonicaliser names resolve to. The residual beyond this chain
+# (modules executed transitively via trust/__init__ re-exports) is
+# analysed in docs/GATE-CLOSURE.md and is NOT closed by this list.
 PROTECTED_PREFIXES = ("eval/",)
-PROTECTED_FILES = ("core/loop.py",)
+PROTECTED_FILES = ("core/loop.py", "oversight/__init__.py",
+                   "oversight/approval.py", "trust/__init__.py",
+                   "trust/pathpolicy.py")
 
 
 def check_protected_paths(changed_paths) -> tuple:

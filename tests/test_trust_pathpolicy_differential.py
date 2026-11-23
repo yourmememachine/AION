@@ -88,10 +88,15 @@ GATE_MISS = "gate-miss"
 #   cycle-13 adoption — kept as a class, and pinned empty by
 #   DivergenceTableTests, so a regression refills it loudly.
 POLICY_CATCHES_OVERSIGHT = "policy-catches-oversight"
-#   policy oversight-protected; the gate never protects oversight
-#   scope at all (its list is eval/ + core/loop.py only) — this
-#   divergence is by design and survives adoption (oversight's
-#   list is a superset, per the proposal's remainder section)
+#   policy oversight-protected; the gate does not protect it.
+#   Since cycle 19 the gate protects exactly one oversight file
+#   by exact name (oversight/approval.py, plus oversight/__init__.py
+#   under the same exact-file extension), so spellings of THAT
+#   file have moved to GATE_CATCHES_ANYWAY / CANONICAL with
+#   protected_by ["gate", "oversight"]; what remains in this class
+#   is oversight scope the gate still does not carry (the bare
+#   "oversight" spellings) — that remainder is by design
+#   (oversight's list is a superset, per the proposal)
 GATE_CATCHES_ANYWAY = "gate-catches-anyway"
 #   non-canonical, but the gate flags it. After adoption the
 #   mechanism is canonicalisation: the gate judges the canonical
@@ -121,7 +126,13 @@ EXPECTED = [
     ("eval/registry.py", CANONICAL, "eval/registry.py",
      ["gate"], True),
     ("oversight/approval.py", CANONICAL, "oversight/approval.py",
-     ["oversight"], False),
+     ["gate", "oversight"], True),
+    ("oversight/__init__.py", CANONICAL, "oversight/__init__.py",
+     ["gate", "oversight"], True),
+    ("trust/pathpolicy.py", CANONICAL, "trust/pathpolicy.py",
+     ["gate"], True),
+    ("trust/__init__.py", CANONICAL, "trust/__init__.py",
+     ["gate"], True),
     ("oversight", CANONICAL, "oversight", ["oversight"], False),
     ("trust/ledger.py", CANONICAL, "trust/ledger.py", [], False),
     ("docs/ASI-MAP.md", CANONICAL, "docs/ASI-MAP.md", [], False),
@@ -191,12 +202,16 @@ EXPECTED = [
     # --- Oversight scope the gate does not carry at all. --------
     ("oversight/", POLICY_CATCHES_OVERSIGHT, "oversight",
      ["oversight"], False),
-    ("oversight//approval.py", POLICY_CATCHES_OVERSIGHT,
-     "oversight/approval.py", ["oversight"], False),
-    ("oversight/approval.py/", POLICY_CATCHES_OVERSIGHT,
-     "oversight/approval.py", ["oversight"], False),
-    ("oversight/approval.py/.", POLICY_CATCHES_OVERSIGHT,
-     "oversight/approval.py", ["oversight"], False),
+    ("oversight//approval.py", GATE_CATCHES_ANYWAY,
+     "oversight/approval.py", ["gate", "oversight"], True),
+    ("oversight/approval.py/", GATE_CATCHES_ANYWAY,
+     "oversight/approval.py", ["gate", "oversight"], True),
+    ("oversight/approval.py/.", GATE_CATCHES_ANYWAY,
+     "oversight/approval.py", ["gate", "oversight"], True),
+    ("trust//pathpolicy.py", GATE_CATCHES_ANYWAY,
+     "trust/pathpolicy.py", ["gate"], True),
+    ("trust/./pathpolicy.py", GATE_CATCHES_ANYWAY,
+     "trust/pathpolicy.py", ["gate"], True),
     ("oversight/.", POLICY_CATCHES_OVERSIGHT, "oversight",
      ["oversight"], False),
     ("oversight//", POLICY_CATCHES_OVERSIGHT, "oversight",
@@ -441,25 +456,27 @@ class DivergenceTableTests(unittest.TestCase):
         counts = {}
         for _s, klass, _c, _p, _g in EXPECTED:
             counts[klass] = counts.get(klass, 0) + 1
-        # Post-adoption counts: gate-miss 10 -> 0 and
-        # gate-stricter 1 -> 0 (both classes pinned empty by
-        # their absence here and by the inverted pin above);
-        # the ten former misses join gate-catches-anyway
-        # (10 -> 20) and the one former gate-stricter row joins
-        # agree-unprotected (8 -> 9). Oversight scope (6) and
-        # both-refuse (11) are unchanged in count — adoption did
-        # not merge the oversight superset, and both-refuse rows
-        # changed verdict (to gate "error"), not class.
+        # Post-adoption counts, updated for cycle 19: gate-miss
+        # and gate-stricter stay pinned EMPTY. Cycle 19 adds three
+        # canonical rows (oversight/__init__.py, trust/pathpolicy.py,
+        # trust/__init__.py; canonical 20 -> 23, with
+        # oversight/approval.py re-tagged ["gate", "oversight"]),
+        # reclassifies the three non-canonical oversight/approval.py
+        # rows from policy-catches-oversight (6 -> 3) to
+        # gate-catches-anyway, and adds two non-canonical
+        # trust/pathpolicy.py rows there (gate-catches-anyway
+        # 20 -> 25). Both-refuse (11) and agree-unprotected (9)
+        # are unchanged.
         self.assertEqual(counts, {
-            CANONICAL: 20,
-            POLICY_CATCHES_OVERSIGHT: 6,
-            GATE_CATCHES_ANYWAY: 20,
+            CANONICAL: 23,
+            POLICY_CATCHES_OVERSIGHT: 3,
+            GATE_CATCHES_ANYWAY: 25,
             BOTH_REFUSE: 11,
             AGREE_UNPROTECTED: 9,
         })
         self.assertEqual(counts.get(GATE_MISS, 0), 0)
         self.assertEqual(counts.get(GATE_STRICTER, 0), 0)
-        self.assertEqual(len(EXPECTED), 66)
+        self.assertEqual(len(EXPECTED), 71)
 
 
 class VerifierDefenceTests(unittest.TestCase):
@@ -471,7 +488,7 @@ class VerifierDefenceTests(unittest.TestCase):
     gate at all, in any spelling."""
 
     def test_verifier_refuses_every_noncanonical_protected(self):
-        self.assertEqual(len(NONCANONICAL_PROTECTED), 34)
+        self.assertEqual(len(NONCANONICAL_PROTECTED), 36)
         for spelling in NONCANONICAL_PROTECTED:
             with self.subTest(spelling=spelling):
                 self.assertFalse(_verifier_accepts_spelling(spelling))

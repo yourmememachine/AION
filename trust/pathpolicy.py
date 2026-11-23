@@ -74,6 +74,20 @@ a silent gap):
   lowercase first component — both are verifier-local
   strictness, not part of this policy and not removed by the
   gate's adoption.
+* Cycle 19 gate scope extension: the gate's protected list now
+  also protects this policy and the canonicaliser chain it
+  delegates to — trust/pathpolicy.py and oversight/approval.py —
+  plus the two package __init__ files executed on that import
+  path (trust/__init__.py, oversight/__init__.py); see
+  docs/GATE-CLOSURE.md. The lists now OVERLAP for the first
+  time: oversight/approval.py is protected by BOTH lists, and
+  classify() reports that honestly — classify(
+  "oversight/approval.py") gives protected_by ==
+  ["gate", "oversight"], classify("trust/pathpolicy.py")
+  gives ["gate"], and classify("oversight/__init__.py")
+  gives ["gate", "oversight"] (the gate by exact file,
+  oversight by its prefix). The gate and oversight tags are
+  still reported separately; they are no longer disjoint.
 
 One classification caveat every consumer must honour:
 classify() returns protected_by=[] for spellings that cannot be
@@ -93,13 +107,20 @@ POLICY_VERSION = "path-policy/1"
 #
 # eval/gate.py, module level:
 #     PROTECTED_PREFIXES = ("eval/",)
-#     PROTECTED_FILES = ("core/loop.py",)
+#     PROTECTED_FILES = ("core/loop.py", "oversight/__init__.py",
+#                        "oversight/approval.py", "trust/__init__.py",
+#                        "trust/pathpolicy.py")
 # enforced by eval.gate.check_protected_paths over the
 # canonical spelling, judged via this policy since the cycle-13
 # adoption (see the module docstring above for why the mirror is
-# applied to the CANONICAL spelling here).
+# applied to the CANONICAL spelling here). The cycle-19 extension
+# adds the verdict-defining canonicaliser chain and the package
+# __init__ files executed on its import path; see
+# docs/GATE-CLOSURE.md for the layered analysis and its residual.
 GATE_PROTECTED_PREFIXES = ("eval/",)
-GATE_PROTECTED_FILES = frozenset({"core/loop.py"})
+GATE_PROTECTED_FILES = frozenset({
+    "core/loop.py", "oversight/__init__.py", "oversight/approval.py",
+    "trust/__init__.py", "trust/pathpolicy.py"})
 
 # oversight/approval.py, module level:
 #     LOCAL_PROTECTED_PREFIXES = ("oversight/",)

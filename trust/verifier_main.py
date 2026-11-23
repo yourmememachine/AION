@@ -91,6 +91,23 @@ silently ignored field:
                             query cap (default 25)
   AION_VERIFIER_IDENTITY_BUDGET optional, per-identity sealed_eval
                             query cap (default 500)
+  AION_CEREMONY_OPERATORS   comma-separated operator ids
+                            authorised to obtain ceremony
+                            authorisations (mode
+                            ceremony_authorise, cycle 19). Loaded
+                            ONLY here, from the environment — a
+                            request can never carry an operator
+                            list. REQUIRED in production: absent
+                            or empty refuses startup
+                            (verifier_misconfigured), mirroring
+                            the anchor rule. In research mode
+                            absent/empty loads as an empty list
+                            and the MODE refuses every request
+                            (ceremony_operators_unconfigured).
+                            A malformed list (bad id grammar,
+                            whitespace, empty segment, duplicate,
+                            more than 64 entries) refuses startup
+                            in BOTH modes.
   AION_ANCHOR_PATH          optional: external anchor file for the
                             signing ledger (see trust/anchoring.py);
                             when set, startup verifies the anchor
@@ -125,10 +142,39 @@ failure — misconfiguration, unsafe/missing key, untrusted
 registry, signer conflict (unsigned error document). Nothing
 unsigned is ever representable as a decision.
 
+The ceremony_authorise mode (cycle 19) issues signed ceremony
+authorisations for pin re-anchors: the operator authority comes
+from this process's protected AION_CEREMONY_OPERATORS list,
+never from the request, and each issuance is ledgered single-use
+in BOTH the ceremony journal (the commit point) and the signing
+ledger before the envelope is returned. Honest limits, stated
+plainly: the verifier never inspects the evidence artefact an
+evidence_hash names — a random hex64 from a LISTED operator is
+still issuable; what the envelope proves is that a listed
+operator presented this evidence hash bound to this exact event,
+that the presentation was ledgered single-use at issuance, and
+that the binding is signed by the verifier's key. Operator
+identity is list membership via the launch channel, not
+authentication of a human. Refusals of this mode (unconfigured
+list, unlisted operator, replay) are unsigned and unledgered.
+OPERATOR RECOVERY from a post-commit ledger failure: the
+(ceremony_id, evidence_hash) pair stays burned even though no
+envelope was returned — retry the ceremony under a NEW
+ceremony_id with a NEW evidence bundle (a re-issued evidence
+artefact, hence a new hash); there is no idempotent re-issue.
+The ceremony journal is NOT externally anchored (follow-up:
+ceremony-journal-anchoring): its evidence-reuse guarantee is
+prevented against an intact journal; after a journal rollback,
+only same-ceremony_id reuse leaves a detectable trace in the
+anchored signing ledger — evidence reuse under a NEW
+ceremony_id is NOT detectable from the anchored store alone
+(see trust/ledger.py's CeremonyAuthorisationLedger for the
+full statement) — never describe it as rollback-resistant.
+
 The verifier never touches the network, never spawns processes,
 and writes only where the registry itself writes (its access log
 and file, plus the quarantine file a corrupt registry document
-is moved to) plus its own signing ledger. AION_VERIFIER_HOME is
+is moved to) plus its own signing ledger and ceremony journal. AION_VERIFIER_HOME is
 REQUIRED: the service refuses to run without its ledger, so "a
 signature with no ledger entry" stays meaningful. That "only"
 is a property of this code under review, not a runtime sandbox
@@ -153,6 +199,13 @@ from eval.registry import CorruptRegistryError, EvalRegistry, \
     EvaluationError
 from signing.attestation import attestation_envelope_from_dict, \
     attestation_envelope_to_dict, sign_attestation
+from signing.ceremony_authorisation import (
+    CEREMONY_AUTHORISATION_TTL_MAX_SECONDS,
+    REASONS as _CEREMONY_REASONS,
+    _NO_PIN_REASONS as _CEREMONY_NO_PIN_REASONS,
+    ceremony_authorisation_envelope_to_dict,
+    sign_ceremony_authorisation,
+)
 from signing.gate_decision import (
     PURPOSE_MEMORY_COMMIT,
     PURPOSE_SHIP,
@@ -162,6 +215,7 @@ from signing.gate_decision import (
     _canonical,
     _check_hex64,
     _check_id,
+    _check_text,
     _now,
     _parse_time,
     _sha256,
@@ -178,7 +232,8 @@ from trust.anchoring import AnchorError, initialise_anchor, \
 from trust.budgets import BudgetError, BudgetStore, \
     DEFAULT_PER_IDENTITY_CAP, DEFAULT_PER_PROPOSAL_CAP, \
     GENESIS_CHAIN_HASH
-from trust.ledger import CorruptLedgerError, SigningLedger
+from trust.ledger import CeremonyAuthorisationLedger, \
+    CorruptLedgerError, SigningLedger
 from trust.pathpolicy import canonicalise as _policy_canonicalise
 
 GENESIS_HASH = "0" * 64
@@ -229,7 +284,7 @@ class _Config:
                  identity_budget=DEFAULT_PER_IDENTITY_CAP,
                  anchor_path=None, anchor_init=False,
                  budgets_anchor_path=None, budgets_anchor_init=False,
-                 *, deployment_mode):
+                 ceremony_operators=(), *, deployment_mode):
         self.signing_key = signing_key
         self.signer_id = signer_id
         self.actor = actor
@@ -243,6 +298,7 @@ class _Config:
         self.anchor_init = anchor_init
         self.budgets_anchor_path = budgets_anchor_path
         self.budgets_anchor_init = budgets_anchor_init
+        self.ceremony_operators = tuple(ceremony_operators)
         self.deployment_mode = deployment_mode
 
 
@@ -285,6 +341,36 @@ def _load_config() -> _Config:
                       "to 'production' or 'research'; a missing, "
                       "blank, unknown or malformed mode is refused "
                       "fail-closed")
+    # Ceremony operator authority (cycle 19): parsed ONLY here,
+    # from the environment — never from a request. Grammar per
+    # entry is the verifier id grammar; no stripping (mirroring
+    # the deployment-mode no-strip philosophy), so whitespace-
+    # padded spellings, empty segments and duplicates are
+    # malformed, as are more than 64 entries. Detail strings name
+    # the variable and never echo its value. Malformed refuses
+    # startup in BOTH modes; production additionally refuses an
+    # absent/empty list at startup (mirroring the anchor rule —
+    # production is fail-closed at deployment about protective
+    # config), while research loads an empty list and lets the
+    # mode refuse per-request.
+    ceremony_operators = ()
+    ceremony_raw = env.get("AION_CEREMONY_OPERATORS", "")
+    if ceremony_raw:
+        segments = ceremony_raw.split(",")
+        if len(segments) > 64 \
+                or len(set(segments)) != len(segments) \
+                or any(not _ID_RE.fullmatch(segment)
+                       for segment in segments):
+            raise _config(
+                "verifier_misconfigured",
+                "AION_CEREMONY_OPERATORS is malformed: it must be "
+                "a comma-separated list of at most 64 distinct "
+                "well-formed operator ids")
+        ceremony_operators = tuple(segments)
+    if deployment_mode == "production" and not ceremony_operators:
+        raise _config(
+            "verifier_misconfigured",
+            "production mode requires AION_CEREMONY_OPERATORS")
     ttl_raw = env.get("AION_VERIFIER_TTL_SECONDS", "")
     if ttl_raw:
         if not ttl_raw.isdigit():
@@ -467,6 +553,7 @@ def _load_config() -> _Config:
                    anchor_init=anchor_init,
                    budgets_anchor_path=budgets_anchor_path or None,
                    budgets_anchor_init=budgets_anchor_init,
+                   ceremony_operators=ceremony_operators,
                    deployment_mode=deployment_mode)
 
 
@@ -1507,10 +1594,241 @@ def _mode_issue_attestation(config: _Config, body: dict) -> dict:
             attestation_envelope_to_dict(signed_att)}
 
 
+_CEREMONY_BODY_KEYS = {"operator_id", "ceremony_id", "reason",
+                       "old_pin", "candidate",
+                       "evidence_hash", "evidence_ref"}
+_CEREMONY_OLD_PIN_KEYS = {"cycle_seq", "payload_hash"}
+_CEREMONY_CANDIDATE_KEYS = {"cycle_seq", "payload_hash",
+                            "signer_id", "key_id"}
+
+
+def _ceremony_seq(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) \
+        and value >= 0
+
+
+def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
+    """Issue a signed ceremony authorisation (cycle 19).
+
+    The operator authority comes from the verifier's OWN
+    protected configuration (AION_CEREMONY_OPERATORS, parsed in
+    _load_config from the environment) — the strict body key set
+    has no field an operator list could arrive in, which is
+    exactly how an invented operator list dies. The verifier
+    signs ABOUT the operator's presentation: it binds the
+    presented evidence_hash to one exact recovery event (old
+    pin, candidate, reason, ceremony_id) under the verifier key.
+    It never inspects the evidence artefact (see the module
+    docstring's honest limits).
+
+    Validation order follows issue_attestation's discipline:
+    deterministic input validation runs BEFORE anything is
+    consumed or ledgered, so a bad spelling can never burn a
+    single-use pair. No step before the commit writes anything.
+
+    Commit order and failure semantics: the ceremony-journal
+    append is FIRST and is the commit point for single-use; the
+    signing-ledger append and the anchor update follow. Any
+    failure after the ceremony-journal append is ledger_failed
+    and the (ceremony_id, evidence_hash) pair stays burned with
+    no envelope returned — recovery is a NEW ceremony_id with a
+    NEW evidence bundle (documented in the module docstring).
+    An IDENTICAL re-presentation is refused like any replay:
+    the verifier cannot distinguish a lost response from a
+    replay, and single-use that makes exceptions for plausible
+    stories is not single-use.
+
+    Race honesty: one process per request; the anti-replay scan
+    and the commit append are not atomic as a pair, but
+    HashChainJournal._save's under-flock freshness check
+    guarantees at most one handed-out authorisation per pair —
+    the loser of a concurrent race gets ledger_failed, its
+    envelope is never returned, and no orphan signing-ledger
+    entry exists for it."""
+    # (1) Config gate, before body validation: a deployment that
+    # never configured ceremony operators refuses the mode
+    # wholesale, whatever the body says.
+    if not config.ceremony_operators:
+        raise _config(
+            "ceremony_operators_unconfigured",
+            "AION_CEREMONY_OPERATORS is not configured; the "
+            "ceremony_authorise mode is disabled")
+    # (2) Strict key set + cheap field validation: malformed,
+    # exit 2, NO ledger touched.
+    if set(body) != _CEREMONY_BODY_KEYS:
+        raise _malformed(
+            "malformed_request",
+            "ceremony_authorise body has missing or unknown keys; "
+            "operator authority comes from the verifier's "
+            "configuration, never from the request")
+    operator_id = body["operator_id"]
+    ceremony_id = body["ceremony_id"]
+    reason = body["reason"]
+    old_pin = body["old_pin"]
+    candidate = body["candidate"]
+    evidence_hash = body["evidence_hash"]
+    evidence_ref = body["evidence_ref"]
+    try:
+        _check_id(operator_id, "operator id")
+    except SigningError:
+        raise _malformed("malformed_request",
+                         "operator_id must be a well-formed id")
+    # ceremony_id grammar: signing's _check_id intersected with
+    # this service's stricter first-char rule (_ID_RE) — the
+    # effective minting grammar.
+    if not isinstance(ceremony_id, str) \
+            or not _ID_RE.fullmatch(ceremony_id):
+        raise _malformed("malformed_request",
+                         "ceremony_id must be a well-formed id")
+    try:
+        _check_id(ceremony_id, "ceremony id")
+    except SigningError:
+        raise _malformed("malformed_request",
+                         "ceremony_id must be a well-formed id")
+    if not isinstance(reason, str) or reason not in _CEREMONY_REASONS:
+        raise _malformed("malformed_request",
+                         "reason must be a ceremony reason")
+    try:
+        _check_hex64(evidence_hash, "evidence hash")
+        _check_text(evidence_ref, "evidence_ref", 2000)
+    except SigningError:
+        raise _malformed("malformed_request",
+                         "evidence fields are ill-formed")
+    if old_pin is not None:
+        if not isinstance(old_pin, dict) \
+                or set(old_pin) != _CEREMONY_OLD_PIN_KEYS \
+                or not _ceremony_seq(old_pin["cycle_seq"]):
+            raise _malformed("malformed_request",
+                             "old_pin is ill-formed")
+        try:
+            _check_hex64(old_pin["payload_hash"],
+                         "old_pin payload hash")
+        except SigningError:
+            raise _malformed("malformed_request",
+                             "old_pin is ill-formed")
+    if not isinstance(candidate, dict) \
+            or set(candidate) != _CEREMONY_CANDIDATE_KEYS \
+            or not _ceremony_seq(candidate["cycle_seq"]):
+        raise _malformed("malformed_request",
+                         "candidate is ill-formed")
+    try:
+        _check_hex64(candidate["payload_hash"],
+                     "candidate payload hash")
+        _check_id(candidate["signer_id"], "candidate signer id")
+        _check_id(candidate["key_id"], "candidate key id")
+    except SigningError:
+        raise _malformed("malformed_request",
+                         "candidate is ill-formed")
+    # Reason/pin coherence (the payload projection re-checks this
+    # at signing time — defence in depth, as in attestation).
+    if old_pin is None and reason not in _CEREMONY_NO_PIN_REASONS:
+        raise _malformed(
+            "malformed_request",
+            "a no-pin ceremony requires a no-pin reason")
+    if old_pin is not None and reason != "chain_gap_recovery":
+        raise _malformed(
+            "malformed_request",
+            "a ceremony carrying an old pin requires reason "
+            "chain_gap_recovery")
+    if old_pin is not None \
+            and candidate["cycle_seq"] < old_pin["cycle_seq"] + 2:
+        raise _malformed(
+            "malformed_request",
+            "candidate cycle_seq must be at least old_pin "
+            "cycle_seq + 2 (gap-only re-anchor)")
+    # Evidence non-equality, verifier-side half: the full
+    # four-way check stays inside reanchor_pin, which sees the
+    # real snapshot; neither layer may drop its half.
+    if evidence_hash == candidate["payload_hash"] \
+            or (old_pin is not None
+                and evidence_hash == old_pin["payload_hash"]):
+        raise _malformed(
+            "malformed_request",
+            "evidence_hash must differ from the pin payload "
+            "hashes it is evidence about")
+    # (3) Operator membership: a config-class refusal, UNSIGNED
+    # and UNLEDGERED by deliberate design — there is no
+    # signed-reject artefact for this mode; signing a rejection
+    # would mint verifier artefacts at a non-operator's request.
+    if operator_id not in config.ceremony_operators:
+        raise _config(
+            "ceremony_operator_not_authorised",
+            "the named operator is not on the verifier's "
+            "configured ceremony operator list")
+    # (4) Anti-replay scan of the ceremony journal. A journal
+    # that cannot be read refuses ledger_failed — never scan a
+    # partial history and proceed.
+    try:
+        ceremony_entries = CeremonyAuthorisationLedger(
+            config.home).entries()
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the ceremony journal could not be read; refusing "
+            "to authorise without its reuse history")
+    for entry in ceremony_entries:
+        if entry["ceremony_id"] == ceremony_id:
+            raise _config(
+                "ceremony_id_reused",
+                "this ceremony_id was already authorised; "
+                "ceremony ids are single-use")
+    for entry in ceremony_entries:
+        if entry["evidence_hash"] == evidence_hash:
+            raise _config(
+                "ceremony_evidence_reused",
+                "this evidence_hash was already authorised for "
+                "another ceremony; evidence is single-use per "
+                "event")
+    # (5) Sign, with the ceremony TTL hard cap applied over the
+    # configured verifier TTL.
+    try:
+        signed = sign_ceremony_authorisation(
+            signing_key=config.signing_key,
+            signer_id=config.signer_id,
+            operator_id=operator_id, ceremony_id=ceremony_id,
+            reason=reason, old_pin=old_pin, candidate=candidate,
+            evidence_hash=evidence_hash, evidence_ref=evidence_ref,
+            ttl_seconds=min(
+                config.ttl_seconds,
+                CEREMONY_AUTHORISATION_TTL_MAX_SECONDS))
+    except SigningError as exc:
+        raise _malformed("signing_input_error", str(exc))
+    # (6) Commit: ceremony journal FIRST (the commit point),
+    # then the signing ledger, then the anchor. Any failure
+    # after the first append is ledger_failed and the pair
+    # stays burned — see the docstring.
+    recorded_at = _now()
+    try:
+        CeremonyAuthorisationLedger(
+            config.home).append_authorisation(
+                signed, recorded_at=recorded_at)
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the ceremony authorisation could not be ledgered; "
+            "refusing to return it")
+    try:
+        SigningLedger(config.home).append_ceremony_authorisation(
+            signed, recorded_at=recorded_at)
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the ceremony authorisation was recorded in the "
+            "ceremony journal but could not be entered in the "
+            "signing ledger; the (ceremony_id, evidence_hash) "
+            "pair stays burned and the envelope is withheld — "
+            "retry under a new ceremony_id with a new evidence "
+            "bundle")
+    _update_anchor(config)
+    return {"signed_authorisation":
+            ceremony_authorisation_envelope_to_dict(signed)}
+
+
 _MODES = {"gate": _mode_gate, "sealed_eval": _mode_sealed_eval,
           "verify_envelope": _mode_verify_envelope,
           "submit_claim": _mode_submit_claim,
-          "issue_attestation": _mode_issue_attestation}
+          "issue_attestation": _mode_issue_attestation,
+          "ceremony_authorise": _mode_ceremony_authorise}
 
 
 def _emit(request_id, mode, status, *, result=None, error=None,

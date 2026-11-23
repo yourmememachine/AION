@@ -247,6 +247,27 @@ class TestProtectedPaths(unittest.TestCase):
         self.assertEqual(check_protected_paths(["eval\\gate.py"]),
                          ("eval/gate.py",))
 
+    def test_cycle19_canonicaliser_chain_files_reject(self):
+        # Cycle 19: the gate also protects the canonicaliser chain
+        # its verdict trusts, plus the package __init__ files on
+        # its import path (exact files, canonical spelling reported).
+        for path in ("trust/pathpolicy.py", "trust/__init__.py",
+                     "oversight/approval.py", "oversight/__init__.py"):
+            decision = self._valid_change(changed_paths=[path])
+            self.assertFalse(decision.accepted, path)
+            self.assertIn("protected_path", decision.reasons)
+            self.assertEqual(decision.protected_violations, (path,))
+
+    def test_exact_file_negative_control_trust_manifest_unprotected(self):
+        # Negative control against prefix creep: the extension is
+        # exact-file, NOT a trust/ (or oversight/) prefix, so a
+        # sibling trust file stays unprotected and an otherwise
+        # valid change naming only it still accepts.
+        self.assertEqual(check_protected_paths(["trust/manifest.py"]), ())
+        decision = self._valid_change(changed_paths=["trust/manifest.py"])
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.protected_violations, ())
+
     def test_unprotected_change_still_accepts(self):
         decision = self._valid_change(
             changed_paths=["products/demo.py", "core/helpers.py"])

@@ -51,6 +51,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from signing.attestation import attestation_envelope_from_dict
+from signing.ceremony_authorisation import (
+    authorisation_id_for,
+    ceremony_authorisation_envelope_from_dict,
+)
 from signing.gate_decision import (
     SigningError,
     _canonical,
@@ -405,6 +409,70 @@ class VerifierClient:
         self._check_pins(signed_att.signer_id, signed_att.key_id)
         self._check_not_expired(signed_att.expires_at)
         return result["signed_attestation"]
+
+    def ceremony_authorise(self, *, operator_id, ceremony_id, reason,
+                           old_pin, candidate, evidence_hash,
+                           evidence_ref) -> dict:
+        """Obtain a verifier-issued ceremony authorisation.
+
+        The caller names the operator and the recovery event; the
+        AUTHORITY is the verifier's own protected operator list
+        (AION_CEREMONY_OPERATORS in its environment) — this client
+        cannot supply, extend or override it, and the request body
+        has no field for a list. Returns the envelope dict only;
+        key-holding consumers convert it with
+        ceremony_authorisation_envelope_from_dict and verify the
+        MAC where the authorisation is consumed. Exit-3 refusals
+        (unconfigured list, unlisted operator, replay, evidence
+        reuse) surface as VerifierConfigError; exit-2 malformed
+        requests as VerifierProtocolError — via _run, as with
+        every mode."""
+        body = {"operator_id": operator_id,
+                "ceremony_id": ceremony_id, "reason": reason,
+                "old_pin": old_pin, "candidate": candidate,
+                "evidence_hash": evidence_hash,
+                "evidence_ref": evidence_ref}
+        result = self._run("ceremony_authorise", body)
+        if set(result) != {"signed_authorisation"}:
+            raise VerifierProtocolError(
+                "ceremony_authorise result is malformed")
+        envelope = result["signed_authorisation"]
+        try:
+            signed = ceremony_authorisation_envelope_from_dict(envelope)
+        except SigningError as exc:
+            raise VerifierProtocolError(
+                f"verifier returned a malformed ceremony "
+                f"authorisation: {exc}") from exc
+        try:
+            payload = signed.payload()
+        except (SigningError, UnicodeEncodeError) as exc:
+            raise VerifierProtocolError(
+                "ceremony authorisation payload does not "
+                "re-derive") from exc
+        if signed.payload_hash != _sha256(_canonical(payload)):
+            raise VerifierProtocolError(
+                "ceremony authorisation payload hash is "
+                "inconsistent")
+        if signed.authorisation_id != authorisation_id_for(
+                signed.payload_hash, signed.key_id):
+            raise VerifierProtocolError(
+                "ceremony authorisation id is inconsistent")
+        self._check_pins(signed.signer_id, signed.key_id)
+        self._check_not_expired(signed.expires_at)
+        # Echo binding (the sealed_eval answers-hash precedent):
+        # the envelope must be bound to the event THIS client
+        # sent, not merely well-formed.
+        if signed.operator_id != operator_id \
+                or signed.ceremony_id != ceremony_id \
+                or signed.reason != reason \
+                or signed.old_pin != old_pin \
+                or signed.candidate != candidate \
+                or signed.evidence_hash != evidence_hash \
+                or signed.evidence_ref != evidence_ref:
+            raise VerifierProtocolError(
+                "ceremony authorisation is bound to a different "
+                "event than requested")
+        return envelope
 
     def verify_envelope(self, envelope: dict, expected=None) -> Verdict:
         """Advisory verifier-side check of an envelope. Never a

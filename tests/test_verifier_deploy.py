@@ -60,6 +60,27 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn("AION_VERIFIER_PROPOSAL_BUDGET", allowed)
         self.assertIn("AION_VERIFIER_IDENTITY_BUDGET", allowed)
 
+    def test_ceremony_operators_key_allowlisted(self):
+        # Cycle 19: AION_CEREMONY_OPERATORS is read by
+        # trust/verifier_main.py, so the wrapper must allowlist
+        # it — the invariant test below covers it too, but this
+        # names the key the way test_budget_keys_allowlisted
+        # names the budget keys.
+        self.assertIn("AION_CEREMONY_OPERATORS", _allowed_keys())
+
+    def test_health_check_allowlist_matches_wrapper(self):
+        # Cycle 19 drift pin (critique-b missed item):
+        # health_check.py's ALLOWED_KEYS is a literal COPY of the
+        # wrapper's allowlist, not parsed from it, so it silently
+        # drifts when the wrapper gains a name. Pin the copy to
+        # the wrapper at test time.
+        text = (DEPLOY / "health_check.py").read_text()
+        block = re.search(r"ALLOWED_KEYS = \((.*?)\)", text,
+                          re.S).group(1)
+        health_keys = set(re.findall(r"[A-Z][A-Z_]+", block))
+        self.assertEqual(health_keys, _allowed_keys())
+        self.assertEqual(len(health_keys), 15)
+
     def test_every_verifier_main_env_var_is_allowlisted(self):
         main_text = (REPO / "trust" / "verifier_main.py").read_text()
         read_vars = set(re.findall(r"AION_[A-Z_]+", main_text))
@@ -68,6 +89,14 @@ class DeployScriptTests(unittest.TestCase):
 
     def test_template_keys_all_allowlisted(self):
         self.assertLessEqual(set(_template_env()), _allowed_keys())
+
+    def test_template_keys_equal_allowlist(self):
+        # Completeness direction of the pin above: the template
+        # must not OMIT an allowlisted key either — a key the
+        # wrapper allows but setup.sh never writes (e.g.
+        # AION_CEREMONY_OPERATORS) would leave a fresh deployment
+        # silently unconfigured for that feature.
+        self.assertEqual(set(_template_env()), _allowed_keys())
 
     def test_template_shows_compiled_budget_defaults(self):
         # trust/verifier_main.py documents defaults 25 / 500; the

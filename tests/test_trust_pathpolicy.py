@@ -47,7 +47,11 @@ CORPUS = [
     ("eval/registry.py", "eval/registry.py", ["gate"], "same"),
     ("core/loop.py", "core/loop.py", ["gate"], "same"),
     ("oversight/approval.py", "oversight/approval.py",
-     ["oversight"], "same"),
+     ["gate", "oversight"], "same"),
+    ("oversight/__init__.py", "oversight/__init__.py",
+     ["gate", "oversight"], "same"),
+    ("trust/pathpolicy.py", "trust/pathpolicy.py", ["gate"], "same"),
+    ("trust/__init__.py", "trust/__init__.py", ["gate"], "same"),
     ("oversight", "oversight", ["oversight"], "same"),
     ("core/other.py", "core/other.py", [], "same"),
     ("trust/manifest.py", "trust/manifest.py", [], "same"),
@@ -69,9 +73,15 @@ CORPUS = [
     ("core/./loop.py", "core/loop.py", ["gate"], "refuses"),
     ("./core/loop.py", "core/loop.py", ["gate"], "refuses"),
     ("oversight//approval.py", "oversight/approval.py",
-     ["oversight"], "refuses"),
+     ["gate", "oversight"], "refuses"),
     ("oversight/./approval.py", "oversight/approval.py",
-     ["oversight"], "refuses"),
+     ["gate", "oversight"], "refuses"),
+    ("trust//pathpolicy.py", "trust/pathpolicy.py",
+     ["gate"], "refuses"),
+    ("trust/./pathpolicy.py", "trust/pathpolicy.py",
+     ["gate"], "refuses"),
+    ("./oversight/approval.py", "oversight/approval.py",
+     ["gate", "oversight"], "refuses"),
     ("core//other.py", "core/other.py", [], "refuses"),
     # Prefix lookalikes that are NOT protected: the prefixes end
     # in "/", and the bare gate file match is exact.
@@ -145,14 +155,18 @@ class CorpusAgreementTests(unittest.TestCase):
                 self.assertEqual(
                     oversight_verdict,
                     "gate" in protected_by or "oversight" in protected_by)
-                # Oversight's OWN list, isolated: its verdict minus
-                # the gate's verdict must match the policy's
-                # "oversight" tag on every corpus entry where the
-                # two lists do not overlap (they never overlap:
-                # disjoint prefixes/files).
-                gate_verdict = bool(gate.check_protected_paths([canonical]))
-                self.assertEqual(oversight_verdict and not gate_verdict,
-                                 "oversight" in protected_by)
+                # Oversight's OWN list, isolated: since cycle 19
+                # the two lists OVERLAP (oversight/approval.py and
+                # oversight/__init__.py are gate-protected exact
+                # files that also sit under oversight's prefix), so
+                # "oversight verdict minus gate verdict" no longer
+                # isolates oversight's own list. The isolation is
+                # re-derived from the policy's own helper instead:
+                # _oversight_protected(canonical) must match the
+                # policy's "oversight" tag exactly, overlap included.
+                self.assertEqual(
+                    pathpolicy._oversight_protected(canonical),
+                    "oversight" in protected_by)
 
     def test_is_protected_matches_classify(self):
         for raw, canonical, protected_by, _ in CORPUS:

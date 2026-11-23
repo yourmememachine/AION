@@ -401,7 +401,11 @@ a `GateDecision` with `accepted = (reasons == ())`, collecting
 
 - `protected_path` — any `changed_paths` entry (when supplied) is
   under `PROTECTED_PREFIXES = ("eval/",)` or in
-  `PROTECTED_FILES = ("core/loop.py",)`.
+  `PROTECTED_FILES = ("core/loop.py", "oversight/__init__.py",
+  "oversight/approval.py", "trust/__init__.py",
+  "trust/pathpolicy.py")` (the last four added in cycle 19: the
+  canonicaliser chain the gate's verdict trusts, plus the package
+  `__init__` files on its import path — see docs/GATE-CLOSURE.md).
 - `regression` — `check_no_regression` over the public and sealed
   maps: any benchmark whose candidate score drops below
   `baseline − FLOAT_TOL` (`FLOAT_TOL = 1e-9`; epsilon is forced to
