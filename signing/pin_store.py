@@ -9,11 +9,24 @@ discharges the ceremony's caller preconditions mechanically:
   history from that single parse, so a caller can never verify
   against pin generation *n* and pass history from generation
   *n+1*.
-- COMPLETE-HISTORY: the full ceremony history lives in the same
-  document as the pin, and every load verifies every record
-  (``verify_ceremony_record``) plus store-level consistency
-  (no duplicate evidence, no forked targets, pin matching the
-  history head). An unverifiable
+- VERIFIED-PRESENT-HISTORY: the ceremony history lives in the
+  same document as the pin, and every load verifies every
+  record PRESENT in it (``verify_ceremony_record``) plus
+  store-level consistency (no duplicate evidence, no forked
+  targets, pin matching the history head). The history is
+  therefore complete only RELATIVE TO THE STORE DOCUMENT:
+  it is a NON-AUTHORITATIVE REPLICA that is
+  restoration-lossy — restoring an older generation of the
+  document silently drops later records, and no load can
+  detect the absence, because the load's checks verify
+  records present and cannot detect a record that is not
+  there. The SOLE AUTHORITATIVE ceremony audit history is
+  the verifier's externally anchored consumption journal
+  (with its signing-ledger mirror), against which the store
+  history can be reconciled; a gap in the store history
+  proves nothing, and the store's safety never depends on
+  history completeness (the verifier's consumption head is
+  authoritative on any discrepancy). An unverifiable
   history establishes nothing: the load refuses, it does not
   return a partial history.
 - ATOMIC-ADOPTION: pin and record persist as ONE JSON document
@@ -182,7 +195,7 @@ def _parse_float(text):
 
 
 class PinStore:
-    """Owns ``<pin_dir>/snapshot-pin.json``: pin + full ceremony
+    """Owns ``<pin_dir>/snapshot-pin.json``: pin + ceremony
     history in one document. The pin dir must live outside the
     state dir (the snapshot module's rule: the pin must live
     outside the rollback domain); equality counts as inside."""

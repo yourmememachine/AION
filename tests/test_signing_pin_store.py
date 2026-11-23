@@ -18,6 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import signing.pin_ceremony as pin_ceremony_module
 import signing.pin_store as pin_store_module
 from signing import SigningError, make_signing_key
 from signing.ceremony_authorisation import (
@@ -475,6 +476,29 @@ class PinStoreTests(PinStoreFixture):
                 signing_key=SNAP_KEY)
         self.assertEqual(pin, new_pin)
         self.assertEqual(history, (record,))
+
+    def test_16_audit_history_claim_is_rescoped_in_docstrings(self):
+        # Claim-pin (cycle-15 re-review, seat rr15-r4 option (b)):
+        # the store history must not be advertised as the
+        # complete/authoritative ceremony audit history. The
+        # authoritative audit history is the verifier's
+        # externally anchored consumption journal; the store
+        # history is a non-authoritative, restoration-lossy
+        # replica, and the ceremony module must name the journal
+        # as the audit obligation's authoritative home.
+        store_doc = " ".join(pin_store_module.__doc__.lower().split())
+        self.assertIn("non-authoritative", store_doc)
+        self.assertIn("restoration-lossy", store_doc)
+        self.assertIn("authoritative ceremony audit history",
+                      store_doc)
+        self.assertIn("consumption journal", store_doc)
+        self.assertIn("gap in the store history proves nothing",
+                      store_doc)
+        ceremony_doc = " ".join(
+            pin_ceremony_module.__doc__.lower().split())
+        self.assertIn("authoritative home", ceremony_doc)
+        self.assertIn("consumption journal", ceremony_doc)
+        self.assertIn("gaps prove nothing", ceremony_doc)
 
 
 if __name__ == "__main__":

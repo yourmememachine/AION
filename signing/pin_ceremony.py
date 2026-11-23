@@ -59,7 +59,15 @@ them, not because naming them enforces them:
   history is an audit/consistency input that can only refuse,
   never grant; the verifier's consumption head is
   authoritative on any discrepancy (see the cycle-21 section
-  below).
+  below). The audit obligation's authoritative home is the
+  verifier's externally anchored consumption journal (with
+  its signing-ledger mirror): a caller-supplied or store-held
+  history is evidence for refusal checks only, and its gaps
+  prove nothing — a truncated history passes the checks
+  (stated in the cycle-16 section below), and that is
+  acceptable precisely because audit authority lives in the
+  journal, not in any history a caller or a restore can
+  truncate.
 - ATOMIC-ADOPTION: on success the caller must persist the
   returned pin and append the returned record to its history
   as one step, before any further ceremony or advance; on
@@ -196,8 +204,9 @@ fail-closed on omission) refuses evidence reuse, replayed
 targets, candidates behind the history's attested ceremony
 head, and candidates predating the latest ceremony — ONLY
 under a complete, caller-supplied history: a truncated or
-stale history silently passes every one of those checks, the
-history records ceremonies only (``advance_pin`` movements
+stale history silently passes every one of those checks at
+the history layer, the history records ceremonies only
+(``advance_pin`` movements
 leave no trace in it, so its head is the ceremony head, not
 the pin head), and the records are attested under the same
 symmetric key, so this is a consistency check over
@@ -213,7 +222,11 @@ a history edit. The no-pin reasons (``initial_anchor`` /
 ``lost_pin`` / ``corrupted_pin``) receive no recomputation;
 cycle 20 makes the history requirement apply to them as to
 ``chain_gap_recovery``, with ``initial_anchor`` requiring an
-empty history. Without pin context,
+empty history. A no-pin ``burned_unadopted`` (a cycle-22
+reason outside the cycle-16 enumeration above) likewise
+receives no recomputation — there is no pin to recompute
+against; its validation is the verifier's burn proof
+instead. Without pin context,
 ``verify_ceremony_record`` proves a record was issued, not
 that it applies to the caller's pin state.
 ``verify_ceremony_record`` refuses one-step records (which this
