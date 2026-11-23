@@ -37,7 +37,10 @@ from signing.ceremony_authorisation import (
 )
 from signing.pin_store import PinStore
 from trust.client import VerifierClient
-from trust.ledger import CeremonyConsumptionLedger
+from trust.ledger import (
+    CeremonyConsumptionLedger,
+    CeremonySupersessionLedger,
+)
 from trust.pin_adoption import (
     PinAdopter,
     PinAdopterConfig,
@@ -577,6 +580,12 @@ class RecoverySeamTests(CrashFixture):
         # candidate (seq 11) is strictly ahead of the head
         # (seq 9) and the old pin (seq 7) is behind it, so
         # the pin jumps past the burned sequence.
+        # Cycle 24 RE-PIN (supersede Option A, design B §9.3):
+        # the landing now goes through the decision flow —
+        # the first consume refuses ceremony_supersede_required,
+        # the adopter requests the decision, and the re-run
+        # consumes. Outcome assertions are unchanged; the
+        # decision-journal assertions below are new.
         self.scan_items(2)
         self.bare_cycle()
         self.bare_cycle()
@@ -592,6 +601,30 @@ class RecoverySeamTests(CrashFixture):
         self.assertEqual(entries[-1]["new_cycle_seq"], 11)
         pin, _history = self.read_store()
         self.assertEqual(pin["cycle_seq"], 11)
+        # Exactly ONE supersession decision was journaled in
+        # the verifier home for this landing: it abandons the
+        # discarded seq-9 movement and binds the seq-11
+        # candidate / the final consumption's authorisation.
+        decisions = CeremonySupersessionLedger(
+            self.home / "ledger").entries()
+        self.assertEqual(len(decisions), 1)
+        decision = decisions[0]
+        self.assertEqual(decision["abandoned_new_cycle_seq"], 9)
+        self.assertEqual(decision["candidate_cycle_seq"], 11)
+        self.assertEqual(decision["new_authorisation_id"],
+                         entries[-1]["authorisation_id"])
+        # The adopter's pending journal carries a
+        # "supersede_decided" phase line for that ceremony.
+        journal_lines = [
+            json.loads(line) for line in
+            self.adopter.pending_journal_path.read_text(
+                encoding="utf-8").splitlines() if line.strip()]
+        decided = [line for line in journal_lines
+                   if line.get("phase") == "supersede_decided"]
+        self.assertEqual(len(decided), 1)
+        self.assertEqual(decided[0]["candidate_seq"], 11)
+        self.assertEqual(decided[0]["authorisation_id"],
+                         entries[-1]["authorisation_id"])
 
 
 if __name__ == "__main__":

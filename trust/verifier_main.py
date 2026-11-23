@@ -252,16 +252,39 @@ OPERATOR RECOVERY from a post-commit ledger failure: the
 envelope was returned — retry the ceremony under a NEW
 ceremony_id with a NEW evidence bundle (a re-issued evidence
 artefact, hence a new hash); there is no idempotent re-issue.
-The ceremony ISSUANCE journal is NOT externally anchored
-(follow-up: ceremony-journal-anchoring, narrowed in cycle
-22 to this issuance journal only — the consumption journal
-is separately anchored, see above): its evidence-reuse guarantee is
+The ceremony ISSUANCE journal is NOT externally anchored,
+and neither is the ceremony SUPERSESSION journal
+(ceremony-supersessions.json, cycle 24): the follow-up
+ceremony-journal-anchoring covers BOTH unanchored journals
+(the issuance journal and the supersession journal — the
+consumption journal is separately anchored, see above):
+the issuance journal's evidence-reuse guarantee is
 prevented against an intact journal; after a journal rollback,
 only same-ceremony_id reuse leaves a detectable trace in the
 anchored signing ledger — evidence reuse under a NEW
 ceremony_id is NOT detectable from the anchored store alone
 (see trust/ledger.py's CeremonyAuthorisationLedger for the
-full statement) — never describe it as rollback-resistant.
+full statement) — never describe either journal as
+rollback-resistant. The supersession journal's own rollback
+position (fail-closed loss, binding inertness, no forgery
+resistance claimed) is stated in trust/ledger.py's
+CeremonySupersessionLedger docstring.
+
+The ceremony_supersede mode (cycle 24, Option A) records a
+supersession decision: an allowlisted operator presents a
+verified, issued, unconsumed envelope in the exact supersede
+shape, and the verifier journals the abandonment of ITS OWN
+consumption head movement — identified from its own
+consumption journal, never named by the request — bound to
+that envelope in its supersession journal. The decision
+proves that presentation and that journaled abandonment,
+and nothing about the pin, which the verifier cannot
+observe; adoption-side context binding remains the control
+for the pin itself. A later ceremony_consume of that
+envelope looks the decision up from the verifier's own
+journal and consumes against it; without a decision the
+supersede shape refuses pre-commit as
+ceremony_supersede_required.
 
 The verifier never touches the network, never spawns processes,
 and writes only where the registry itself writes (its access log
@@ -337,7 +360,9 @@ from trust.budgets import BudgetError, BudgetStore, \
 from trust.ledger import MAX_RECOVERY_DEPTH, \
     AlreadyConsumedError, \
     CeremonyAuthorisationLedger, CeremonyConsumptionLedger, \
-    CorruptLedgerError, HeadRegressionError, SigningLedger
+    CeremonySupersessionLedger, \
+    CorruptLedgerError, HeadRegressionError, LedgerError, \
+    SigningLedger, SupersedeRequiredError
 from trust.pathpolicy import canonicalise as _policy_canonicalise
 
 GENESIS_HASH = "0" * 64
@@ -1993,6 +2018,8 @@ def _mode_issue_attestation(config: _Config, body: dict) -> dict:
 _CEREMONY_BODY_KEYS = {"operator_id", "ceremony_id", "reason",
                        "old_pin", "candidate",
                        "evidence_hash", "evidence_ref"}
+_CEREMONY_SUPERSEDE_BODY_KEYS = {"operator_id",
+                                 "signed_authorisation"}
 _CEREMONY_OLD_PIN_KEYS = {"cycle_seq", "payload_hash"}
 _CEREMONY_CANDIDATE_KEYS = {"cycle_seq", "payload_hash",
                             "signer_id", "key_id"}
@@ -2607,6 +2634,248 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
             ceremony_authorisation_envelope_to_dict(signed)}
 
 
+def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
+    """Record a supersession decision (cycle 24, Option A):
+    authorise the abandonment of the consumption journal's
+    current head movement in favour of a presented envelope's
+    strictly-ahead candidate.
+
+    Operator identity is operator-id allowlist eligibility via
+    the verifier's launch channel, not authentication: the
+    verifier checks that the presented operator_id was on its
+    configured allowlist at decision time; it does not and
+    cannot verify that the presenter *is* that operator — no
+    per-operator credential exists in this system, and any
+    caller able to launch the verifier can present any listed
+    id. The decision proves a presentation under an
+    allowlisted id, journaled by the verifier and bound to
+    this event — workflow provenance, not cryptographic
+    attribution.
+
+    The request names NO abandoned-movement field: the
+    abandoned movement is, by construction of the supersede
+    branch, the consumption journal's current head entry, and
+    the verifier copies the abandoned binding out of its OWN
+    head entry at decision time. Letting the requester name it
+    would add a field the verifier must cross-check against
+    its own head anyway — pure attack surface for zero
+    information.
+
+    Validation order, mirroring authorise/consume discipline:
+    (1) config gates — the operator allowlist and the ceremony
+    seed (the mode checks membership and needs the seed-derived
+    public key to verify the envelope); the evidence
+    configuration is NOT a gate, because no evidence is
+    resolved, read or retained by this mode; (2) strict body
+    key set, exactly {"operator_id", "signed_authorisation"};
+    (3) cheap validation — the operator id shape, pure value
+    work that touches no journal; (4) operator membership,
+    BEFORE any journal read, so an unlisted operator cannot
+    make this process open a journal file and gets no state
+    oracle; (5) envelope parse, then verifier-side signature
+    verification under the seed-derived public key WITH
+    expected_operator_id folded in — every verification
+    failure collapses to the single code
+    ceremony_authorisation_invalid (an envelope for a
+    different operator is the same code), with the temporal
+    carve-out (reasons ⊆ {expired, signed_in_future}) returning
+    ceremony_authorisation_expired, exactly as consume;
+    (6) already-consumed check for the new envelope
+    (consumption journal, plus the signing-ledger mirror
+    scoped to kind="consume" + format="ceremony-consumption")
+    — a consumed envelope needs no decision and must never
+    acquire one retroactively; (7) issuance presence in the
+    ceremony journal with payload/ceremony/evidence field
+    match, else ceremony_not_issued; (8) the supersede-shape
+    gate via CeremonyConsumptionLedger.supersede_head against
+    the current consumption entries, PLUS no prior decision
+    for this envelope — EVERY failure here is the single code
+    ceremony_supersede_unproven, because distinguishing the
+    sub-cases would hand a presenter a journal-state oracle
+    and because gratuitous decisions (for an envelope that
+    needs no supersede, or that already has one) must never
+    be minted; (9) commit: the supersession journal append —
+    the verifier copies the abandoned binding from its own
+    head entry; (10) signing-ledger mirror (kind "supersede",
+    format "ceremony-supersession") plus the signing-anchor
+    update. A mirror failure after the commit is
+    ledger_failed and the decision STANDS — it is not rolled
+    back and the mode never re-appends it; consumption may
+    proceed against the journaled decision.
+
+    The mode does not consume anything, sign anything, or
+    return the decision entry itself; the receipt names the
+    decision, which lives only in the verifier's journal. It
+    is not idempotent: a second decision for the same envelope
+    refuses at step (8)."""
+    # (1) Config gates, before body validation.
+    if not config.ceremony_operators:
+        raise _config(
+            "ceremony_operators_unconfigured",
+            "AION_CEREMONY_OPERATORS is not configured; the "
+            "ceremony_supersede mode is disabled")
+    if config.ceremony_signing_key is None:
+        raise _config(
+            "ceremony_seed_unconfigured",
+            "AION_CEREMONY_SIGNING_SEED_PATH is not configured; "
+            "the ceremony_supersede mode is disabled")
+    # (2) Strict body key set.
+    if set(body) != _CEREMONY_SUPERSEDE_BODY_KEYS:
+        raise _malformed(
+            "malformed_request",
+            "ceremony_supersede body must carry exactly "
+            "operator_id and signed_authorisation; the "
+            "abandoned movement is identified by the verifier "
+            "from its own consumption journal, never named by "
+            "the request")
+    operator_id = body["operator_id"]
+    # (3) Cheap validation: operator id shape.
+    try:
+        _check_id(operator_id, "operator id")
+    except SigningError:
+        raise _malformed("malformed_request",
+                         "operator_id must be a well-formed id")
+    # (4) Operator membership — before any journal read.
+    if operator_id not in config.ceremony_operators:
+        raise _config(
+            "ceremony_operator_not_authorised",
+            "the presented operator_id is not on the "
+            "verifier's configured ceremony operator allowlist")
+    # (5) Envelope parse, then verification — single code.
+    try:
+        signed = ceremony_authorisation_envelope_from_dict(
+            body["signed_authorisation"])
+    except SigningError as exc:
+        raise _malformed("malformed_request", str(exc))
+    reasons = verify_ceremony_authorisation(
+        signed,
+        public_key=ceremony_public_key_for(
+            config.ceremony_signing_key),
+        expected_signer_id=config.signer_id,
+        expected_operator_id=operator_id)
+    if reasons:
+        # No per-reason output anywhere — not even stderr (the
+        # consume step-4 discipline applies verbatim).
+        if set(reasons) <= {"expired", "signed_in_future"}:
+            raise _config(
+                "ceremony_authorisation_expired",
+                "the ceremony authorisation is expired")
+        raise _malformed(
+            "ceremony_authorisation_invalid",
+            "the ceremony authorisation failed verification")
+    # (6) Already-consumed check for the new envelope.
+    try:
+        consumption_ledger = CeremonyConsumptionLedger(config.home)
+        consumption_entries = consumption_ledger.entries()
+        signing_entries = SigningLedger(config.home).entries()
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the consumption state could not be read; refusing "
+            "to decide from partial state")
+    if any(e["authorisation_id"] == signed.authorisation_id
+           for e in consumption_entries):
+        raise _config(
+            "ceremony_already_consumed",
+            "this authorisation was already consumed")
+    if any(e["kind"] == "consume"
+           and e["format"] == "ceremony-consumption"
+           and e["decision_id"] == signed.authorisation_id
+           for e in signing_entries):
+        raise _config(
+            "ceremony_already_consumed",
+            "this authorisation was already consumed")
+    # (7) Issuance presence, with field match.
+    try:
+        issued = CeremonyAuthorisationLedger(
+            config.home).find_by_authorisation_id(
+                signed.authorisation_id)
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the ceremony journal could not be read; refusing "
+            "to decide from partial state")
+    if issued is None \
+            or issued["payload_hash"] != signed.payload_hash \
+            or issued["ceremony_id"] != signed.ceremony_id \
+            or issued["evidence_hash"] != signed.evidence_hash:
+        raise _config(
+            "ceremony_not_issued",
+            "this authorisation is absent from the ceremony "
+            "journal, or its issued fields do not match")
+    # (8) Supersede shape — the "only when actually needed"
+    # gate, plus no prior decision for this envelope. Every
+    # failure is the single code ceremony_supersede_unproven.
+    head_entry = CeremonyConsumptionLedger.supersede_head(
+        consumption_entries, signed)
+    try:
+        supersession_ledger = CeremonySupersessionLedger(
+            config.home)
+        prior = supersession_ledger.find_by_new_authorisation(
+            signed.authorisation_id)
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the supersession journal could not be read; "
+            "refusing to decide from partial state")
+    if head_entry is None or prior is not None:
+        raise _config(
+            "ceremony_supersede_unproven",
+            "the presented envelope does not stand in the "
+            "supersede relation to the consumed head, or a "
+            "decision already exists for it")
+    # (9) Commit: the supersession journal append. The
+    # abandoned binding is copied from the verifier's OWN head
+    # entry — the request never names it.
+    recorded_at = _now()
+    try:
+        decision_entry = supersession_ledger.append_decision(
+            abandoned_entry=head_entry, signed=signed,
+            recorded_at=recorded_at)
+    except LedgerError:
+        raise _config(
+            "ledger_failed",
+            "the supersession decision could not be "
+            "committed; a decision may now exist for this "
+            "envelope and consumption may proceed against it")
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the supersession decision could not be committed")
+    # (10) Signing-ledger mirror + signing anchor. A mirror
+    # failure after the commit is ledger_failed; the decision
+    # stands and no receipt is returned.
+    try:
+        SigningLedger(config.home).append_ceremony_supersession(
+            decision_entry, signed=signed,
+            recorded_at=recorded_at)
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the supersession decision was committed in the "
+            "supersession journal but could not be mirrored "
+            "in the signing ledger; the decision stands and "
+            "no receipt is returned — consumption may proceed "
+            "against the journaled decision")
+    try:
+        _update_anchor(config)
+    except _Refuse:
+        raise _config(
+            "ledger_failed",
+            "the supersession was journaled and mirrored in "
+            "the signing ledger, but the signing anchor update "
+            "failed; the decision stands and no receipt is "
+            "returned — consumption may proceed against the "
+            "journaled decision")
+    return {"abandoned_authorisation_id":
+            head_entry["authorisation_id"],
+            "new_authorisation_id": signed.authorisation_id,
+            "candidate_cycle_seq": signed.candidate["cycle_seq"],
+            "candidate_payload_hash":
+            signed.candidate["payload_hash"],
+            "supersession_seq": decision_entry["seq"]}
+
+
 def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     """Consume a ceremony authorisation (cycle 21): record the
     single-use consumption of an issued envelope in the
@@ -2688,8 +2957,9 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     ceremony_authorisation_expired — which therefore
     certifies an envelope valid in every non-temporal
     respect; post-verification state refusals return
-    ceremony_already_consumed, ceremony_not_issued and
-    ceremony_head_regression, reachable only by an envelope
+    ceremony_already_consumed, ceremony_not_issued,
+    ceremony_head_regression and (cycle 24)
+    ceremony_supersede_required, reachable only by an envelope
     that passed verification; and infrastructure failure
     returns ledger_failed, the same code on both sides of
     the commit point; (5)
@@ -2699,8 +2969,18 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     kind="sign" entry for the same authorisation_id must
     never trip this check); (6) issuance presence in the
     ceremony journal with payload/ceremony/evidence field
-    match, else ceremony_not_issued; (7) the R3 head rules,
-    else ceremony_head_regression; (8) commit. An
+    match, else ceremony_not_issued; (6b) (cycle 24) the
+    supersession decision lookup: the decision is read from
+    the verifier's OWN supersession journal, keyed by the
+    presented envelope's authorisation_id — the caller never
+    supplies it — and threaded into both the head pre-check
+    and the commit append; (7) the R3 head rules, else
+    ceremony_head_regression, or ceremony_supersede_required
+    when the supersede shape holds but no journaled decision
+    authorises the abandonment; (8) commit. A
+    ceremony_supersede_required refusal is issued only before
+    the commit point and certifies that no consumption of
+    this authorisation exists (step 5 has already run). An
     unreadable/corrupt journal at any step is ledger_failed —
     fail closed, never scan partial state. Explicitly NOT
     re-checked here: operator allowlist membership and
@@ -2790,16 +3070,51 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     # recovery_of — verifier-written at authorise step (5b),
     # never a request field — is threaded into the head check
     # and the commit append, which derive the consumption's
-    # lineage from it. A v1 issuance entry carries no
-    # recovery_of: .get yields None, the legacy sentinel in
-    # the ledger's lineage derivation.
+    # lineage from it.
     bound_recovery_of = issued.get("recovery_of")
+    if bound_recovery_of is None:
+        # Cycle 24 sentinel narrowing (design-b §8): a v1
+        # issuance entry carries no recovery_of key. Convert
+        # the legacy sentinel to the explicit empty binding
+        # BEFORE threading: for a primary envelope the value
+        # is never consulted; for a burned_unadopted envelope
+        # "" enforces exact binding and cannot equal a head
+        # authorisation_id, so the recovery is refused by the
+        # lineage rules instead of binding to whatever head is
+        # current. The verifier path never passes None, so the
+        # ledger API's bind-to-head sentinel is unreachable
+        # through the verifier (it remains for direct
+        # in-process callers only).
+        bound_recovery_of = ""
+    # (6b) Supersession decision (cycle 24, Option A): looked
+    # up from the verifier's OWN supersession journal, keyed
+    # by the presented envelope's authorisation_id — the
+    # caller never supplies it (the recovery_of threading
+    # precedent) — and threaded into both the head pre-check
+    # and the commit append.
+    try:
+        decision = CeremonySupersessionLedger(
+            config.home).find_by_new_authorisation(
+                signed.authorisation_id)
+    except Exception:
+        raise _config(
+            "ledger_failed",
+            "the supersession journal could not be read; "
+            "refusing to consume from partial state")
     # (7) Head rules against the consumption snapshot (the
     # commit append re-checks them against fresh entries).
     try:
         CeremonyConsumptionLedger.check_head(
             consumption_entries, signed,
-            recovery_of=bound_recovery_of)
+            recovery_of=bound_recovery_of,
+            supersede_decision=decision)
+    except SupersedeRequiredError:
+        raise _config(
+            "ceremony_supersede_required",
+            "this consumption would supersede the consumed "
+            "head movement, and no journaled supersession "
+            "decision authorises the abandonment; obtain a "
+            "decision via ceremony_supersede and consume again")
     except AlreadyConsumedError:
         raise _config(
             "ceremony_already_consumed",
@@ -2813,7 +3128,19 @@ def _mode_ceremony_consume(config: _Config, body: dict) -> dict:
     try:
         entry = consumption_ledger.append_consumption(
             signed, recorded_at=recorded_at,
-            recovery_of=bound_recovery_of)
+            recovery_of=bound_recovery_of,
+            supersede_decision=decision)
+    except SupersedeRequiredError:
+        # Still pre-commit: check_head runs before the append
+        # on every attempt of append_consumption's retry loop,
+        # so this code is never emitted after a consumption
+        # has landed for this envelope.
+        raise _config(
+            "ceremony_supersede_required",
+            "this consumption would supersede the consumed "
+            "head movement, and no journaled supersession "
+            "decision authorises the abandonment; obtain a "
+            "decision via ceremony_supersede and consume again")
     except AlreadyConsumedError:
         raise _config(
             "ceremony_already_consumed",
@@ -2848,7 +3175,8 @@ _MODES = {"gate": _mode_gate, "sealed_eval": _mode_sealed_eval,
           "submit_claim": _mode_submit_claim,
           "issue_attestation": _mode_issue_attestation,
           "ceremony_authorise": _mode_ceremony_authorise,
-          "ceremony_consume": _mode_ceremony_consume}
+          "ceremony_consume": _mode_ceremony_consume,
+          "ceremony_supersede": _mode_ceremony_supersede}
 
 
 def _emit(request_id, mode, status, *, result=None, error=None,

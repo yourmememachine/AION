@@ -291,6 +291,26 @@ Cycle 21 — consumption head and the integrated-system claim:
   enables replay when the production consumer is wired,
   because the consumer refuses already-consumed and
   head-regression cases the history cannot see.
+- Supersede decisions (cycle 24, Option A): consumption of
+  a supersede-shaped movement — a fresh primary whose
+  candidate is strictly ahead of the consumed head while
+  its old pin sits behind that head — requires a PRIOR
+  journaled supersession decision at the verifier (created
+  by the verifier's ``ceremony_supersede`` mode, binding
+  the abandoned head movement to the new candidate). Without
+  one, the verifier refuses the consumption pre-commit with
+  ``ceremony_supersede_required`` and the production consumer
+  surfaces that as ``CeremonySupersedeRequired`` (a
+  ``SigningError`` subclass defined in ``trust/client.py``).
+  ``reanchor_pin`` neither catches nor wraps it: a consumer
+  exception propagates untouched, so the requirement reaches
+  the adopter (``trust/pin_adoption.PinAdopter``) with its
+  type and carried envelope intact. The consumer surfaces
+  the requirement; it does not decide — the decision is the
+  verifier's journaled act, requested by the adopter, and
+  the re-run that follows it is the second phase of a
+  two-phase authorised flow, not a retry of an ambiguous
+  consume (the refusal certifies the envelope unconsumed).
 
 Issuance-journal rollback residual (the ceremony
 authorisation — ISSUANCE — journal; NOT the consumption
@@ -708,6 +728,18 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     key or a wrong public-key pin gets none; the callable is
     not materially different from the inputs reanchor_pin
     already trusts.
+
+    Supersede-decision flow (cycle 24): consumption of a
+    supersede-shaped movement requires a prior journaled
+    supersession decision at the verifier. If the consumer
+    raises ``CeremonySupersedeRequired`` (trust/client.py's
+    SigningError subclass, raised when the verifier refused
+    pre-commit with ceremony_supersede_required), it
+    propagates from here UNTOUCHED — same type, carried
+    envelope dict intact — because the consumer exception
+    path below re-raises SigningError unchanged. This
+    function does not request a decision and does not re-run
+    itself; the adopter owns that two-phase flow.
 
     ``ceremony_history`` is an audit/consistency input that
     can only refuse, never grant; the verifier's consumption

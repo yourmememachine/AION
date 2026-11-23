@@ -82,6 +82,7 @@ from signing.ceremony_authorisation import (
     sign_ceremony_authorisation,
 )
 from signing.ed25519 import public_key_from_seed
+from signing.gate_decision import _canonical, _sha256
 from trust import protocol
 from trust.client import VerifierClient
 from trust.ledger import (
@@ -367,12 +368,27 @@ class CeremonyConsumeTests(ConsumeFixture):
         # head LANDS (the burned head movement is superseded;
         # the envelope is fresh and single-use and the pin
         # can only move forward to the ahead candidate).
+        # Re-pinned again cycle 24 / Option A: the bare
+        # supersede no longer lands — the flow is three steps:
+        # consume -> ceremony_supersede_required (pre-commit,
+        # nothing consumed); ceremony_supersede -> decision
+        # journaled; consume -> lands, head 50.
         self.consume(self.authorise())
         envelope2 = self.authorise(
             ceremony_id="ceremony-2026-11-28-002",
             candidate=self.candidate(50, "d" * 64),
             evidence_hash=EVIDENCE_HASH2,
             evidence_ref="case-file-2")
+        code, doc, _ = self.consume(envelope2)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_supersede_required")
+        self.assertEqual(len(self.consumption_entries()), 1)
+        code, doc, _ = self.raw(
+            {"operator_id": OPERATOR,
+             "signed_authorisation": envelope2},
+            mode="ceremony_supersede")
+        self.assertEqual(code, 0, msg=str(doc))
         code, doc, _ = self.consume(envelope2)
         self.assertEqual(code, 0, msg=str(doc))
         self.assertEqual(doc["result"]["new_cycle_seq"], 50)
@@ -570,6 +586,67 @@ class CeremonyConsumeTests(ConsumeFixture):
         assert_chain_head(
             CeremonyAuthorisationLedger(self.ledger_home))
 
+    def test_v1_issuance_recovery_envelope_does_not_bind_current_head(self):
+        # Cycle 24 sentinel narrowing (design-b §8): a v1
+        # issuance entry carries no recovery_of key. Hand-write
+        # one for a burned_unadopted envelope whose candidate
+        # equals the head target: the consume mode converts the
+        # absent binding to "" before threading, so the envelope
+        # does NOT bind to the current head through the ledger's
+        # recovery_of=None sentinel — it refuses
+        # ceremony_already_consumed and no recovery entry lands.
+        # (Direct-ledger sentinel behaviour itself stays pinned
+        # by the schema-v2 lineage tests, which pass
+        # recovery_of=None explicitly — unchanged.)
+        self.consume(self.authorise())
+        signed = sign_ceremony_authorisation(
+            signing_key=self.seed_key, signer_id=SIGNER,
+            operator_id=OPERATOR, ceremony_id="ceremony-v1-001",
+            reason="burned_unadopted",
+            old_pin={"cycle_seq": 41, "payload_hash": OLD_HASH},
+            candidate=self.candidate(47, CAND_HASH),
+            evidence_hash=EVIDENCE_HASH2,
+            evidence_ref="case-file-2")
+        # Rewrite the WHOLE issuance journal in the v1 shape:
+        # positional monotonicity forbids a v1 entry after a
+        # v2 one, so the existing v2 entry is re-chained
+        # without its recovery_of key (hashes recomputed by
+        # hand) and the new v1 entry appended after it.
+        ledger = CeremonyAuthorisationLedger(self.ledger_home)
+        entries = []
+        prev = GENESIS_HASH
+        for old in ledger.entries():
+            entry = {k: v for k, v in old.items()
+                     if k not in ("entry_hash", "recovery_of")}
+            entry["prev_hash"] = prev
+            entry["entry_hash"] = _sha256(_canonical(entry))
+            prev = entry["entry_hash"]
+            entries.append(entry)
+        entry = {"seq": len(entries) + 1, "kind": "authorise",
+                 "recorded_at": "2026-11-28T00:00:00+00:00",
+                 "prev_hash": prev,
+                 "authorisation_id": signed.authorisation_id,
+                 "payload_hash": signed.payload_hash,
+                 "ceremony_id": signed.ceremony_id,
+                 "evidence_hash": signed.evidence_hash,
+                 "operator_id": signed.operator_id,
+                 "issued_at": "2026-11-28T00:00:00+00:00"}
+        entry["entry_hash"] = _sha256(_canonical(
+            {k: v for k, v in entry.items() if k != "entry_hash"}))
+        entries.append(entry)
+        (self.ledger_home
+         / "ceremony-authorisations.json").write_text(
+            json.dumps({"entries": entries}, sort_keys=True),
+            encoding="utf-8")
+        envelope = ceremony_authorisation_envelope_to_dict(signed)
+        code, doc, _ = self.consume(envelope)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc),
+                         "ceremony_already_consumed")
+        entries = self.consumption_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["consumption_kind"], "primary")
+
     def test_k4_corrupt_consumption_journal_ledger_failed(self):
         envelope = self.authorise()
         self.ledger_home.mkdir(parents=True, exist_ok=True)
@@ -579,6 +656,50 @@ class CeremonyConsumeTests(ConsumeFixture):
         self.assertEqual(code, 3)
         self.assertEqual(self.error_code(doc), "ledger_failed")
 
+    def test_ordinary_consume_supersession_journal_absent(self):
+        # r6 evidence gap (a): with NO supersession journal
+        # present, an ordinary (non-supersede) consume proceeds
+        # exactly as before — the cycle-24 decision lookup is
+        # transparent to the pre-cycle-24 flow.
+        envelope = self.authorise()
+        self.assertFalse(
+            (self.ledger_home
+             / "ceremony-supersessions.json").exists())
+        code, doc, _ = self.consume(envelope)
+        self.assertEqual(code, 0, msg=str(doc))
+        self.assertEqual(doc["result"]["consumption_seq"], 1)
+        self.assertEqual(doc["result"]["new_cycle_seq"], 47)
+        self.assertEqual(doc["result"]["new_payload_hash"],
+                         CAND_HASH)
+        self.assertEqual(len(self.consumption_entries()), 1)
+
+    def test_ordinary_consume_corrupt_supersession_journal(self):
+        # r6 evidence gap (b): a CORRUPT supersession journal
+        # makes an ordinary (non-supersede) consume refuse
+        # fail-closed with ledger_failed (exit 3) — the
+        # verifier reads its own supersession journal at
+        # consume step (6b) and an unreadable/corrupt journal
+        # is ledger_failed, never scanned as partial state —
+        # and NOTHING is consumed: the consumption journal is
+        # byte-identical before and after the refusal.
+        envelope = self.authorise()
+        self.ledger_home.mkdir(parents=True, exist_ok=True)
+        (self.ledger_home
+         / "ceremony-supersessions.json").write_bytes(
+            b"\x00\xff garbage, not a supersession journal")
+        consumption_path = (self.ledger_home
+                            / "ceremony-consumptions.json")
+        before = consumption_path.read_bytes() \
+            if consumption_path.exists() else None
+        self.assertEqual(self.consumption_entries(), [])
+        code, doc, _ = self.consume(envelope)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.error_code(doc), "ledger_failed")
+        after = consumption_path.read_bytes() \
+            if consumption_path.exists() else None
+        self.assertEqual(after, before)
+        self.assertEqual(self.consumption_entries(), [])
+
 
 KILL_BEFORE_MODULE = '''
 import os
@@ -587,7 +708,8 @@ import sys
 import trust.verifier_main as vm
 
 
-def _kill(self, envelope, *, recorded_at, recovery_of=None):
+def _kill(self, envelope, *, recorded_at, recovery_of=None,
+          supersede_decision=None):
     os._exit(70)
 
 
@@ -604,9 +726,11 @@ import trust.verifier_main as vm
 _orig = vm.CeremonyConsumptionLedger.append_consumption
 
 
-def _kill(self, envelope, *, recorded_at, recovery_of=None):
+def _kill(self, envelope, *, recorded_at, recovery_of=None,
+          supersede_decision=None):
     _orig(self, envelope, recorded_at=recorded_at,
-          recovery_of=recovery_of)
+          recovery_of=recovery_of,
+          supersede_decision=supersede_decision)
     os._exit(70)
 
 

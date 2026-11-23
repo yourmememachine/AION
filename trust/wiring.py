@@ -103,8 +103,12 @@ pin must equal the env's signer id, and the key pin must be in
 the key-<16 lowercase hex> form and is supplied out-of-band —
 this function never reads the key file, so the key id cannot
 be derived here and a caller who does not already know it
-cannot use this factory. Every error names the variable and
-never carries its value.
+cannot use this factory. The ceremony public-key pin is
+mandatory too: it must be a CeremonyPublicKey supplied
+out-of-band, and None refuses — a production client that
+cannot accept ceremonies must be impossible to build, not
+merely unusable at first ceremony use. Every error names the
+variable and never carries its value.
 
 Wrapper routing is REFUSED, not emulated: the verifier client
 has no command hook (it spawns its module directly), and the
@@ -242,7 +246,7 @@ def _config_refusal(variable: str, problem: str):
 
 
 def production_client(verifier_env, *, expected_signer_id,
-                      expected_key_id, authorisation_public_key=None,
+                      expected_key_id, authorisation_public_key,
                       launch=_LAUNCH_SAME_USER):
     """Build the production verifier client from a validated
     copy of the given env mapping.
@@ -253,7 +257,10 @@ def production_client(verifier_env, *, expected_signer_id,
     this validation does not prove. Returns a client whose
     deployment-mode expectation is pinned to "production": a
     verifier that reports any other mode is refused by the
-    client at response time.
+    client at response time. All three pins (signer, key,
+    ceremony public key) are mandatory keyword arguments;
+    omitting any is a TypeError, and passing None for the
+    ceremony pin is a VerifierConfigError.
 
     This factory is validation, not a boundary: a same-user
     caller can ignore it and construct the underlying object
@@ -392,22 +399,32 @@ def production_client(verifier_env, *, expected_signer_id,
             "be supplied out-of-band in the form "
             "key-<16 lowercase hex>")
 
-    # Ceremony public-key pin (cycle 20): the production client
-    # shape supports pinning the ceremony Ed25519 public key
-    # beside the signer/key pins, the same way — supplied
-    # out-of-band as a CeremonyPublicKey object (its key_id is
-    # derived from its bytes) and passed through to the client,
-    # whose ceremony_authorise verifies envelope signatures
-    # against it. Optional at THIS factory because ceremony use
-    # is optional for a production client; a client without it
-    # refuses ceremony_authorise locally rather than accepting
-    # an unverified envelope.
-    if authorisation_public_key is not None \
-            and not isinstance(authorisation_public_key,
-                               CeremonyPublicKey):
+    # Ceremony public-key pin: the third mandatory pin, beside
+    # the signer and key pins. It is supplied out-of-band the
+    # same way, as a CeremonyPublicKey object (its key_id is
+    # derived from its bytes), and passed through to the
+    # client, whose ceremony_authorise verifies envelope
+    # signatures against it. Cycle 20 made this pin optional
+    # at this factory on the reasoning that ceremony use was
+    # optional for a production client; cycle 24 reverses that
+    # (CROSS-CHECK-17, both external seats): a pinless
+    # production client constructs fine and wedges only at
+    # first ceremony use — exactly the moment the pin adopter
+    # needs the ceremony to work — so construction-time
+    # refusal is the only honest place for the refusal. A
+    # production client that cannot accept ceremonies must be
+    # impossible to build.
+    if authorisation_public_key is None:
+        raise VerifierConfigError(
+            "authorisation_public_key: a ceremony public-key "
+            "pin is mandatory for a production client; "
+            "refusing None rather than constructing a client "
+            "that would refuse every ceremony at first use")
+    if not isinstance(authorisation_public_key,
+                      CeremonyPublicKey):
         raise VerifierConfigError(
             "authorisation_public_key: must be a "
-            "CeremonyPublicKey supplied out-of-band, or None")
+            "CeremonyPublicKey supplied out-of-band")
 
     return VerifierClient(
         verifier_env=env,

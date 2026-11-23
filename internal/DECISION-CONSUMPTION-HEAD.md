@@ -252,3 +252,92 @@ superseded pair adopted later can stall one sequence at
 AlreadyConsumedError before self-healing via the next
 supersede. The rule is put to the external seats as its
 own numbered question in the cycle-23 brief.
+
+## Addendum 4 — cycle 24: supersede Option A as built; sentinel scoping
+
+*(Cycle 24 part 1, implementing CROSS-CHECK-17's convergent scope.
+War-room record: internal/REVIEW-CYCLE-24.md.)*
+
+**Option A as built.** The broad supersede rule's missing leg — an
+explicit, separately authorised, journaled supersession decision —
+is implemented as designed in `internal/cycle24-work/design-b.md`
+(adopted as DESIGN-FINAL R3):
+
+- A new verifier mode `ceremony_supersede` mints the decision. The
+  VERIFIER identifies the abandoned movement from its own consumption
+  head; the request names no abandoned-movement field. All shape
+  failures collapse to one refusal code,
+  `ceremony_supersede_unproven`.
+- The decision is journaled in a dedicated hash-chained journal
+  (`CeremonySupersessionLedger`, `ceremony-supersessions.json`) and
+  mirrored into the anchored signing ledger (kind `"supersede"`).
+  The receipt's key set is canonical (adjudicated during the build;
+  named in DESIGN-FINAL's adjudication note):
+  `{"abandoned_authorisation_id", "new_authorisation_id",
+  "candidate_cycle_seq", "candidate_payload_hash",
+  "supersession_seq"}`.
+- Consume-side, `check_head`/`append_consumption` accept a
+  behind-head old pin ONLY when the shape predicate
+  `CeremonyConsumptionLedger.supersede_head` — now the single
+  implementation used by both the mode and `check_head` (cycle-24
+  fix round) — offers the shape AND a journaled decision binds the
+  abandoned movement to this envelope (abandoned authorisation id and
+  (old, new) pair, new authorisation id, candidate (seq, hash),
+  superseding old pin, operator). The journal-known-hash check runs
+  BEFORE the decision gate; a missing decision raises the dedicated
+  `SupersedeRequiredError`, surfaced by the consume mode as the
+  documented post-verification state-oracle code
+  `ceremony_supersede_required`, emitted only pre-commit. Context
+  binding (the pin-store's current pin) remains mandatory on every
+  adoption, per Gemini's condition. Recovery envelopes are never
+  reclassified: `burned_unadopted` (and `initial_anchor`) are excluded
+  from the supersede shape by construction.
+
+**What "separately authorised" means here — disclosed reading.** The
+decision is a separate authorisation act from the consumption
+authorisation: distinct signed envelope, distinct verifier mode,
+distinct journal, distinct receipt. It is NOT a separate human act:
+`PinAdopter` requests the decision automatically — exactly one
+decision request and exactly one re-run of the consume attempt with
+the same envelope — when a consume surfaces
+`ceremony_supersede_required`, using the same configured operator id
+and the same launch channel (operator identity remains allowlist
+eligibility, not authentication; see the cycle-20 canonical
+sentence). This reading of seat-gpt's Option A wording was adopted
+by the cycle-24 war room (DESIGN-FINAL R3) and ratified internally
+at re-review (5 of 5 voting seats), with the forced-dissent seat's
+objection preserved in REVIEW-CYCLE-24.md. **The supersede item's
+closure is CONDITIONAL on seat-gpt ratifying this reading** in the
+external round, where the auto-fire flow is disclosed as the brief's
+headline; if the external seats reject the reading, the closure
+reopens.
+
+**Closure is also conditional on the unanchored-journal residual.**
+The supersession journal is authoritative for abandonment yet is not
+externally anchored (follow-up `ceremony-journal-anchoring` now
+covers BOTH the authorisation journal and the supersession journal;
+design in `internal/cycle24-work/design-c.md`). Its rollback
+position is stated in the ledger docstring: a file-only rollback to
+an earlier prefix fails closed (the decision is simply absent;
+re-decidable because uniqueness lives in the same file), and a
+rolled-in decision for a different envelope or a moved head is inert
+by the §5.2 binding. One widening found at re-review (rev-r6): the
+consume mode reads the supersession journal on EVERY consume (step
+6b), so the unanchored journal is also an availability dependency of
+ordinary consumes — a corrupt journal refuses ordinary consumes
+fail-closed with `ledger_failed` and nothing consumed (pinned by
+test). Fail-closed is the intended direction; the dependency is
+recorded here so the residual is stated in full.
+
+**Sentinel scoping (seat-gpt's cycle-23 condition).** The cap-2
+lineage guarantee is a property of the integrated verifier path, not
+of the ledger API for arbitrary in-process callers. Precisely: the
+consume mode converts a v1 issuance entry's absent `recovery_of`
+(the `None` sentinel) to `""` (no lineage) before threading it into
+`check_head`, so through the verifier the sentinel is unreachable
+and every threaded binding is a string; `check_head`'s own `None`
+default remains for direct in-process callers, for whom the
+guarantee does not hold. Making lineage mandatory at the ledger API
+boundary itself would break the v1 read path and is not attempted;
+the scoping sentence above is the precise claim, and it supersedes
+any broader reading of Addendum 3's guarantee.

@@ -388,14 +388,14 @@ the journal's entries point back to — and never selectively:
 deleting individual files while their journal entries remain
 destroys the audit correspondence the store exists to keep.
 
-**Production client pin warning.** A production client built
-without the ceremony pin (`production_client(...)` without
-`authorisation_public_key=`) fails only at first ceremony
-use: construction and every non-ceremony mode work, and the
-client refuses `ceremony_authorise` locally when it is first
-called. If the client will ever authorise ceremonies, set
-the pin at construction time — do not discover its absence
-at ceremony time.
+**Production client pin requirement.** The ceremony pin is
+mandatory in `production_client(...)`: a pinless call cannot
+construct at all — omitting `authorisation_public_key=` is a
+`TypeError`, and passing `None` is refused with a
+configuration error at construction time. There is no
+discover-at-ceremony-time failure mode left to warn about:
+every production client carries the ceremony public-key pin
+from construction, beside the signer and key pins.
 
 ## Key provisioning
 

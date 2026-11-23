@@ -83,6 +83,7 @@ from signing.state_snapshot import (
     verify_signed_snapshot,
     verify_snapshot_for_state,
 )
+from trust.client import CeremonySupersedeRequired
 from trust.wiring import production_client
 
 REASON_INITIAL_ANCHOR = "initial_anchor"
@@ -719,20 +720,90 @@ class PinAdopter:
         # inside this call; any exception from here is treated
         # as burned — a lost consume response is
         # indistinguishable from a refused one at this layer.
-        try:
-            new_pin, record = reanchor_pin(
+        def _attempt(envelope):
+            return reanchor_pin(
                 old_pin, signed, signing_key=self._key,
                 state_bytes=state_bytes,
                 calibration_bytes=calibration_bytes,
                 expected_signer_id=cfg.expected_snapshot_signer_id,
                 operator_id=cfg.operator_id, reason=reason,
                 evidence_hash=evidence_hash,
-                authorisation=signed_env,
+                authorisation=envelope,
                 authorisation_public_key=self._pub,
                 expected_verifier_signer_id=cfg.expected_verifier_signer_id,
                 ceremony_history=history,
                 consume_authorisation=self._client.ceremony_consumer(),
                 strict_reasons=eff_strict)
+
+        try:
+            new_pin, record = _attempt(signed_env)
+        except CeremonySupersedeRequired as sup:
+            # Cycle 24, supersede Option A (design B §7/§7.1):
+            # exactly ONE decision request, then exactly ONE
+            # re-run of _attempt with the SAME envelope. No loop:
+            # if the re-run itself raises
+            # CeremonySupersedeRequired again (the head moved
+            # concurrently; the decision is misbound against the
+            # new head), it falls into the re-run's generic
+            # handler below and is burned — the adopter never
+            # asks twice.
+            #
+            # This is NOT a retry of an ambiguous consume, and
+            # does not breach the never-retry rule (cycle 21,
+            # R7): that rule exists because a consume whose
+            # outcome is UNKNOWN may have committed.
+            # ceremony_supersede_required is the opposite case —
+            # a KNOWN, negative outcome. The verifier emits that
+            # code only pre-commit, from its head check, after
+            # its already-consumed check has certified the
+            # envelope unconsumed; the envelope is therefore
+            # provably unburned, and the re-run is the second
+            # phase of a two-phase authorised flow: it re-runs
+            # every local check against the same envelope and
+            # consumes only against the decision the verifier
+            # journaled in between. A lost or ambiguous
+            # SUPERSEDE-mode response is not covered by this
+            # argument: it is treated as burned below, never
+            # re-decided blindly within this flow.
+            try:
+                self._client.ceremony_supersede(
+                    operator_id=cfg.operator_id,
+                    envelope_dict=sup.envelope_dict)
+            except Exception as exc:
+                # Honest note: in this specific failure the
+                # envelope is in fact unconsumed and a decision
+                # may or may not be journaled; PinAdoptionBurned's
+                # "treated as burned" conservatism is retained
+                # because the adopter cannot distinguish the
+                # cases, and the next snapshot_and_adopt attempt
+                # uses a fresh ceremony regardless — no state
+                # depends on the distinction.
+                raise PinAdoptionBurned(
+                    f"supersession decision request failed; the "
+                    f"authorisation is treated as burned: {exc}",
+                    returned_pin=None, returned_record=None) from exc
+            # The "supersede_decided" pending-journal line is a
+            # detection aid only, like every phase; it is NOT a
+            # burn phase — _unadopted_burns is unchanged by it
+            # (it neither adds nor removes burn status; it rides
+            # on the existing authorised phase of this ceremony).
+            try:
+                self._append_journal({**journal_base,
+                                      "phase": "supersede_decided"})
+            except OSError as exc:
+                raise PinAdoptionBurned(
+                    f"supersede_decided journal append failed; "
+                    f"the authorisation is treated as burned: "
+                    f"{exc}",
+                    returned_pin=None, returned_record=None) from exc
+            try:
+                new_pin, record = _attempt(signed_env)
+            except Exception as exc:
+                raise PinAdoptionBurned(
+                    f"re-anchor after a journaled supersession "
+                    f"decision did not return; the authorisation "
+                    f"is treated as burned: {exc}",
+                    returned_pin=None, returned_record=None) from exc
         except Exception as exc:
             raise PinAdoptionBurned(
                 f"re-anchor did not return; the authorisation is "

@@ -48,8 +48,10 @@ from trust.ledger import (
     AlreadyConsumedError,
     CeremonyAuthorisationLedger,
     CeremonyConsumptionLedger,
+    CeremonySupersessionLedger,
     CorruptLedgerError,
     HeadRegressionError,
+    SupersedeRequiredError,
 )
 
 NOW = "2026-11-20T12:00:00+00:00"
@@ -602,12 +604,31 @@ class SupersedeRuleTests(unittest.TestCase):
                 "signer_id": "snapshot-svc",
                 "key_id": "key-0123456789abcdef"}
 
+    def _decision_for(self, env):
+        """Journal a supersession decision for ``env`` against
+        the current head (cycle 24, Option A) and return the
+        decision entry dict."""
+        head = self.ledger.entries()[-1]
+        return CeremonySupersessionLedger(
+            self.tmp.name).append_decision(
+                abandoned_entry=head, signed=env, recorded_at=NOW)
+
     def test_supersede_lands_primary_candidate_ahead_old_behind(self):
+        # Re-pinned cycle 24 / Option A: the bare supersede no
+        # longer lands — without a journaled decision the same
+        # call raises SupersedeRequiredError; with a decision
+        # bound to this envelope and the current head, threaded
+        # as supersede_decision=, it lands as before.
         env = mint(
             reason="chain_gap_recovery",
             old_pin={"cycle_seq": 41, "payload_hash": "a" * 64},
             candidate=self._cand(52, "c" * 64))
-        entry = self.ledger.append_consumption(env, recorded_at=NOW)
+        with self.assertRaises(SupersedeRequiredError):
+            self.ledger.append_consumption(env, recorded_at=NOW)
+        self.assertEqual(len(self.ledger.entries()), 1)
+        decision = self._decision_for(env)
+        entry = self.ledger.append_consumption(
+            env, recorded_at=NOW, supersede_decision=decision)
         self.assertEqual(entry["consumption_kind"], "primary")
         self.assertEqual(entry["recovery_depth"], 0)
         self.assertEqual(entry["recovery_of"], "")
@@ -615,6 +636,9 @@ class SupersedeRuleTests(unittest.TestCase):
 
     def test_supersede_does_not_rescue_fork_at_head(self):
         from trust.ledger import HeadRegressionError
+        # Cycle 24: unchanged — an old pin AT the head seq is
+        # not the supersede shape, so the decision check is
+        # never reached and no decision is involved.
         # Old pin AT the head seq with a different hash is a
         # fork of the head target — refused even with the
         # candidate ahead.
@@ -631,6 +655,12 @@ class SupersedeRuleTests(unittest.TestCase):
         # 41 / "a"*64. A supersede envelope claiming old pin
         # seq 41 with a FABRICATED hash refuses — the seq is
         # journal-known, so its hash is bound.
+        # Cycle 24 order pin: the hash binding runs BEFORE the
+        # decision check, so with NO decision journaled this
+        # still raises HeadRegressionError — never
+        # SupersedeRequiredError (the assertRaises below is
+        # exact on that point: SupersedeRequiredError is not a
+        # HeadRegressionError subclass).
         env = mint(
             reason="chain_gap_recovery",
             old_pin={"cycle_seq": 41, "payload_hash": "f" * 64},
@@ -640,6 +670,10 @@ class SupersedeRuleTests(unittest.TestCase):
         self.assertEqual(len(self.ledger.entries()), 1)
 
     def test_supersede_fabricated_old_hash_known_as_new_seq_refuses(self):
+        # Cycle 24: outcome unchanged, and (no decision is
+        # journaled here) the refusal is HeadRegressionError,
+        # not SupersedeRequiredError — hash binding precedes
+        # the decision check.
         # The journal-known binding also covers a seq recorded
         # as an entry's new_cycle_seq: journal 35->41, 41->47;
         # old pin seq 41 must carry hash "a"*64 (the recorded

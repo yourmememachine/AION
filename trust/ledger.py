@@ -75,6 +75,21 @@ class HeadRegressionError(LedgerError):
     reason = "head_regression"
 
 
+class SupersedeRequiredError(LedgerError):
+    """The supersede shape holds but no journaled supersession
+    decision authorises the abandonment (cycle 24, Option A).
+    Machine-distinguishable from a head regression via the
+    ``reason`` attribute and by TYPE: the consume mode maps
+    this to ``ceremony_supersede_required`` and
+    HeadRegressionError to ``ceremony_head_regression``, and
+    the adopter acts differently on them (obtain a decision
+    and re-present the SAME envelope vs a fresh ceremony), so
+    this subclasses LedgerError DIRECTLY — it is NOT a
+    HeadRegressionError subclass."""
+
+    reason = "supersede_required"
+
+
 # Strict parsing (Trust Boundary v3.1, parser inventory): the
 # journal is parsed under the same contract as every other
 # security-relevant consumer — duplicate keys and non-finite
@@ -474,6 +489,51 @@ class SigningLedger(HashChainJournal):
             accepted=False,
             signer_id=signed.signer_id,
             format="ceremony-consumption")
+
+    def append_ceremony_supersession(self, decision_entry, *,
+                                     signed, recorded_at) -> dict:
+        """Mirror a ceremony supersession decision (cycle 24)
+        in the EXISTING entry shape — EXTRA_KEYS is untouched,
+        so no journal format migration. This is an audit
+        mirror, NOT a second commit: it is invoked only after
+        CeremonySupersessionLedger.append_decision has
+        committed, and it puts the decision fact into the
+        signing ledger as an anchored audit trace. Column
+        reuse follows append_ceremony_consumption: kind
+        "supersede", format "ceremony-supersession",
+        decision_id = the new envelope's authorisation_id,
+        payload_hash = the envelope's payload_hash, purpose =
+        "pin-ceremony-supersession", proposal_id =
+        ceremony_id, accepted=False, signer_id = the
+        envelope's signer_id. Any cross-check for supersession
+        decisions MUST scope to kind="supersede" AND
+        format="ceremony-supersession": the issuance mirror
+        already writes the same decision_id under kind "sign".
+        The mirror is an audit trace only: no consume path
+        reads it, and its absence never grants or refuses a
+        consumption (authority is the supersession journal
+        plus check_head's binding)."""
+        from signing.ceremony_authorisation import \
+            SignedCeremonyAuthorisation
+        if not isinstance(signed, SignedCeremonyAuthorisation):
+            raise LedgerError(
+                "can only ledger a SignedCeremonyAuthorisation")
+        if not isinstance(decision_entry, dict) \
+                or decision_entry.get("new_authorisation_id") \
+                != signed.authorisation_id:
+            raise LedgerError(
+                "can only mirror a supersession decision entry "
+                "for this authorisation")
+        self._reload()
+        return self._append(
+            "supersede", recorded_at,
+            decision_id=signed.authorisation_id,
+            payload_hash=signed.payload_hash,
+            purpose="pin-ceremony-supersession",
+            proposal_id=signed.ceremony_id,
+            accepted=False,
+            signer_id=signed.signer_id,
+            format="ceremony-supersession")
 
     def append_claim(self, claim_document, *, recorded_at,
                      signer_id="") -> dict:
@@ -1029,7 +1089,14 @@ class CeremonyConsumptionLedger(HashChainJournal):
             # Legacy sentinel: no issuance binding was threaded
             # in, so the head entry itself is the bound burn
             # (synthetic head dicts in unit tests may not even
-            # carry an authorisation_id).
+            # carry an authorisation_id). Cycle 24 narrowing:
+            # the verifier's consume mode converts a v1
+            # issuance entry's absent recovery_of (None) to
+            # the explicit empty binding "" before threading,
+            # so this sentinel is NOT reachable through the
+            # verifier — it remains only for direct in-process
+            # callers, whose head binding is their own
+            # assertion (design-b §8).
             bound = burn.get("authorisation_id", "")
         else:
             bound = recovery_of
@@ -1117,7 +1184,63 @@ class CeremonyConsumptionLedger(HashChainJournal):
         return head
 
     @staticmethod
-    def check_head(entries, signed, recovery_of=None) -> None:
+    def supersede_head(entries, signed):
+        """Return the head entry iff consuming ``signed``
+        against ``entries`` would enter the supersede branch,
+        else None (cycle 24, design-b §3 — the single source
+        of truth for the supersede shape, used by BOTH the
+        verifier's ceremony_supersede mode and check_head's
+        branch so the two cannot drift).
+
+        The shape, exactly: entries non-empty; the envelope's
+        reason is NOT burned_unadopted (a recovery envelope
+        never supersedes) and NOT initial_anchor (check_head
+        refuses initial_anchor outright against a non-empty
+        journal, so the predicate must not offer that shape
+        either — both sides agree by construction) and its
+        derived lineage is not a recovery; signed.old_pin is
+        present; the candidate is STRICTLY AHEAD of the head
+        (candidate cycle_seq > head new_cycle_seq); the old pin
+        is BEHIND the head (old cycle_seq < head new_cycle_seq);
+        and the journal-known old-pin hash binding holds —
+        every hash recorded for the old pin's seq (each entry's
+        new_payload_hash where new_cycle_seq == old_seq, each
+        entry's old_payload_hash where old_cycle_seq ==
+        old_seq, skipping the empty-string no-pin spelling),
+        when that set is non-empty, must contain the claimed
+        old-pin hash."""
+        if not entries:
+            return None
+        if signed.reason == "burned_unadopted":
+            return None
+        if signed.reason == "initial_anchor":
+            return None
+        if CeremonyConsumptionLedger._derive_lineage(
+                entries, signed, None)[0] == "recovery":
+            return None
+        if signed.old_pin is None:
+            return None
+        head = entries[-1]
+        head_seq = head["new_cycle_seq"]
+        if signed.candidate["cycle_seq"] <= head_seq:
+            return None
+        old_seq = signed.old_pin["cycle_seq"]
+        if old_seq >= head_seq:
+            return None
+        recorded = set()
+        for entry in entries:
+            if entry["new_cycle_seq"] == old_seq:
+                recorded.add(entry["new_payload_hash"])
+            if entry["old_cycle_seq"] == old_seq \
+                    and entry["old_payload_hash"] != "":
+                recorded.add(entry["old_payload_hash"])
+        if recorded and signed.old_pin["payload_hash"] not in recorded:
+            return None
+        return head
+
+    @staticmethod
+    def check_head(entries, signed, recovery_of=None, *,
+                   supersede_decision=None) -> None:
         """Raise AlreadyConsumedError / HeadRegressionError if
         consuming ``signed`` against ``entries`` (a consumption
         journal snapshot, in append order) would violate the
@@ -1156,11 +1279,40 @@ class CeremonyConsumptionLedger(HashChainJournal):
           new_payload_hash, or as an entry's old_cycle_seq,
           bound to its old_payload_hash), the old pin's hash
           must equal the recorded hash for that seq, else
-          HeadRegressionError. Within that scope a fresh
-          primary may pass the behind-head old pin: the
-          burned head movement is superseded — abandoned,
-          never adopted; its burn remains a permanent journal
-          fact. This closes the adopter-level deadlock where
+          HeadRegressionError. This branch does NOT
+          re-implement that shape/hash-binding logic: it
+          derives its determination from supersede_head
+          itself (cycle 24 fix round, r3-F1) — the candidate-
+          position refusal below runs BEFORE the predicate
+          is consulted, and a None result from supersede_head
+          in this branch (old behind head, candidate ahead,
+          not a recovery) is exactly the shape/hash-binding
+          failure and raises HeadRegressionError. Within that
+          scope a fresh primary may pass the behind-head old
+          pin: the burned head movement is superseded —
+          abandoned, never adopted; its burn remains a
+          permanent journal fact. Cycle 24 (Option A): within
+          that scope the abandonment additionally requires a
+          journaled supersession decision
+          (CeremonySupersessionLedger), threaded in as
+          ``supersede_decision`` — the consume mode looks it
+          up from its own supersession journal keyed by the
+          envelope's authorisation_id; the caller never
+          supplies it. The hash-binding check (via
+          supersede_head) runs FIRST, BEFORE the decision
+          gate: a fabricated journal-known old-pin hash
+          raises HeadRegressionError even with no decision.
+          Then: no decision -> SupersedeRequiredError (NOT a
+          HeadRegressionError; the consume mode maps it to
+          ceremony_supersede_required); a present decision is
+          binding-checked against the CURRENT head (abandoned
+          authorisation_id and abandoned (old, new) pair ==
+          the head entry; new_authorisation_id ==
+          signed.authorisation_id; candidate (seq, hash) ==
+          signed.candidate; superseding old pin ==
+          signed.old_pin; operator_id == signed.operator_id)
+          — any mismatch raises HeadRegressionError.
+          This closes the adopter-level deadlock where
           a movement consumed to its recovery cap with its
           adoption pair discarded left the pin behind the
           consumed head forever (every later primary refused
@@ -1271,27 +1423,77 @@ class CeremonyConsumptionLedger(HashChainJournal):
                 if cand_seq <= head_seq:
                     raise HeadRegressionError(
                         "old pin is behind the consumed head")
-                # Hash binding (fix round, r1-F2): when the
-                # old pin's seq is recorded in the journal —
-                # as an entry's new_cycle_seq (bound to its
-                # new_payload_hash) or as an entry's
-                # old_cycle_seq (bound to its
-                # old_payload_hash) — the claimed old hash
-                # must equal a recorded hash for that seq; a
-                # fabricated old-pin hash at a journal-known
-                # seq refuses. A seq recorded nowhere cannot
-                # be checked here (named residual (i)).
-                recorded = set()
-                for entry in entries:
-                    if entry["new_cycle_seq"] == old_seq:
-                        recorded.add(entry["new_payload_hash"])
-                    if entry["old_cycle_seq"] == old_seq:
-                        recorded.add(entry["old_payload_hash"])
-                if recorded and old_hash not in recorded:
+                # Shape / hash binding (fix round, r1-F2;
+                # structurally unified cycle 24 fix round,
+                # r3-F1): this branch derives its determination
+                # from supersede_head itself — the single
+                # source of truth the supersede mode also uses
+                # — instead of re-implementing the recorded-hash
+                # collection inline (the inline copy had already
+                # diverged: it added an entry's old_payload_hash
+                # unconditionally, where supersede_head skips
+                # the empty-string no-pin spelling). The
+                # candidate-position refusal above and the
+                # old-pin-at-head fork refusal below are ordered
+                # BEFORE this gate, and this gate runs BEFORE
+                # the decision gate: supersede_head returning
+                # None here (old behind head, candidate ahead,
+                # not a recovery — every other shape condition
+                # is already established by the surrounding
+                # checks, so None means exactly the hash-binding
+                # / shape failure) raises HeadRegressionError,
+                # never SupersedeRequiredError. A seq recorded
+                # nowhere cannot be checked here (named
+                # residual (i)); supersede_head encodes that
+                # too (an empty recorded set does not refuse).
+                if CeremonyConsumptionLedger.supersede_head(
+                        entries, signed) is None:
                     raise HeadRegressionError(
                         "old pin hash does not match the "
                         "journal-recorded hash for its sequence "
                         "(supersede hash binding)")
+                # Supersession decision (cycle 24, Option A):
+                # the hash binding above (via supersede_head)
+                # runs FIRST, so a fabricated journal-known old
+                # hash raises HeadRegressionError, never
+                # supersede-required. Only now is the decision
+                # questioned: missing -> SupersedeRequiredError;
+                # present but not bound to THIS envelope and the
+                # CURRENT head -> HeadRegressionError (a decision
+                # minted against a head that has since moved is
+                # inert).
+                if supersede_decision is None:
+                    raise SupersedeRequiredError(
+                        "supersede shape holds but no journaled "
+                        "supersession decision authorises "
+                        "abandoning the consumed head")
+                decision = supersede_decision
+                if decision["abandoned_authorisation_id"] \
+                        != last["authorisation_id"] \
+                        or decision["abandoned_old_cycle_seq"] \
+                        != last["old_cycle_seq"] \
+                        or decision["abandoned_old_payload_hash"] \
+                        != last["old_payload_hash"] \
+                        or decision["abandoned_new_cycle_seq"] \
+                        != last["new_cycle_seq"] \
+                        or decision["abandoned_new_payload_hash"] \
+                        != last["new_payload_hash"] \
+                        or decision["new_authorisation_id"] \
+                        != signed.authorisation_id \
+                        or decision["candidate_cycle_seq"] \
+                        != cand_seq \
+                        or decision["candidate_payload_hash"] \
+                        != cand_hash \
+                        or decision["superseding_old_cycle_seq"] \
+                        != old_seq \
+                        or decision["superseding_old_payload_hash"] \
+                        != old_hash \
+                        or decision["operator_id"] \
+                        != signed.operator_id:
+                    raise HeadRegressionError(
+                        "journaled supersession decision does "
+                        "not bind this envelope to the consumed "
+                        "head it abandons")
             if old_seq == head_seq and old_hash != head_hash:
                 raise HeadRegressionError(
                     "old pin forks the consumed head at its "
@@ -1300,7 +1502,8 @@ class CeremonyConsumptionLedger(HashChainJournal):
     # -- the commit point --------------------------------------------
 
     def append_consumption(self, envelope, *, recorded_at,
-                           recovery_of=None) -> dict:
+                           recovery_of=None,
+                           supersede_decision=None) -> dict:
         """Consume one ceremony authorisation. THE commit
         point for consumption: before this append lands
         nothing is consumed; after it lands the
@@ -1322,7 +1525,15 @@ class CeremonyConsumptionLedger(HashChainJournal):
         AlreadyConsumedError, while exactly one racer lands.
         recovery_of is the issuance entry's recovery_of
         threaded in by the consume mode (None = legacy
-        direct-caller sentinel, see _derive_lineage). A
+        direct-caller sentinel, see _derive_lineage).
+        supersede_decision (cycle 24) is threaded into
+        check_head on EVERY attempt, against the freshly
+        reloaded entries, so a head movement between a
+        caller's pre-check and this commit re-validates the
+        decision against the new head and refuses
+        (HeadRegressionError) rather than landing on a stale
+        binding; the decision object itself is not re-read
+        inside the loop (design-b §5.3). A
         CorruptLedgerError from _save's freshness check means
         a competitor landed between reload and save: reload,
         re-check, retry — so the concurrent loser surfaces as
@@ -1350,7 +1561,8 @@ class CeremonyConsumptionLedger(HashChainJournal):
                     "authorisation already consumed: "
                     f"{envelope.authorisation_id}")
             self.check_head(self._entries, envelope,
-                            recovery_of=recovery_of)
+                            recovery_of=recovery_of,
+                            supersede_decision=supersede_decision)
             kind, rec_of, depth = \
                 CeremonyConsumptionLedger._derive_lineage(
                     self._entries, envelope, recovery_of)
@@ -1384,6 +1596,273 @@ class CeremonyConsumptionLedger(HashChainJournal):
                     consumption_kind=kind,
                     recovery_of=rec_of,
                     recovery_depth=depth)
+            except CorruptLedgerError as exc:
+                last_error = exc
+        raise last_error
+
+
+def _is_hex64(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        c in "0123456789abcdef" for c in value)
+
+
+class CeremonySupersessionLedger(HashChainJournal):
+    """Journaled supersession decisions for ceremony
+    consumptions (cycle 24, Option A; design-b §4): one entry
+    per decision, in its own file in the verifier home.
+
+    A decision is the verifier's record that an allowlisted
+    operator presented a verified, issued, unconsumed envelope
+    in the exact supersede shape (see
+    CeremonyConsumptionLedger.supersede_head), and that the
+    consumption journal's then-current head movement is
+    thereby authorised to be abandoned in favour of that
+    envelope's strictly-ahead candidate. The entry binds: the
+    abandoned head entry's authorisation_id and its full
+    (old -> new) pair, the new envelope's authorisation_id,
+    the new envelope's candidate (seq, hash), the new
+    envelope's old pin (the superseding old pin), and the
+    operator_id. Entries are kind "supersede". The decision
+    is spent at consume time by check_head's binding against
+    the THEN-current head: a decision minted against head H
+    is inert once the head moves past H.
+
+    Single-decision-per-envelope is enforced at append
+    (reload-recheck inside the bounded retry loop) and at
+    load. Per-ABANDONED uniqueness is deliberately NOT
+    enforced: two different fresh envelopes may each
+    legitimately receive a decision abandoning the same head
+    (the first envelope may expire unconsumed inside its TTL;
+    the second is then the live one). Stale decisions are
+    made inert by the consume-side binding to the current
+    head, not by an append-side uniqueness rule that would
+    deadlock the expiry case.
+
+    Rollback position (design-b §4.4, stated honestly): this
+    journal is NOT externally anchored this cycle — there is
+    no dedicated anchor for it; it joins the
+    ceremony-journal-anchoring follow-up, whose scope now
+    covers BOTH the issuance journal and this journal. Its
+    rollback position is the issuance journal's, not the
+    consumption journal's. Rolling back the WHOLE verifier
+    home also rolls back the consumption journal, whose
+    anchor (when configured, required in production with the
+    ceremony seed) refuses startup (anchor_refused) for any
+    consumption whose anchor update completed — so a
+    whole-home rollback cannot silently restore a
+    pre-decision world and keep consuming. Rolling back ONLY
+    this file to an earlier prefix makes decisions vanish, so
+    consume refuses ceremony_supersede_required — it fails
+    closed, and the operator simply presents the envelope to
+    ceremony_supersede again. A decision rolled in for a
+    DIFFERENT envelope is inert: the consume-side binding
+    ties it to the current head and to the presented
+    envelope's id. No rollback- or forgery-resistance is
+    claimed for this journal itself: a party with write
+    access to the verifier home can rewrite it from genesis
+    with a fabricated decision whose hash chain
+    self-validates; the signing-ledger mirror
+    (SigningLedger.append_ceremony_supersession) is an
+    anchored audit trace that a decision was recorded, not a
+    proof of any particular journal entry."""
+
+    FILENAME = "ceremony-supersessions.json"
+    EXTRA_KEYS = frozenset({
+        "abandoned_authorisation_id", "abandoned_ceremony_id",
+        "abandoned_old_cycle_seq", "abandoned_old_payload_hash",
+        "abandoned_new_cycle_seq", "abandoned_new_payload_hash",
+        "new_authorisation_id", "new_ceremony_id",
+        "operator_id",
+        "superseding_old_cycle_seq", "superseding_old_payload_hash",
+        "candidate_cycle_seq", "candidate_payload_hash",
+        "decided_at"})
+
+    def _load(self) -> list:
+        entries = HashChainJournal._load(self)
+        seen_new = set()
+        for entry in entries:
+            # Entry kind (cycle 24 fix round, r3-F3): this
+            # journal holds supersede decisions only; any other
+            # kind is incoherent here, however well-chained.
+            if entry["kind"] != "supersede":
+                raise CorruptLedgerError(
+                    "supersession journal entry kind must be "
+                    "\"supersede\"")
+            # decided_at coherence (r3-F3): append_decision
+            # writes decided_at from the same recorded_at it
+            # passes to _append, so a journal whose decided_at
+            # differs from its recorded_at was not written by
+            # that path — corrupt.
+            if entry["decided_at"] != entry["recorded_at"]:
+                raise CorruptLedgerError(
+                    "supersession decided_at must equal its "
+                    "recorded_at")
+            # Candidate hash coherence (r3-F3): the candidate
+            # is a real pin target, never the empty-string
+            # no-pin spelling (that spelling stays legitimate
+            # only on the abandoned OLD side, e.g. genesis
+            # burns whose old pin is absent).
+            if not _is_hex64(entry["candidate_payload_hash"]):
+                raise CorruptLedgerError(
+                    "supersession candidate_payload_hash must "
+                    "be a 64-char lowercase hex string")
+            # Single-decision at load, mirroring the
+            # consumption journal's duplicate-authorisation
+            # rule.
+            if entry["new_authorisation_id"] in seen_new:
+                raise CorruptLedgerError(
+                    "supersession journal contains a duplicate "
+                    "new_authorisation_id")
+            seen_new.add(entry["new_authorisation_id"])
+            for field in ("abandoned_authorisation_id",
+                          "new_authorisation_id"):
+                if not _is_hex64(entry[field]):
+                    raise CorruptLedgerError(
+                        f"supersession {field} must be a 64-char "
+                        "lowercase hex string")
+            for field in ("abandoned_old_payload_hash",
+                          "abandoned_new_payload_hash",
+                          "superseding_old_payload_hash",
+                          "candidate_payload_hash"):
+                if entry[field] != "" \
+                        and not _is_hex64(entry[field]):
+                    raise CorruptLedgerError(
+                        f"supersession {field} must be empty or "
+                        "a 64-char lowercase hex string")
+            cand_seq = entry["candidate_cycle_seq"]
+            abandoned_new_seq = entry["abandoned_new_cycle_seq"]
+            sup_old_seq = entry["superseding_old_cycle_seq"]
+            abandoned_old_seq = entry["abandoned_old_cycle_seq"]
+            if not isinstance(abandoned_new_seq, int) \
+                    or isinstance(abandoned_new_seq, bool) \
+                    or abandoned_new_seq < 0:
+                raise CorruptLedgerError(
+                    "supersession abandoned_new_cycle_seq must "
+                    "be an int >= 0")
+            if not isinstance(cand_seq, int) \
+                    or isinstance(cand_seq, bool) \
+                    or cand_seq <= abandoned_new_seq:
+                raise CorruptLedgerError(
+                    "supersession candidate must be strictly "
+                    "ahead of the abandoned head target")
+            if not isinstance(sup_old_seq, int) \
+                    or isinstance(sup_old_seq, bool) \
+                    or sup_old_seq >= abandoned_new_seq:
+                raise CorruptLedgerError(
+                    "supersession superseding old pin must be "
+                    "behind the abandoned head target")
+            if abandoned_old_seq is not None and (
+                    not isinstance(abandoned_old_seq, int)
+                    or isinstance(abandoned_old_seq, bool)
+                    or abandoned_old_seq < 0):
+                raise CorruptLedgerError(
+                    "supersession abandoned_old_cycle_seq must "
+                    "be None or an int >= 0")
+            for field in ("operator_id", "abandoned_ceremony_id",
+                          "new_ceremony_id"):
+                if not isinstance(entry[field], str) \
+                        or not entry[field]:
+                    raise CorruptLedgerError(
+                        f"supersession {field} must be a "
+                        "non-empty string")
+        return entries
+
+    def find_by_new_authorisation(self, authorisation_id):
+        """Reload, return the decision entry dict for this
+        new_authorisation_id, or None."""
+        self._reload()
+        for entry in self._entries:
+            if entry["new_authorisation_id"] == authorisation_id:
+                return dict(entry)
+        return None
+
+    def append_decision(self, *, abandoned_entry, signed,
+                        recorded_at) -> dict:
+        """Append one decision as kind "supersede".
+
+        All binding fields are copied from ``abandoned_entry``
+        (a consumption-journal entry dict — the verifier's own
+        head entry) and ``signed`` (the new envelope), never
+        from a request-side dict. Reload-rechecks
+        single-decision-per-envelope against freshly loaded
+        entries on every attempt of the bounded retry loop, so
+        two concurrent supersede calls for the same envelope
+        yield exactly one decision and one LedgerError."""
+        from signing.ceremony_authorisation import \
+            SignedCeremonyAuthorisation
+        if not isinstance(signed, SignedCeremonyAuthorisation):
+            raise LedgerError(
+                "can only decide for a SignedCeremonyAuthorisation")
+        required = ("authorisation_id", "ceremony_id",
+                    "old_cycle_seq", "old_payload_hash",
+                    "new_cycle_seq", "new_payload_hash")
+        if not isinstance(abandoned_entry, dict) \
+                or any(k not in abandoned_entry for k in required):
+            raise LedgerError(
+                "abandoned_entry must be a consumption entry "
+                "dict carrying the abandoned binding fields")
+        if signed.old_pin is None:
+            raise LedgerError(
+                "a supersession decision requires an envelope "
+                "carrying an old pin")
+        # Shape validation (cycle 24 fix round, r3-F2):
+        # refuse BEFORE _append a decision this ledger's own
+        # _load would reject — otherwise append_decision could
+        # write a self-bricking journal (an entry that makes
+        # every later load fail). The candidate must be
+        # strictly ahead of the abandoned target, and the
+        # superseding old pin must be behind that target —
+        # exactly _load's two positional rules, checked here
+        # against the same fields _append would copy.
+        abandoned_new_seq = abandoned_entry["new_cycle_seq"]
+        if not isinstance(abandoned_new_seq, int) \
+                or isinstance(abandoned_new_seq, bool):
+            raise LedgerError(
+                "abandoned_entry new_cycle_seq must be an int")
+        if signed.candidate["cycle_seq"] <= abandoned_new_seq:
+            raise LedgerError(
+                "supersession candidate must be strictly ahead "
+                "of the abandoned head target")
+        if signed.old_pin["cycle_seq"] >= abandoned_new_seq:
+            raise LedgerError(
+                "supersession superseding old pin must be "
+                "behind the abandoned head target")
+        last_error = None
+        for _attempt in range(_APPEND_RETRY_ATTEMPTS):
+            self._reload()
+            if any(e["new_authorisation_id"]
+                   == signed.authorisation_id
+                   for e in self._entries):
+                raise LedgerError(
+                    "supersession already decided for "
+                    f"authorisation: {signed.authorisation_id}")
+            try:
+                return self._append(
+                    "supersede", recorded_at,
+                    abandoned_authorisation_id=abandoned_entry[
+                        "authorisation_id"],
+                    abandoned_ceremony_id=abandoned_entry[
+                        "ceremony_id"],
+                    abandoned_old_cycle_seq=abandoned_entry[
+                        "old_cycle_seq"],
+                    abandoned_old_payload_hash=abandoned_entry[
+                        "old_payload_hash"],
+                    abandoned_new_cycle_seq=abandoned_entry[
+                        "new_cycle_seq"],
+                    abandoned_new_payload_hash=abandoned_entry[
+                        "new_payload_hash"],
+                    new_authorisation_id=signed.authorisation_id,
+                    new_ceremony_id=signed.ceremony_id,
+                    operator_id=signed.operator_id,
+                    superseding_old_cycle_seq=signed.old_pin[
+                        "cycle_seq"],
+                    superseding_old_payload_hash=signed.old_pin[
+                        "payload_hash"],
+                    candidate_cycle_seq=signed.candidate[
+                        "cycle_seq"],
+                    candidate_payload_hash=signed.candidate[
+                        "payload_hash"],
+                    decided_at=recorded_at)
             except CorruptLedgerError as exc:
                 last_error = exc
         raise last_error

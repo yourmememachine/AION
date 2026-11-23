@@ -101,6 +101,12 @@ ALLOWLIST = {
            "production-wired adopter; it constructs no client or "
            "store itself — the client comes only from "
            "trust.wiring.production_client"),
+    ("trust/runner.py", "run_one_cycle"): (
+        1, "cycle 24: THE production entry point — its plan cycle "
+           "steps run through the hooked CoreLoop it constructs "
+           "(cycle_hook=pin_cycle_hook(adopter)); the hook, not "
+           "this call, performs adoption. It constructs no client "
+           "or store itself"),
     ("trust/wiring.py", "verifier_client_ctor"): (
         1, "THE sanctioned production construction site "
            "(production signed-path wiring): production_client "

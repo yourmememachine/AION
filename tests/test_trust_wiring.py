@@ -60,6 +60,7 @@ them and refuses as unknown.
 INIT flags refuse for any value other than "" or "0".
 """
 
+import hashlib
 import inspect
 import json
 import os
@@ -83,6 +84,10 @@ from signing import (
     sign_attestation,
     sign_gate_decision,
 )
+from signing.ceremony_authorisation import (
+    _make_ceremony_signing_key,
+    ceremony_public_key_for,
+)
 from trust import wiring
 from trust.client import VerifierClient
 from trust.errors import VerifierConfigError
@@ -97,6 +102,16 @@ KEY = make_signing_key(bytes(range(32, 64)))
 KEY_ID = "key-0123456789abcdef"
 SIGNER_ID = "verifier-main"
 SEALED = "b" * 64
+
+# Ceremony pin fixture (cycle 24): a genuine CeremonyPublicKey
+# derived from a sha256-derived seed — deliberately not one of
+# the predictable REFUSED_TEST_SEEDS. The pin is never used to
+# verify a real envelope in this suite; it only has to be a
+# genuine CeremonyPublicKey so construction and refusal
+# precedence are exercised honestly.
+_CEREMONY_SIGNING_KEY = _make_ceremony_signing_key(
+    hashlib.sha256(b"trust-wiring ceremony pin fixture").digest())
+CEREMONY_PUB = ceremony_public_key_for(_CEREMONY_SIGNING_KEY)
 
 BUILDERS = ["seat-9", "seat-10", "seat-11"]
 REVIEWERS = ["seat-1", "seat-2", "seat-3", "seat-4", "seat-5",
@@ -145,6 +160,7 @@ class ProductionClientRefusalTests(unittest.TestCase):
     def assert_refused(self, env, variable, **pins):
         pins.setdefault("expected_signer_id", SIGNER_ID)
         pins.setdefault("expected_key_id", KEY_ID)
+        pins.setdefault("authorisation_public_key", CEREMONY_PUB)
         with self.assertRaises(VerifierConfigError) as ctx:
             production_client(env, **pins)
         message = str(ctx.exception)
@@ -343,6 +359,75 @@ class ProductionClientRefusalTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------
+# production_client — ceremony pin mandatory (cycle 24)
+# ---------------------------------------------------------------------
+
+class ProductionClientCeremonyPinTests(unittest.TestCase):
+    """CROSS-CHECK-17 / cycle 24: the ceremony public-key pin is
+    the third mandatory pin. A production client that cannot
+    accept ceremonies must be impossible to build — omission is
+    a TypeError, None refuses, and a non-CeremonyPublicKey
+    (including the secret-bearing CeremonySigningKey) refuses."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def test_ceremony_pin_omitted_is_type_error(self):
+        with self.assertRaises(TypeError):
+            production_client(
+                production_env(self.base),
+                expected_signer_id=SIGNER_ID,
+                expected_key_id=KEY_ID)
+
+    def test_ceremony_pin_none_refused(self):
+        with self.assertRaises(VerifierConfigError) as ctx:
+            production_client(
+                production_env(self.base),
+                expected_signer_id=SIGNER_ID,
+                expected_key_id=KEY_ID,
+                authorisation_public_key=None)
+        self.assertIn("authorisation_public_key",
+                      str(ctx.exception))
+
+    def test_ceremony_pin_wrong_type_refused(self):
+        for bad in ("ab" * 32, bytes(32), _CEREMONY_SIGNING_KEY):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(VerifierConfigError) as ctx:
+                    production_client(
+                        production_env(self.base),
+                        expected_signer_id=SIGNER_ID,
+                        expected_key_id=KEY_ID,
+                        authorisation_public_key=bad)
+                self.assertIn("authorisation_public_key",
+                              str(ctx.exception))
+
+    def test_ceremony_pin_signing_key_refused(self):
+        # Explicit pin of the task's named case: the factory
+        # takes the public pin only; a caller holding the
+        # signing key derives it via ceremony_public_key_for.
+        with self.assertRaises(VerifierConfigError) as ctx:
+            production_client(
+                production_env(self.base),
+                expected_signer_id=SIGNER_ID,
+                expected_key_id=KEY_ID,
+                authorisation_public_key=_CEREMONY_SIGNING_KEY)
+        self.assertIn("authorisation_public_key",
+                      str(ctx.exception))
+
+    def test_happy_path_client_exposes_ceremony_pin(self):
+        client = production_client(
+            production_env(self.base),
+            expected_signer_id=SIGNER_ID,
+            expected_key_id=KEY_ID,
+            authorisation_public_key=CEREMONY_PUB)
+        self.assertIsInstance(client, VerifierClient)
+        self.assertIs(client._authorisation_public_key,
+                      CEREMONY_PUB)
+
+
+# ---------------------------------------------------------------------
 # production_client — no value leak
 # ---------------------------------------------------------------------
 
@@ -373,7 +458,8 @@ class ProductionClientNoLeakTests(unittest.TestCase):
             AION_DEPLOYMENT_MODE="research")
         with self.assertRaises(VerifierConfigError) as ctx:
             production_client(env, expected_signer_id=SIGNER_ID,
-                              expected_key_id=KEY_ID)
+                              expected_key_id=KEY_ID,
+                              authorisation_public_key=CEREMONY_PUB)
         message = str(ctx.exception)
         self.assertIn("AION_DEPLOYMENT_MODE", message)
         self.assertNotIn(self.SENTINEL, message)
@@ -386,7 +472,8 @@ class ProductionClientNoLeakTests(unittest.TestCase):
             AION_SHIP_ANCHOR_PATH="/tmp/ship.anchor.json")
         with self.assertRaises(VerifierConfigError) as ctx:
             production_client(env, expected_signer_id=SIGNER_ID,
-                              expected_key_id=KEY_ID)
+                              expected_key_id=KEY_ID,
+                              authorisation_public_key=CEREMONY_PUB)
         message = str(ctx.exception)
         self.assertIn("AION_SHIP_ANCHOR_PATH", message)
         self.assertNotIn(self.SENTINEL, message)
@@ -398,7 +485,8 @@ class ProductionClientNoLeakTests(unittest.TestCase):
                              AION_VERIFIER_SIGNER_ID=env_signer)
         with self.assertRaises(VerifierConfigError) as ctx:
             production_client(env, expected_signer_id=presented_pin,
-                              expected_key_id=KEY_ID)
+                              expected_key_id=KEY_ID,
+                              authorisation_public_key=CEREMONY_PUB)
         message = str(ctx.exception)
         self.assertIn("AION_VERIFIER_SIGNER_ID", message)
         self.assertNotIn(env_signer, message)
@@ -421,7 +509,8 @@ class ProductionClientHappyPathTests(unittest.TestCase):
         env = production_env(self.base)
         client = production_client(
             env, expected_signer_id=SIGNER_ID,
-            expected_key_id=KEY_ID)
+            expected_key_id=KEY_ID,
+            authorisation_public_key=CEREMONY_PUB)
         self.assertIsInstance(client, VerifierClient)
         # VerifierClient exposes no public accessors for its
         # pins/env; the test reads the private fields the
@@ -430,6 +519,8 @@ class ProductionClientHappyPathTests(unittest.TestCase):
                          "production")
         self.assertEqual(client._expected_signer_id, SIGNER_ID)
         self.assertEqual(client._expected_key_id, KEY_ID)
+        self.assertIs(client._authorisation_public_key,
+                      CEREMONY_PUB)
         self.assertEqual(client._verifier_env, env)
 
     def test_client_env_is_a_copy(self):
@@ -437,7 +528,8 @@ class ProductionClientHappyPathTests(unittest.TestCase):
         snapshot = dict(env)
         client = production_client(
             env, expected_signer_id=SIGNER_ID,
-            expected_key_id=KEY_ID)
+            expected_key_id=KEY_ID,
+            authorisation_public_key=CEREMONY_PUB)
         # Mutating the caller's dict afterwards — downgrade,
         # addition, deletion — must not reach the client.
         env["AION_DEPLOYMENT_MODE"] = "research"
@@ -455,7 +547,8 @@ class ProductionClientHappyPathTests(unittest.TestCase):
         env["AION_BUDGETS_ANCHOR_INIT"] = ""
         client = production_client(
             env, expected_signer_id=SIGNER_ID,
-            expected_key_id=KEY_ID)
+            expected_key_id=KEY_ID,
+            authorisation_public_key=CEREMONY_PUB)
         self.assertIsInstance(client, VerifierClient)
 
 
@@ -911,7 +1004,13 @@ class LiveProductionWiringTests(unittest.TestCase):
         client = production_client(
             env,
             expected_signer_id=env["AION_VERIFIER_SIGNER_ID"],
-            expected_key_id=key.key_id)
+            expected_key_id=key.key_id,
+            # The live provisioning exposes no ceremony seed
+            # path to this test, so the fixture pin is passed:
+            # this test's only verifier call is a junk
+            # verify_envelope({}) below, which never touches
+            # the ceremony pin.
+            authorisation_public_key=CEREMONY_PUB)
         self.assertIsInstance(client, VerifierClient)
         # The least-budget-consuming real call, mirroring the
         # deploy suite's own live probe (its test_14): a junk

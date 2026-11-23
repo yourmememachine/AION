@@ -105,6 +105,32 @@ class Verdict:
     reasons: tuple
 
 
+class CeremonySupersedeRequired(SigningError):
+    """The verifier refused a ceremony consumption PRE-COMMIT
+    with the code ``ceremony_supersede_required`` (cycle 24,
+    supersede Option A): the presented envelope's shape would
+    supersede the consumed head movement, and no journaled
+    supersession decision yet authorises abandoning that
+    movement. The refusal certifies the envelope is UNCONSUMED
+    (the code is emitted only after the consume mode's
+    already-consumed check, before any journal append), so the
+    same envelope may be consumed once a decision exists —
+    see ``VerifierClient.ceremony_supersede`` and the adopter
+    flow in ``trust/pin_adoption.py``. Carries the exact
+    envelope dict the consumer presented, as ``.envelope_dict``.
+
+    It subclasses ``SigningError`` deliberately:
+    ``signing.pin_ceremony.reanchor_pin`` propagates a
+    consumer's ``SigningError`` unchanged (``except
+    SigningError: raise``), so this subclass reaches the
+    adopter with its type and ``.envelope_dict`` intact —
+    ``reanchor_pin`` does not catch, wrap or decide it."""
+
+    def __init__(self, message, *, envelope_dict):
+        super().__init__(message)
+        self.envelope_dict = envelope_dict
+
+
 def _stderr_excerpt(result) -> str:
     raw = (result.stderr or b"")[:protocol.MAX_STDERR_BYTES]
     return raw.decode("utf-8", errors="replace")[-_STDERR_EXCERPT:]
@@ -155,7 +181,9 @@ class VerifierClient:
         try:
             raw_request = protocol.encode_request(request_id, mode, body)
         except protocol.ProtocolError as exc:
-            raise VerifierProtocolError(str(exc)) from exc
+            err = VerifierProtocolError(str(exc))
+            err.verifier_code = None
+            raise err from exc
         pythonpath = os.pathsep.join(
             [str(REPO_ROOT)] + [str(p) for p in self._pythonpath_extra])
         env = {"PYTHONPATH": pythonpath}
@@ -171,35 +199,48 @@ class VerifierClient:
                 timeout=self._timeout, cwd=str(REPO_ROOT), env=env)
         except subprocess.TimeoutExpired:
             # subprocess.run has already killed and reaped the child.
-            raise VerifierTimeout(
+            err = VerifierTimeout(
                 f"verifier exceeded the {self._timeout}s timeout and "
                 "was killed; no result exists")
+            err.verifier_code = None
+            raise err
         except OSError as exc:
-            raise VerifierUnavailable(
-                f"verifier could not be spawned: {exc}") from exc
+            err = VerifierUnavailable(
+                f"verifier could not be spawned: {exc}")
+            err.verifier_code = None
+            raise err from exc
         if result.returncode == 0:
             try:
                 doc = protocol.decode_response(
                     result.stdout, expected_request_id=request_id,
                     expected_mode=mode, cap=self._max_response)
             except protocol.ProtocolError as exc:
-                raise VerifierProtocolError(
-                    f"unusable verifier response: {exc}") from exc
+                err = VerifierProtocolError(
+                    f"unusable verifier response: {exc}")
+                err.verifier_code = None
+                raise err from exc
             self.observed_deployment_mode = doc.get("deployment_mode")
             if self._expected_deployment_mode is not None \
                     and doc["status"] == "ok" \
                     and self.observed_deployment_mode \
                     != self._expected_deployment_mode:
-                raise VerifierProtocolError(
+                err = VerifierProtocolError(
                     "verifier response deployment_mode "
                     f"{self.observed_deployment_mode!r} does not "
                     "match the pinned mode "
                     f"{self._expected_deployment_mode!r}")
+                err.verifier_code = None
+                raise err
             if doc["status"] != "ok":
-                raise VerifierProtocolError(
+                err = VerifierProtocolError(
                     "verifier returned an error document at exit 0")
+                err.verifier_code = None
+                raise err
             if not isinstance(doc["result"], dict):
-                raise VerifierProtocolError("verifier result is malformed")
+                err = VerifierProtocolError(
+                    "verifier result is malformed")
+                err.verifier_code = None
+                raise err
             return doc["result"]
         code, detail = self._error_document(result)
         excerpt = _stderr_excerpt(result)
@@ -210,11 +251,26 @@ class VerifierClient:
             message += f": {detail}"
         if excerpt:
             message += f" (stderr: {excerpt!r})"
+        # Cycle 24: the verifier's error code rides the raised
+        # exception as the structured attribute ``.verifier_code``
+        # (the code string, or None where no error document /
+        # code exists). This attribute is the ONLY sanctioned
+        # detection channel for a specific refusal code: callers
+        # must never string-match the exception message, whose
+        # format is incidental and which embeds an untrusted
+        # stderr excerpt that could contain a bracketed code
+        # spuriously.
         if result.returncode == 2:
-            raise VerifierProtocolError(message)
+            err = VerifierProtocolError(message)
+            err.verifier_code = code or None
+            raise err
         if result.returncode == 3:
-            raise VerifierConfigError(message)
-        raise VerifierUnavailable(message)
+            err = VerifierConfigError(message)
+            err.verifier_code = code or None
+            raise err
+        err = VerifierUnavailable(message)
+        err.verifier_code = code or None
+        raise err
 
     @staticmethod
     def _error_document(result):
@@ -647,10 +703,24 @@ class VerifierClient:
         VerifierConfigError via _run; for this mode that
         class carries ceremony state refusals, and the
         correct operator response is a new ceremony, not a
-        config fix."""
+        config fix.
+
+        Cycle 24: one further exit-3 state refusal,
+        ``ceremony_supersede_required``, is emitted ONLY
+        pre-commit (after the already-consumed check has
+        certified the envelope unconsumed) when the envelope's
+        shape would supersede the consumed head movement and
+        no journaled supersession decision authorises the
+        abandonment. Every _run error now also carries the
+        verifier's code as the structured ``.verifier_code``
+        attribute on the raised exception; that attribute —
+        never string matching on the message — is how
+        ``ceremony_consumer`` detects this code."""
         if not isinstance(envelope_dict, dict):
-            raise VerifierProtocolError(
+            err = VerifierProtocolError(
                 "ceremony_consume requires the envelope dict")
+            err.verifier_code = None
+            raise err
         try:
             sent_id = envelope_dict["authorisation_id"]
             sent_ceremony = envelope_dict["ceremony_id"]
@@ -658,9 +728,11 @@ class VerifierClient:
             sent_seq = sent_candidate["cycle_seq"]
             sent_hash = sent_candidate["payload_hash"]
         except (KeyError, TypeError) as exc:
-            raise VerifierProtocolError(
+            err = VerifierProtocolError(
                 "ceremony_consume envelope dict is missing its "
-                "authorisation_id, ceremony_id or candidate") from exc
+                "authorisation_id, ceremony_id or candidate")
+            err.verifier_code = None
+            raise err from exc
         result = self._run(
             "ceremony_consume",
             {"signed_authorisation": envelope_dict})
@@ -682,6 +754,105 @@ class VerifierClient:
                 or seq < 1:
             raise VerifierProtocolError(
                 "ceremony_consume consumption_seq is not an "
+                "int >= 1")
+        return result
+
+    def ceremony_supersede(self, operator_id, envelope_dict) -> dict:
+        """Request a journaled supersession decision (cycle 24,
+        supersede Option A).
+
+        The body is exactly ``{"operator_id": operator_id,
+        "signed_authorisation": envelope_dict}``. The request
+        names NO abandoned movement: the verifier identifies
+        the movement being abandoned from its OWN consumption
+        journal's head entry, checks the supersede shape holds
+        exactly, and commits a decision to its supersession
+        journal binding that head movement to this envelope's
+        candidate. A later ``ceremony_consume`` of the same
+        envelope looks the decision up itself, keyed by the
+        envelope's authorisation_id — the caller never supplies
+        the decision.
+
+        The result's exact key set is validated, and its echoes
+        must match the envelope THIS client sent —
+        authorisation_id (as new_authorisation_id) and the
+        candidate seq/hash (as candidate_cycle_seq /
+        candidate_payload_hash); supersession_seq must be an
+        int >= 1 and abandoned_authorisation_id a hex64 digest.
+        Any mismatch is a VerifierProtocolError. Honest consequence
+        of a malformed receipt: a decision may already be
+        journaled that this client cannot name; the envelope is
+        still unconsumed, and a later consume will find the
+        decision by authorisation_id itself, so the failure is
+        recoverable by consuming, not by re-deciding (a
+        re-decide would refuse as already decided).
+
+        No ceremony public-key pin is required — unlike
+        ceremony_authorise — because this mode returns no signed
+        artefact: there is nothing for a pinned CeremonyPublicKey
+        to verify, and refusing without a pin would break
+        key-free receipt checking for no gain.
+
+        Operator identity wording, as in ceremony_authorise:
+        this client asserts the operator id; it does not
+        authenticate it. Operator identity is operator-id
+        allowlist eligibility via the verifier's launch channel,
+        not authentication. Exit-3 refusals
+        (ceremony_operators_unconfigured,
+        ceremony_seed_unconfigured,
+        ceremony_operator_not_authorised,
+        ceremony_already_consumed, ceremony_not_issued,
+        ceremony_supersede_unproven, ledger_failed) surface as
+        VerifierConfigError via _run; exit-2 refusals
+        (malformed_request, ceremony_authorisation_invalid) as
+        VerifierProtocolError. Every shape failure at this mode
+        collapses to the single code
+        ``ceremony_supersede_unproven`` — no shape oracle."""
+        if not isinstance(envelope_dict, dict):
+            err = VerifierProtocolError(
+                "ceremony_supersede requires the envelope dict")
+            err.verifier_code = None
+            raise err
+        try:
+            sent_id = envelope_dict["authorisation_id"]
+            sent_candidate = envelope_dict["candidate"]
+            sent_seq = sent_candidate["cycle_seq"]
+            sent_hash = sent_candidate["payload_hash"]
+        except (KeyError, TypeError) as exc:
+            err = VerifierProtocolError(
+                "ceremony_supersede envelope dict is missing its "
+                "authorisation_id or candidate")
+            err.verifier_code = None
+            raise err from exc
+        result = self._run(
+            "ceremony_supersede",
+            {"operator_id": operator_id,
+             "signed_authorisation": envelope_dict})
+        if set(result) != {"supersession_seq",
+                           "abandoned_authorisation_id",
+                           "new_authorisation_id",
+                           "candidate_cycle_seq",
+                           "candidate_payload_hash"}:
+            raise VerifierProtocolError(
+                "ceremony_supersede result is malformed")
+        if result["new_authorisation_id"] != sent_id \
+                or result["candidate_cycle_seq"] != sent_seq \
+                or result["candidate_payload_hash"] != sent_hash:
+            raise VerifierProtocolError(
+                "ceremony_supersede result does not echo the "
+                "envelope sent (authorisation_id or candidate "
+                "mismatch)")
+        abandoned = result["abandoned_authorisation_id"]
+        if not isinstance(abandoned, str) or len(abandoned) != 64 \
+                or any(c not in "0123456789abcdef" for c in abandoned):
+            raise VerifierProtocolError(
+                "ceremony_supersede abandoned_authorisation_id "
+                "is not a hex digest")
+        seq = result["supersession_seq"]
+        if not isinstance(seq, int) or isinstance(seq, bool) \
+                or seq < 1:
+            raise VerifierProtocolError(
+                "ceremony_supersede supersession_seq is not an "
                 "int >= 1")
         return result
 
@@ -710,6 +881,24 @@ class VerifierClient:
         This callable therefore makes exactly one consume
         attempt per invocation.
 
+        The ONE exception (cycle 24, design B §7.1) is not a
+        retry of an ambiguous consume: when the verifier
+        refuses with the code ``ceremony_supersede_required``
+        — detected ONLY via the structured ``.verifier_code``
+        attribute ``_run`` sets, never by string-matching the
+        message — the outcome is KNOWN and negative. That code
+        is emitted only pre-commit, after the already-consumed
+        check has certified the envelope unconsumed, so the
+        envelope is provably unburned. This callable translates
+        exactly that code into ``CeremonySupersedeRequired``
+        (a SigningError carrying the presented envelope dict);
+        the ADOPTER — not this callable — then requests the
+        journaled supersession decision via
+        ``ceremony_supersede`` and re-runs ``reanchor_pin``
+        once with the same envelope. This callable itself
+        still makes exactly one consume attempt per invocation
+        and never re-decides or re-runs anything.
+
         Head-vs-pin-head narrowing: the head the consumer
         enforces is a ceremony head; it sees consumptions
         only; advance_pin movements never pass through the
@@ -725,6 +914,13 @@ class VerifierClient:
             try:
                 self.ceremony_consume(envelope)
             except VerifierError as exc:
+                if isinstance(exc, VerifierConfigError) \
+                        and getattr(exc, "verifier_code", None) \
+                        == "ceremony_supersede_required":
+                    raise CeremonySupersedeRequired(
+                        "ceremony consumption requires a journaled "
+                        "supersession decision",
+                        envelope_dict=envelope) from exc
                 raise SigningError(
                     f"ceremony consumption refused: {exc}") from exc
             return None

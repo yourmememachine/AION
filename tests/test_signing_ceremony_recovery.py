@@ -42,6 +42,7 @@ from trust.ledger import (
     CeremonyConsumptionLedger,
     HeadRegressionError,
     LedgerError,
+    SupersedeRequiredError,
 )
 
 # -- shared fixtures ----------------------------------------------------
@@ -364,19 +365,42 @@ class CheckHeadTests(unittest.TestCase):
         with self.assertRaises(HeadRegressionError):
             CeremonyConsumptionLedger.check_head(
                 [dict(BURN_WITH_PIN)], behind)
-        # Old pin behind head with candidate ahead ->
-        # SUPERSEDE passes (re-pinned by the cycle-23 fix
-        # seat): the burned head movement is abandoned and
-        # the fresh primary moves the pin forward to the
-        # ahead candidate. This block previously asserted a
-        # regression here; that rule deadlocked the adopter
-        # once a movement was consumed to its recovery cap
-        # with its pair discarded.
+        # Old pin behind head with candidate ahead -> the
+        # SUPERSEDE shape (cycle-23 rule). Cycle 24 RE-PIN
+        # (supersede Option A, design B §9.4): the bare call
+        # no longer passes — the shape now requires a journaled
+        # supersession decision, so the bare call raises
+        # SupersedeRequiredError; the same call WITH a decision
+        # bound to this envelope and the current head passes.
+        # (The cycle-23 bare-supersede rule deadlocked nothing
+        # here, but abandoned a burned movement with no
+        # explicit authorisation — Option A closes that audit
+        # gap; the shape itself is unchanged.)
         stale_old = mint_envelope(
             candidate=dict(CANDIDATE, cycle_seq=52,
                            payload_hash="d" * 64))
+        head = dict(BURN_WITH_PIN, authorisation_id="1" * 64)
+        with self.assertRaises(SupersedeRequiredError):
+            CeremonyConsumptionLedger.check_head(
+                [head], stale_old)
+        decision = {
+            "abandoned_authorisation_id": "1" * 64,
+            "abandoned_old_cycle_seq": BURN_WITH_PIN["old_cycle_seq"],
+            "abandoned_old_payload_hash":
+                BURN_WITH_PIN["old_payload_hash"],
+            "abandoned_new_cycle_seq": BURN_WITH_PIN["new_cycle_seq"],
+            "abandoned_new_payload_hash":
+                BURN_WITH_PIN["new_payload_hash"],
+            "new_authorisation_id": stale_old.authorisation_id,
+            "candidate_cycle_seq": 52,
+            "candidate_payload_hash": "d" * 64,
+            "superseding_old_cycle_seq": OLD_PIN_PROJ["cycle_seq"],
+            "superseding_old_payload_hash":
+                OLD_PIN_PROJ["payload_hash"],
+            "operator_id": stale_old.operator_id,
+        }
         self.assertIsNone(CeremonyConsumptionLedger.check_head(
-            [dict(BURN_WITH_PIN)], stale_old))
+            [head], stale_old, supersede_decision=decision))
         # Old pin AT the head seq with a different hash
         # (fork of the head target) still refuses, even with
         # the candidate ahead — supersede does not rescue it.

@@ -67,7 +67,13 @@ from signing.pin_ceremony import (
     verify_ceremony_record)
 from signing.pin_store import PinStore
 from signing.state_snapshot import sign_state_snapshot
-from trust.ledger import CeremonyConsumptionLedger, LedgerError
+from trust.client import CeremonySupersedeRequired
+from trust.ledger import (
+    CeremonyConsumptionLedger,
+    CeremonySupersessionLedger,
+    LedgerError,
+    SupersedeRequiredError,
+)
 
 KEY = make_signing_key(bytes(range(32, 64)))
 
@@ -237,6 +243,29 @@ class LedgerBackedConsumer:
         try:
             ledger.append_consumption(authorisation,
                                       recorded_at=NOW)
+        except SupersedeRequiredError:
+            # Cycle 24 RE-PIN (supersede Option A, design B
+            # §9.4): the raw-library level now also requires a
+            # journaled supersession decision for a
+            # supersede-shaped consumption. This fixture
+            # consumer replicates the production pattern in
+            # test code (it is a direct-ledger consumer, the
+            # class design B §8's wording addresses): journal
+            # a decision into a CeremonySupersessionLedger over
+            # this fixture's home, bound to its OWN current
+            # head, then retry the append exactly once with
+            # that decision threaded in.
+            head = ledger.entries()[-1]
+            decision = CeremonySupersessionLedger(
+                self.journal_dir).append_decision(
+                    abandoned_entry=head, signed=authorisation,
+                    recorded_at=NOW)
+            try:
+                ledger.append_consumption(
+                    authorisation, recorded_at=NOW,
+                    supersede_decision=decision)
+            except LedgerError as exc:
+                raise SigningError(str(exc)) from exc
         except LedgerError as exc:
             raise SigningError(str(exc)) from exc
         return None
@@ -1148,7 +1177,16 @@ class Cycle20ConsumptionTests(unittest.TestCase):
         tests/test_signing_pin_store.py (the cycle-22
         context-binding tests). At this raw library level the
         would-be regressed pin is returned; the integrated
-        system never adopts it."""
+        system never adopts it.
+
+        Cycle 24 note (supersede Option A): the raw-library
+        level now ALSO requires the journaled supersession
+        decision — the fixture consumer (LedgerBackedConsumer)
+        journals that decision against its own head and
+        retries the append once, replicating the production
+        pattern in test code. This test's assertions are
+        unchanged; the adoption-side context-binding point
+        above is unchanged (seat-gemini's condition)."""
         a = snap(1)
         cand = snap(4, prev="f" * 64)
         auth = mint_authorisation(pin_of(a), cand)
@@ -1197,7 +1235,14 @@ class Cycle20ConsumptionTests(unittest.TestCase):
         binding: the record's old side is seq 1, not the
         store's pin — even though CAS (expected == current)
         and non-regression (7 > 6) both pass. The store's pin
-        is still seq 6 afterwards."""
+        is still seq 6 afterwards.
+
+        Cycle 24 note (supersede Option A): same fixture
+        change as T8' — the fixture consumer journals the
+        supersession decision the raw-library level now
+        requires and retries once; assertions unchanged, and
+        the adopt refusal still lands on context binding
+        alone (seat-gemini's condition visibly intact)."""
         a = snap(1)
         cand = snap(4, prev="f" * 64)
         auth = mint_authorisation(pin_of(a), cand)
@@ -1250,6 +1295,33 @@ class Cycle20ConsumptionTests(unittest.TestCase):
                             signing_key=KEY)
             self.assertEqual(
                 store.read_pin(signing_key=KEY)["cycle_seq"], 6)
+
+    def test_ceremony_supersede_required_propagates_untouched(self):
+        """Cycle 24 (design B §6.2/§11): a consumer raising
+        CeremonySupersedeRequired (trust.client's SigningError
+        subclass) surfaces from reanchor_pin as that EXACT
+        type, with .envelope_dict intact — reanchor_pin's
+        consumer path re-raises SigningError unchanged, so the
+        adopter receives the supersede requirement, not a
+        generic translation."""
+        a = snap(1)
+        cand = snap(4, prev="f" * 64)
+        envelope_dict = {"authorisation_id": "a" * 64,
+                         "ceremony_id": "ceremony-supersede-pin",
+                         "candidate": {"cycle_seq": 4,
+                                       "payload_hash": "b" * 64}}
+
+        def consumer(authorisation):
+            raise CeremonySupersedeRequired(
+                "ceremony consumption requires a journaled "
+                "supersession decision",
+                envelope_dict=envelope_dict)
+
+        with self.assertRaises(CeremonySupersedeRequired) as cm:
+            reanchor(pin_of(a), cand,
+                     consume_authorisation=consumer)
+        self.assertIs(type(cm.exception), CeremonySupersedeRequired)
+        self.assertIs(cm.exception.envelope_dict, envelope_dict)
 
     def test_v1_golden_envelope_refused_with_version_wording(self):
         # R6: v1 refusal is EXPLICIT. A literal cycle-19 envelope
