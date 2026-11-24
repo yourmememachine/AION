@@ -70,6 +70,10 @@ from signing.ceremony_authorisation import (
 )
 from signing.gate_decision import SigningError
 from signing.pin_store import PinStoreError
+from trust.history_reconciliation import (
+    consumption_entries_provider_from_home,
+    supersession_entries_provider_from_home,
+)
 from trust.pin_adoption import (
     PinAdopterConfig,
     PinAdoptionBurned,
@@ -287,6 +291,25 @@ def _stderr_line(line: dict):
           flush=True)
 
 
+def _history_providers(verifier_env):
+    """Build the cycle-28 history-reconciliation provider pair
+    from the runner's verifier env. AION_VERIFIER_HOME is a
+    required, allowlisted key for the verifier env the factory
+    consumes, but it is not validated upstream of this call, so
+    its absence refuses HERE with the runner's structured
+    config refusal (naming the variable), never a bare KeyError
+    traceback. The providers are lazy closures: building them
+    touches no disk; each call loads its journal fresh. Returns
+    (consumption_provider, supersession_provider)."""
+    home = verifier_env.get("AION_VERIFIER_HOME")
+    if not isinstance(home, str) or not home:
+        _refuse("AION_VERIFIER_HOME",
+                "required for the runner's history-"
+                "reconciliation providers and must be non-empty")
+    return (consumption_entries_provider_from_home(home),
+            supersession_entries_provider_from_home(home))
+
+
 def main() -> int:
     if sys.argv[1:]:
         _stderr_line({
@@ -317,6 +340,17 @@ def main() -> int:
             evidence_dir=pin_env.evidence_dir,
             supersession_approval_path=
             pin_env.supersession_approval_path)
+        # Cycle 28: the runner is the composition layer that
+        # legitimately holds the verifier home (it built
+        # verifier_env from its own environment), so it — not
+        # the factory, and not the adopter — supplies the
+        # history-reconciliation providers. Detection is
+        # therefore ON in the production composition: every
+        # adoption attempt reconciles the pin-store history
+        # against the verifier's consumption journal
+        # (trust/history_reconciliation.py).
+        consumption_provider, supersession_provider = \
+            _history_providers(verifier_env)
         try:
             adopter = build_pin_adopter(
                 verifier_env,
@@ -324,7 +358,9 @@ def main() -> int:
                 expected_key_id=rc.expected_key_id,
                 authorisation_public_key=rc.ceremony_public_key,
                 signing_key_path=pin_env.signing_key_path,
-                config=config)
+                config=config,
+                consumption_entries_provider=consumption_provider,
+                supersession_entries_provider=supersession_provider)
         except Exception as exc:
             _factory_refusal(exc)
     except _ConfigRefusal as exc:

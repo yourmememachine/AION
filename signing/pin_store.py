@@ -26,7 +26,16 @@ discharges the ceremony's caller preconditions mechanically:
   history can be reconciled; a gap in the store history
   proves nothing, and the store's safety never depends on
   history completeness (the verifier's consumption head is
-  authoritative on any discrepancy). An unverifiable
+  authoritative on any discrepancy). Since cycle 28 the gap
+  is also DETECTED at adoption time when the adopter is
+  wired with journal providers: the captured store history
+  is reconciled against the consumption journal
+  (trust/history_reconciliation.py) and an unaccounted
+  journal entry relevant to the candidate refuses the
+  attempt with the deterministic code
+  ``pin_store_history_incomplete``. Detection changes
+  nothing about authority: the journal remains the sole
+  authoritative history. An unverifiable
   history establishes nothing: the load refuses, it does not
   return a partial history.
 - ATOMIC-ADOPTION: pin and record persist as ONE JSON document

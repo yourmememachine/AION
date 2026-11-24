@@ -267,19 +267,36 @@ class RunnerTests(unittest.TestCase):
             (self.pin_dir / "snapshot-pin.json").exists())
         self.assert_real_state_untouched()
 
-    def test_adopt_step_supersession_pending_is_exit_7(self):
-        # Exit 7 (cycle 25, r3 non-blocking add): an adopt step
-        # whose consume refuses ceremony_supersede_required
-        # stops at supersession pending independent approval —
-        # no decision requested, nothing further consumed, pin
-        # unmoved — and the structured line carries
-        # report_written so a failed report write is visible.
+    def test_adopt_step_beyond_head_burn_refuses_incomplete_is_exit_6(self):
+        # CHANGED in the cycle-28 external fix round (seat-gpt
+        # FIX 0.91) — previously this shape expected exit 7
+        # (supersession pending). The known-unadopted head
+        # excuse in history reconciliation no longer reaches a
+        # candidate strictly BEYOND the head burn: that reach
+        # silently excused an ADOPTED record's disappearance in
+        # the compound adopted-line-loss + store-restore state,
+        # which is indistinguishable from a genuine burn at the
+        # reconciliation layer. Claim narrowing, recorded in
+        # internal/cycle28-work/fix-round-gpt.md: the wired
+        # adopt step now refuses pin_store_history_incomplete
+        # (a SigningError — runner exit 6, step_refused) BEFORE
+        # any ceremony, so this shape no longer reaches the
+        # supersession-pending stop. The pending flow remains
+        # reachable for a candidate AT the head burn's own
+        # sequence: the at-sequence excuse is unit-pinned by
+        # cycle-28 test_09/test_10 and the pending flow itself
+        # is covered by the supersession suites on the unwired
+        # adopter — a wired at-sequence pending composition
+        # test is a named follow-up (re-review seat, fix
+        # round), not existing coverage. A beyond-head genuine
+        # burn is an operator-reconciliation residual, named
+        # in internal/BUILD-CYCLE-28.md.
         # Shape: genesis adopt @13; two test-side hookless
         # cycles open state to 15; a held-lock adopt burns the
         # 13->15 ceremony movement (pin stays 13, head 15);
         # one more hookless cycle opens state to 16, so the
         # next adopt's fresh primary (candidate 16, old pin 13
-        # behind head 15) is exactly the supersede shape.
+        # behind head 15) is beyond the head burn.
         proc = self.run_runner([{"adopt": True}])
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         self.assertEqual(self.read_pin()["cycle_seq"], 13)
@@ -298,19 +315,14 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(entry["cycle_id"], 16)
 
         proc = self.run_runner([{"adopt": True}])
-        self.assertEqual(proc.returncode, 7, proc.stderr.decode())
+        self.assertEqual(proc.returncode, 6, proc.stderr.decode())
         lines = self.parse_lines(proc)
         self.assertEqual(len(lines), 1)
         line = lines[0]
         self.assertEqual(line["kind"], "adopt")
-        self.assertEqual(line["outcome"], "supersession_pending")
+        self.assertEqual(line["outcome"], "step_refused")
         self.assertEqual(
-            line["error"], "PinSupersessionPendingApproval")
-        self.assertEqual(line["candidate_seq"], 16)
-        self.assertEqual(line["old_cycle_seq"], 13)
-        self.assertTrue(line["authorisation_id"])
-        self.assertTrue(line["ceremony_id"])
-        self.assertTrue(line["report_written"])
+            line["error"], "HistoryReconciliationRefused")
         # Nothing decided, nothing more consumed, pin unmoved.
         self.assertEqual(self.consumption_count(), 2)
         self.assertEqual(

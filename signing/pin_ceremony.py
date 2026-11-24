@@ -67,7 +67,14 @@ them, not because naming them enforces them:
   (stated in the cycle-16 section below), and that is
   acceptable precisely because audit authority lives in the
   journal, not in any history a caller or a restore can
-  truncate.
+  truncate. (Cycle 28: the adopter reconciles the store-held
+  history against that journal at adoption time when wired
+  with journal providers — trust/history_reconciliation.py —
+  so a restoration-thinned history is detected and refused
+  with the code ``pin_store_history_incomplete`` rather than
+  passing silently; the refusal happens in the adopter, not
+  in this module's history checks, and the journal's
+  authority is unchanged.)
 - ATOMIC-ADOPTION: on success the caller must persist the
   returned pin and append the returned record to its history
   as one step, before any further ceremony or advance; on

@@ -132,6 +132,31 @@ closed (an integrity refusal) rather than reporting
 No ``now=`` parameter anywhere in this flow: freshness stays
 on the host clock (the ``commit_production`` precedent).
 
+History reconciliation (cycle 28): when the adopter is built
+with a ``consumption_entries_provider`` (an explicit
+composition seam — this module never reads the verifier's
+journals itself, and ``build_pin_adopter`` never derives the
+providers from its environment), every attempt reconciles the
+captured store history against the verifier's consumption
+journal before anything is persisted or consumed, relevant to
+the candidate (trust/history_reconciliation.py). A store
+history silently thinned by a restoration now refuses with
+the deterministic code ``pin_store_history_incomplete``
+instead of laundering the gap into continuity. The production
+composition (trust/runner.py) supplies both providers from
+the verifier home it legitimately holds, so detection is on
+there; without a provider the adopter behaves exactly as
+before this cycle and makes no history-completeness claim.
+Two wiring notes: a consumption provider WITHOUT a
+supersession provider loses the decision-based excuse and
+must rely on the known-unadopted head excuse (fail-closed
+direction, but composition should supply both); and
+``adopt_returned`` — which adopts a pair whose consumption
+already committed in an originating ``snapshot_and_adopt``
+attempt — does not re-run reconciliation, on the basis that
+the originating attempt (when wired) was reconciled at its
+start and the pair it adopts is that ceremony's own record.
+
 Honest scope: production code exercised end-to-end in temp
 dirs against the real verifier subprocess, and, since cycle 23,
 in a live run against a byte copy of the real state/ directory
@@ -177,6 +202,10 @@ from trust.client import (
     CeremonyAlreadyConsumed,
     CeremonyHeadRegression,
     CeremonySupersedeRequired,
+)
+from trust.history_reconciliation import (
+    HistoryReconciliationRefused,
+    reconcile_history,
 )
 from trust.supersession_approval import (
     supersession_approval_from_json,
@@ -420,12 +449,23 @@ def pin_adopter_config_from_env(mapping) -> PinAdopterEnv:
 
 def build_pin_adopter(env, *, expected_signer_id, expected_key_id,
                       authorisation_public_key, signing_key_path,
-                      config) -> "PinAdopter":
+                      config, consumption_entries_provider=None,
+                      supersession_entries_provider=None) -> "PinAdopter":
     """The production factory, in the ``production_client``
     idiom: the verifier client is built ONLY via
     ``trust.wiring.production_client``; the pins are out-of-band
     arguments; the snapshot signing key is loaded outside both
-    the state dir and the pin dir."""
+    the state dir and the pin dir.
+
+    Cycle 28: the history-reconciliation providers are optional
+    pass-through arguments, supplied by the composition layer
+    that legitimately holds the verifier's journals. The
+    factory deliberately never derives them from ``env`` (which
+    carries AION_VERIFIER_HOME for the client): the adopter
+    does not read the verifier's journals itself (the cycle-25
+    separation), so an unconfigured factory-built adopter makes
+    no history-completeness claim — see
+    trust/history_reconciliation.py."""
     if not isinstance(config, PinAdopterConfig):
         raise SigningError("config must be a PinAdopterConfig")
     if config.expected_verifier_signer_id != expected_signer_id:
@@ -462,9 +502,12 @@ def build_pin_adopter(env, *, expected_signer_id, expected_key_id,
     signing_key = load_signing_key(
         signing_key_path,
         forbidden_roots=(state_dir, Path(config.pin_dir)))
-    return PinAdopter(client=client, store=store,
-                      signing_key=signing_key, config=config,
-                      authorisation_public_key=authorisation_public_key)
+    return PinAdopter(
+        client=client, store=store,
+        signing_key=signing_key, config=config,
+        authorisation_public_key=authorisation_public_key,
+        consumption_entries_provider=consumption_entries_provider,
+        supersession_entries_provider=supersession_entries_provider)
 
 
 def _write_bytes_atomically(path: Path, payload: bytes) -> None:
@@ -498,7 +541,9 @@ class PinAdopter:
     around a directly built client (the R12 pattern)."""
 
     def __init__(self, *, client, store, signing_key, config,
-                 authorisation_public_key):
+                 authorisation_public_key,
+                 consumption_entries_provider=None,
+                 supersession_entries_provider=None):
         if not isinstance(config, PinAdopterConfig):
             raise SigningError("config must be a PinAdopterConfig")
         if not isinstance(authorisation_public_key, CeremonyPublicKey):
@@ -510,11 +555,32 @@ class PinAdopter:
             raise SigningError(
                 "operator_id: an operator id is required and "
                 "must be non-empty")
+        # Cycle 28: history-reconciliation providers (see
+        # trust/history_reconciliation.py). None (the default,
+        # and therefore every pre-cycle-28 construction) means
+        # NO reconciliation check: detection is an
+        # integrated-system property of the wiring that
+        # supplies real providers, exactly as cycle 21 scoped
+        # single-use consumption to the verifier-backed
+        # consumer. A non-callable provider is a construction
+        # refusal, never a silent no-check.
+        for provider, name in (
+                (consumption_entries_provider,
+                 "consumption_entries_provider"),
+                (supersession_entries_provider,
+                 "supersession_entries_provider")):
+            if provider is not None and not callable(provider):
+                raise SigningError(
+                    f"{name} must be a callable or None")
         self._client = client
         self._store = store
         self._key = signing_key
         self._config = config
         self._pub = authorisation_public_key
+        self._consumption_entries_provider = \
+            consumption_entries_provider
+        self._supersession_entries_provider = \
+            supersession_entries_provider
 
     @property
     def store(self) -> PinStore:
@@ -937,6 +1003,71 @@ class PinAdopter:
                 "coexisted")
         return state_second, calibration
 
+    # -- history reconciliation (cycle 28) --------------------------------
+    # Detection of pin-store history incompleteness against the
+    # verifier's consumption journal (the follow-up
+    # pin-store-history-reconciliation). The providers are
+    # composition seams: this adopter never reads the verifier's
+    # journals itself.
+
+    def _known_unadopted_authorisation_ids(self):
+        """Authorisation ids this adopter's own pending journal
+        proves were consumed but never adopted (genuine burns,
+        including supersession-pending movements' underlying
+        burns as classified by ``_genuine_burn_entries``). These
+        — and only these — may excuse the consumption journal's
+        head entry in reconciliation, and only for a candidate
+        at that head entry's own sequence (fix round, seat-gpt
+        FIX 0.91: the beyond-head reach is removed, because an
+        adopted ceremony whose "adopted" line above was lost
+        is indistinguishable from a genuine burn here): a
+        consumed-but-unadopted head is the recovery /
+        supersession flows' input, not missing history."""
+        return tuple(
+            entry["authorisation_id"]
+            for entry in self._genuine_burn_entries()
+            if isinstance(entry.get("authorisation_id"), str)
+            and entry["authorisation_id"])
+
+    def _reconcile_history(self, history, signed, *, old_pin):
+        """Step (3b): reconcile the captured store history
+        against the consumption journal, relevant to the
+        candidate ``signed``. No provider configured: no check
+        (the pre-cycle-28 behaviour, claimed as nothing more).
+        A provider that raises or returns malformed entries
+        fails CLOSED as PinAdoptionRefused — never a silent
+        fall-back to no-check behaviour.
+        HistoryReconciliationRefused propagates unwrapped so
+        its deterministic code survives."""
+        if self._consumption_entries_provider is None:
+            return
+        try:
+            consumption_entries = self._consumption_entries_provider()
+            supersession_entries = (
+                self._supersession_entries_provider()
+                if self._supersession_entries_provider is not None
+                else ())
+        except HistoryReconciliationRefused:
+            raise
+        except Exception as exc:
+            raise PinAdoptionRefused(
+                "history reconciliation inputs are unreadable: "
+                f"{exc}") from exc
+        try:
+            reconcile_history(
+                history, consumption_entries, supersession_entries,
+                candidate_seq=signed.cycle_seq,
+                candidate_hash=signed.payload_hash,
+                known_unadopted_authorisation_ids=(
+                    self._known_unadopted_authorisation_ids()),
+                genesis_baseline=old_pin is None)
+        except HistoryReconciliationRefused:
+            raise
+        except SigningError as exc:
+            raise PinAdoptionRefused(
+                "history reconciliation inputs are malformed: "
+                f"{exc}") from exc
+
     # -- the flow -------------------------------------------------------------
 
     def snapshot_and_adopt(self) -> AdoptionResult:
@@ -990,6 +1121,14 @@ class PinAdopter:
             except SigningError as exc:
                 raise PinAdoptionRefused(
                     f"candidate signing refused: {exc}") from exc
+        # (3b) History reconciliation (cycle 28): the candidate
+        # now exists, and nothing has been persisted, authorised
+        # or consumed yet in this attempt, so a refusal here is
+        # as clean as the integrity-failure branch below. This
+        # is the one point every outcome (advanced /
+        # already_current / reanchored / genesis) passes
+        # through.
+        self._reconcile_history(history, signed, old_pin=old_pin)
         # (4) Classify.
         if old_pin is None:
             reasons = verify_signed_snapshot(
