@@ -1,0 +1,10 @@
+# External war-room seats — cycle 26 confirmation (Q1 closure)
+Date: 2026-11-23 ~09:08-09:10 CST. Brief: CROSS-CHECK-BRIEF-CYCLE-26.md (blind).
+
+## seat-gemini — SHIP 0.96
+Q1 CLOSED at S1 (every positive assertion mechanically enforced; every known bypass explicitly excluded from the claim; gate framed as friction only; no-override decision endorsed; claim-pin test prevents drift). Q2: cycles 14-16 SHIP. Minor note: watch non-pinned docs paraphrasing S1 back into "manual human approval" in future cycles.
+## seat-gpt — SHIP 0.94
+Q1 CLOSED at exactly S1 ("the project stopped claiming a property it could not establish"). Q2: cycles 14-16 RELEASED — Q2-Q7 dispositions stand as previously ruled; accepted limitations (journal anchoring deferral, integration boundaries) do not become new blockers. Qualification: the lexical claim-pin over 7 files is not proof of coverage of every claim-bearing document — accepted as asserted, not elevated. Residual: the CLI gate is not an enforcement boundary against seed-holding code; must never be presented as one (already disclosed).
+
+## FINAL RECONCILIATION — CYCLES 14, 15, 16 SHIP
+All holds lifted: Q1 mechanism (cycle 25) + Q1 claim precision (cycle 26) closed; Q2-Q7 accepted/ratified by both seats in CROSS-CHECK-18. The trust-boundary line that began with cycle 14's chain-gap rule is complete: chain-gap enforcement, pin ceremony, ceremony hardening — as amended by cycles 19-26 — are SHIPPED. Suite at ship: 1764 tests OK (skipped=28, deployment-gated). Remaining open items are tracked follow-ups, not holds: ceremony-journal-anchoring (issuance + supersession journals), operator-authentication-channel, pin-store-history-reconciliation, cycles 17+18 CROSS-CHECK-12 recovery-contract document. Loop-state recording of cycles 14+ remains blocked by the pick-order issue documented in REREVIEW-14-16.md s4 (unrelated backlog items ahead, one genuinely unfinished on this VM) — a bookkeeping block, not a ship block; the honest routes (operator re-rank or in-order completion) stand as recorded.
