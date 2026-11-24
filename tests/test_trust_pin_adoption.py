@@ -393,6 +393,10 @@ class PinAdoptionIntegrationTests(PinAdoptionFixture):
                 str(self.base / "anchors" / "b.json"),
             "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH":
                 str(self.base / "anchors" / "c.json"),
+            "AION_CEREMONY_ISSUANCE_ANCHOR_PATH":
+                str(self.base / "anchors" / "i.json"),
+            "AION_CEREMONY_SUPERSESSION_ANCHOR_PATH":
+                str(self.base / "anchors" / "u.json"),
             "AION_CEREMONY_EVIDENCE_DIR": str(self.evidence_dir),
         }
         with self.assertRaises(SigningError):

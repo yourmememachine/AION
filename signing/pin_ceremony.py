@@ -334,16 +334,22 @@ Cycle 21 — consumption head and the integrated-system claim:
   refusal certifies the envelope unconsumed, so that later
   consume is not a retry of an ambiguous consume.
 
-Issuance-journal rollback residual (the ceremony
+Issuance-journal rollback position (the ceremony
 authorisation — ISSUANCE — journal; NOT the consumption
 journal): no consumption-side ledger-presence check exists
 in-process (the ceremony cannot read the verifier's ledgers
-— limit M5); the issuance journal's reuse memory is
-rollback-vulnerable until the follow-up
-``ceremony-journal-anchoring`` lands (reuse is prevented
-against an intact issuance journal; after a rollback it is
-detectable only for same-ceremony_id reuse, and otherwise
-only by audit against retained envelopes — not prevented).
+— limit M5). Since cycle 27 the issuance journal is
+externally anchored in its own right (anchor kind
+"ceremony-issuance"); with that anchor configured, an
+issuance whose anchor update completed survives a
+verifier-home rollback (detected at verifier startup,
+anchor_refused), the append->anchor-update window is not
+protected against a full rollback inside that window, and
+research mode / anchor unconfigured makes no rollback claim
+(reuse is then prevented only against an intact issuance
+journal; after a rollback it is detectable only for
+same-ceremony_id reuse, and otherwise only by audit against
+retained envelopes — not prevented).
 The consumption journal's own rollback position is
 different (stated precisely in
 ``CeremonyConsumptionLedger``'s docstring): since cycle

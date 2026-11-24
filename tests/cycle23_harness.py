@@ -60,7 +60,9 @@ ITEMS = [("sealed-1", "algebra", "2+2?", "4"),
 CAL = b'{"log":1}'
 
 _INIT_KEYS = ("AION_ANCHOR_INIT", "AION_BUDGETS_ANCHOR_INIT",
-              "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT")
+              "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT",
+              "AION_CEREMONY_ISSUANCE_ANCHOR_INIT",
+              "AION_CEREMONY_SUPERSESSION_ANCHOR_INIT")
 
 
 @dataclass
@@ -145,6 +147,8 @@ def provision_production_home(base=None):
         "signing": anchors_dir / "signing.anchor.json",
         "budgets": anchors_dir / "budgets.anchor.json",
         "consumption": anchors_dir / "consumption.anchor.json",
+        "issuance": anchors_dir / "issuance.anchor.json",
+        "supersession": anchors_dir / "supersession.anchor.json",
     }
     # A fresh snapshot signing key for the adopter side: outside
     # every state dir and pin dir the suites use under base's
@@ -162,6 +166,10 @@ def provision_production_home(base=None):
         "AION_BUDGETS_ANCHOR_PATH": str(anchor_paths["budgets"]),
         "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH":
             str(anchor_paths["consumption"]),
+        "AION_CEREMONY_ISSUANCE_ANCHOR_PATH":
+            str(anchor_paths["issuance"]),
+        "AION_CEREMONY_SUPERSESSION_ANCHOR_PATH":
+            str(anchor_paths["supersession"]),
         "AION_CEREMONY_OPERATORS": OPERATORS,
         "AION_CEREMONY_EVIDENCE_DIR": str(evidence_dir),
         "AION_CEREMONY_SIGNING_SEED_PATH": str(seed_path),

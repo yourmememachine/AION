@@ -681,21 +681,26 @@ class CeremonyAuthorisationLedger(HashChainJournal):
     a second signer") lives in the signing ledger; this journal
     is the reuse memory.
 
-    Rollback residual, stated plainly: no external anchor covers
-    this journal yet (follow-up: ceremony-journal-anchoring).
-    Rolling this file back erases the reuse memory — a listed
-    operator could then obtain a second authorisation for the
-    same evidence under a new ceremony_id. The anchored signing
-    ledger preserves the issuance record (authorisation_id,
-    payload_hash, ceremony_id as proposal_id), so a duplicate
-    issuance under the SAME ceremony_id leaves a visible
-    duplicate trace there; but it stores neither evidence_hash
-    nor operator_id, so evidence reuse under a NEW ceremony_id
-    is NOT detectable from the anchored store without the
-    retained envelopes. The evidence-reuse guarantee is:
-    prevented against an intact journal; after a rollback,
-    detectable only for same-ceremony_id reuse, and otherwise
-    only by audit against retained envelopes."""
+    Rollback position (cycle 27): this journal IS externally
+    anchored in its own right (anchor kind "ceremony-issuance",
+    verified at verifier startup when configured, required in
+    production with the ceremony seed — see
+    trust/verifier_main.py). With the issuance anchor
+    configured, an issuance whose anchor update completed
+    survives a verifier-home rollback: the external anchor is
+    ahead of the rolled-back journal, so startup refuses
+    (anchor_refused) instead of letting a listed operator
+    obtain a second authorisation for the same evidence under
+    a new ceremony_id. The append->anchor-update window (entry
+    in the journal, anchor at the pre-issuance prefix) is
+    protected against an intact home but NOT against a full
+    rollback inside that window — the same window every
+    anchored append in this system carries; research mode /
+    anchor unconfigured: no rollback claim, and the pre-cycle-27
+    position applies (reuse prevented against an intact
+    journal; after a rollback, detectable only for
+    same-ceremony_id reuse in the anchored signing ledger, and
+    otherwise only by audit against retained envelopes)."""
 
     FILENAME = "ceremony-authorisations.json"
     EXTRA_KEYS = frozenset({"authorisation_id", "payload_hash",
@@ -864,9 +869,11 @@ class CeremonyConsumptionLedger(HashChainJournal):
     inside that window — the same window every anchored
     append in this system carries; research mode / anchor
     unconfigured: no rollback claim, and this journal can
-    be deleted or rolled back undetectably. The follow-up
-    ceremony-journal-anchoring is narrowed to the issuance
-    journal only.
+    be deleted or rolled back undetectably. (The follow-up
+    ceremony-journal-anchoring, narrowed to the issuance
+    journal by cycle 22 and extended to the supersession
+    journal by cycle 24, was closed for both journals in
+    cycle 27.)
 
     Note on head(): this class does NOT override the base
     class's head() — head() returns the hash-chain head hash
@@ -1663,30 +1670,32 @@ class CeremonySupersessionLedger(HashChainJournal):
     head, not by an append-side uniqueness rule that would
     deadlock the expiry case.
 
-    Rollback position (design-b §4.4, stated honestly): this
-    journal is NOT externally anchored this cycle — there is
-    no dedicated anchor for it; it joins the
-    ceremony-journal-anchoring follow-up, whose scope now
-    covers BOTH the issuance journal and this journal. Its
-    rollback position is the issuance journal's, not the
-    consumption journal's. Rolling back the WHOLE verifier
-    home also rolls back the consumption journal, whose
-    anchor (when configured, required in production with the
-    ceremony seed) refuses startup (anchor_refused) for any
-    consumption whose anchor update completed — so a
-    whole-home rollback cannot silently restore a
-    pre-decision world and keep consuming. Rolling back ONLY
-    this file to an earlier prefix makes decisions vanish, so
-    consume refuses ceremony_supersede_required — it fails
-    closed, and the operator simply presents the envelope to
-    ceremony_supersede again. A decision rolled in for a
-    DIFFERENT envelope is inert: the consume-side binding
-    ties it to the current head and to the presented
-    envelope's id. No rollback- or forgery-resistance is
-    claimed for this journal itself: a party with write
-    access to the verifier home can rewrite it from genesis
-    with a fabricated decision whose hash chain
-    self-validates; the signing-ledger mirror
+    Rollback position (design-b §4.4, updated cycle 27):
+    this journal IS externally anchored in its own right
+    (anchor kind "ceremony-supersession", verified at
+    verifier startup when configured, required in production
+    with the ceremony seed). With the supersession anchor
+    configured, a decision whose anchor update completed
+    survives a rollback of this file: the external anchor is
+    ahead of the rolled-back journal, so startup refuses
+    (anchor_refused) instead of silently losing the decision.
+    The append->anchor-update window (decision in the
+    journal, anchor at the pre-decision prefix) is protected
+    against an intact home but NOT against a full rollback
+    inside that window — the same window every anchored
+    append in this system carries; research mode / anchor
+    unconfigured: no rollback claim, and the pre-cycle-27
+    behaviour applies (rolling back ONLY this file makes
+    decisions vanish, consume refuses
+    ceremony_supersede_required — it fails closed, and the
+    operator presents the envelope to ceremony_supersede
+    again). A decision rolled in for a DIFFERENT envelope is
+    inert: the consume-side binding ties it to the current
+    head and to the presented envelope's id. No
+    forgery-resistance is claimed for this journal itself: a
+    party with write access to the verifier home can rewrite
+    it from genesis with a fabricated decision whose hash
+    chain self-validates; the signing-ledger mirror
     (SigningLedger.append_ceremony_supersession) is an
     anchored audit trace that a decision was recorded, not a
     proof of any particular journal entry.

@@ -201,9 +201,11 @@ class ProductionE2ETests(ProductionE2EFixture):
 
     def test_init_flag_in_production_env_refused(self):
         # INIT ceremony flags are forbidden in production steady
-        # state, for any of the three anchor families.
+        # state, for any of the anchor families.
         for flag in ("AION_ANCHOR_INIT", "AION_BUDGETS_ANCHOR_INIT",
-                     "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT"):
+                     "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT",
+                     "AION_CEREMONY_ISSUANCE_ANCHOR_INIT",
+                     "AION_CEREMONY_SUPERSESSION_ANCHOR_INIT"):
             env = dict(self.home.env)
             env[flag] = "1"
             with self.assertRaises(VerifierConfigError) as cm:

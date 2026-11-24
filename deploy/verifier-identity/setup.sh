@@ -112,6 +112,15 @@ AION_BUDGETS_ANCHOR_INIT=
 # configured) requires the path and refuses the INIT flag.
 AION_CEREMONY_CONSUMPTION_ANCHOR_PATH=/var/lib/aion-verifier/anchors/ceremony-consumption.anchor.json
 AION_CEREMONY_CONSUMPTION_ANCHOR_INIT=
+# Ceremony issuance + supersession anchors (cycle 27):
+# external anchors for the ceremony issuance journal (kind
+# "ceremony-issuance") and the ceremony supersession journal
+# (kind "ceremony-supersession"); same placement and
+# production rules as the consumption anchor above.
+AION_CEREMONY_ISSUANCE_ANCHOR_PATH=/var/lib/aion-verifier/anchors/ceremony-issuance.anchor.json
+AION_CEREMONY_ISSUANCE_ANCHOR_INIT=
+AION_CEREMONY_SUPERSESSION_ANCHOR_PATH=/var/lib/aion-verifier/anchors/ceremony-supersession.anchor.json
+AION_CEREMONY_SUPERSESSION_ANCHOR_INIT=
 # Ceremony operator allowlist (cycle 19): comma-separated
 # operator ids allowlisted to be named as the operator id in
 # ceremony authorisations (mode ceremony_authorise). The list

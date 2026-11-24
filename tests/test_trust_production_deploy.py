@@ -72,7 +72,9 @@ from trust import protocol
 from trust.anchoring import initialise_anchor, load_anchor, verify_anchor
 from trust.attestation import verify_eval_attestation
 from trust.budgets import BudgetStore, GENESIS_CHAIN_HASH
-from trust.ledger import CeremonyConsumptionLedger, SigningLedger
+from trust.ledger import (CeremonyAuthorisationLedger,
+                          CeremonyConsumptionLedger,
+                          CeremonySupersessionLedger, SigningLedger)
 
 REPO = Path(__file__).resolve().parents[1]
 WRAPPER = REPO / "deploy" / "verifier-identity" / "run-verifier.sh"
@@ -951,6 +953,22 @@ class ProductionModeSpecTests(unittest.TestCase):
             CeremonyConsumptionLedger(self.home / "ledger"),
             consumption_anchor, kind="ceremony-consumption",
             recorded_at="2026-11-20T12:00:00+00:00")
+        # Cycle 27: production with the ceremony seed configured
+        # also requires the ceremony issuance and supersession
+        # anchors — valid ones pinning the (empty) journals'
+        # genesis heads.
+        issuance_anchor = (Path(self.tmp.name) / "anchors"
+                           / "ceremony-issuance.anchor.json")
+        initialise_anchor(
+            CeremonyAuthorisationLedger(self.home / "ledger"),
+            issuance_anchor, kind="ceremony-issuance",
+            recorded_at="2026-11-20T12:00:00+00:00")
+        supersession_anchor = (Path(self.tmp.name) / "anchors"
+                               / "ceremony-supersession.anchor.json")
+        initialise_anchor(
+            CeremonySupersessionLedger(self.home / "ledger"),
+            supersession_anchor, kind="ceremony-supersession",
+            recorded_at="2026-11-20T12:00:00+00:00")
         seed_path = Path(self.tmp.name) / "ceremony.seed"
         generate_ceremony_key_file(seed_path)
         result, request_id = self.run_verifier({
@@ -959,6 +977,10 @@ class ProductionModeSpecTests(unittest.TestCase):
             "AION_BUDGETS_ANCHOR_PATH": str(budgets_anchor),
             "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH":
                 str(consumption_anchor),
+            "AION_CEREMONY_ISSUANCE_ANCHOR_PATH":
+                str(issuance_anchor),
+            "AION_CEREMONY_SUPERSESSION_ANCHOR_PATH":
+                str(supersession_anchor),
             # Cycle 19: production also requires the ceremony
             # operator list at startup (the 15th allowlisted
             # name); cycle 20 adds the evidence dir and the

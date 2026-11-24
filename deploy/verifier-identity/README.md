@@ -122,7 +122,9 @@ through the wrapper's allowlist):
   refuses to start (exit 3) when no anchor path is configured,
   and it refuses to start when an anchor-init flag
   (`AION_ANCHOR_INIT` / `AION_BUDGETS_ANCHOR_INIT` /
-  `AION_CEREMONY_CONSUMPTION_ANCHOR_INIT`) is present —
+  `AION_CEREMONY_CONSUMPTION_ANCHOR_INIT` /
+  `AION_CEREMONY_ISSUANCE_ANCHOR_INIT` /
+  `AION_CEREMONY_SUPERSESSION_ANCHOR_INIT`) is present —
   the bootstrap ceremony is an operator action performed outside
   production configuration, never a flag a production launch
   carries, so the ceremony cannot be silently repeated after
@@ -131,14 +133,17 @@ through the wrapper's allowlist):
   Production mode with the ceremony seed configured
   additionally requires
   `AION_CEREMONY_CONSUMPTION_ANCHOR_PATH` for the
-  ceremony consumption journal. With that anchor
-  configured, a consumption whose anchor update
-  completed survives a verifier-home rollback (detected
-  at startup); a full rollback inside the
-  append→anchor-update window is not protected against;
-  in research mode, or with the consumption anchor
-  unconfigured, no rollback claim is made for
-  consumptions.
+  ceremony consumption journal, and (cycle 27)
+  `AION_CEREMONY_ISSUANCE_ANCHOR_PATH` and
+  `AION_CEREMONY_SUPERSESSION_ANCHOR_PATH` for the
+  ceremony issuance and supersession journals. With those
+  anchors configured, a consumption, issuance or decision
+  whose anchor update completed survives a verifier-home
+  rollback (detected at startup); a full rollback inside
+  the append→anchor-update window is not protected
+  against; in research mode, or with an anchor
+  unconfigured, no rollback claim is made for that
+  journal.
 - **Research mode** (`AION_DEPLOYMENT_MODE=research`, set
   explicitly): the verifier runs with whatever anchoring is
   configured, including none. This is the mode for development
@@ -340,6 +345,88 @@ rollback (detected at startup); the
 append→anchor-update window is NOT protected against a
 full rollback inside that window; research mode /
 anchor unconfigured: no rollback claim.
+Cycle 27 anchors the two remaining ceremony journals the
+same way: the issuance journal via
+`AION_CEREMONY_ISSUANCE_ANCHOR_PATH` /
+`AION_CEREMONY_ISSUANCE_ANCHOR_INIT` and the supersession
+journal via `AION_CEREMONY_SUPERSESSION_ANCHOR_PATH` /
+`AION_CEREMONY_SUPERSESSION_ANCHOR_INIT` (allowlist
+20 → 24); production mode with the ceremony seed
+configured requires both paths and refuses both INIT
+flags, and each anchor must be distinct from every other
+anchor path. The same window and research-mode caveats
+apply to both journals.
+**Cycle-27 migration (established deployments).** Two
+changes are fail-closed breaks for an existing production
+deployment, both deliberate: (1) the production client's
+required env gains `AION_CEREMONY_ISSUANCE_ANCHOR_PATH`
+and `AION_CEREMONY_SUPERSESSION_ANCHOR_PATH` — an env file
+without them is refused at client construction, before any
+verifier starts; add both lines (setup.sh's template
+carries them for new installs; it never overwrites an
+existing env file). (2) A deployment whose issuance or
+supersession journal is ALREADY ESTABLISHED (non-empty)
+cannot bootstrap its anchor with the INIT flag: INIT pins
+only an empty journal, by design, so a deleted anchor
+cannot launder a rolled-back journal into a fresh pin.
+First-pinning an established journal is an operator
+ceremony performed outside the verifier, once, from a
+verifier home the operator has independently verified as
+intact: call `trust.anchoring.initialise_anchor` on the
+journal with `allow_nonempty_ceremony=True` and the new
+anchor kind (`ceremony-issuance` /
+`ceremony-supersession`) — the same first-initialisation
+ceremony the ship-tx journal used in cycle 17. Concretely,
+with the verifier stopped, from a checkout of this
+repository (so the `trust` and `signing` packages import),
+the operator runs, once per established journal:
+
+    from pathlib import Path
+    from trust.anchoring import initialise_anchor
+    from trust.ledger import (CeremonyAuthorisationLedger,
+                              CeremonySupersessionLedger)
+
+    home = Path("/var/lib/aion-verifier/home")   # AION_VERIFIER_HOME
+    initialise_anchor(
+        CeremonyAuthorisationLedger(home),
+        "/var/lib/aion-verifier/anchors/ceremony-issuance.anchor.json",
+        kind="ceremony-issuance",
+        recorded_at="<current UTC time, ISO 8601>",
+        allow_nonempty_ceremony=True)
+    initialise_anchor(
+        CeremonySupersessionLedger(home),
+        "/var/lib/aion-verifier/anchors/ceremony-supersession.anchor.json",
+        kind="ceremony-supersession",
+        recorded_at="<current UTC time, ISO 8601>",
+        allow_nonempty_ceremony=True)
+
+(Only the journals that are actually established need the
+call; an empty journal bootstraps through its INIT flag
+instead.) The first
+pin blesses the journal's current history: it cannot
+detect a rollback that happened before it, which is why
+the intact-home verification is the operator's duty, not
+the tool's. Note also the availability coupling this
+cycle makes explicit (the consumption anchor has carried
+it since cycle 22): all five anchors are verified at
+startup on EVERY verifier invocation, so a fault in any
+one anchor or journal refuses every mode until repaired —
+fail-closed, and the price of startup enforcement.
+Bootstrapping several anchors in one research-mode INIT
+invocation is safe to repeat, but it is NOT transactional,
+and its side effects are stated plainly: anchor creation
+happens during startup configuration, before the request
+itself is dispatched, so ANY request type carried by a
+bootstrap invocation can create anchors for journals it
+does not touch; and an invocation that fails halfway (for
+example, a later journal's INIT is refused because that
+journal is established) leaves the anchors it already
+created ON DISK — the state is a partial bootstrap, not a
+rollback. Each anchor is verified independently at every
+startup, and the still-missing anchors refuse startup
+until the ceremony is completed, so a partial bootstrap is
+a safe intermediate state, never a silent one.
+
 **Burned-but-unmoved recovery:** because the consumption
 commit precedes pin adoption, a crash or a lost response
 after the commit leaves the authorisation burned and

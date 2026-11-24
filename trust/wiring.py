@@ -85,18 +85,18 @@ Production client rules (production_client): the env mapping
 is copied and the copy is validated BEFORE any client exists
 and before anything can be spawned. Keys are restricted to the
 wrapper's allowlist as shipped in
-deploy/verifier-identity/run-verifier.sh (ALLOWED_KEYS, 20
+deploy/verifier-identity/run-verifier.sh (ALLOWED_KEYS, 24
 names — the shipped wrapper governs). An unknown key
 refuses, including AION_SHIP_ANCHOR_PATH, which does not exist
 anywhere in the verifier's configuration. The five core names,
-the deployment mode and all three anchor paths are required
+the deployment mode and all five anchor paths are required
 non-empty; the mode must be exactly "production" (the verifier
 refuses an absent mode too, and a wiring layer that let
 "research" through would be a one-string downgrade of every
 guarantee the anchors provide). The INIT ceremony flags are
 refused for any value other than the verifier's explicit-off
 spellings (absent, empty, or "0"): ceremonies are operator acts
-performed outside production steady state. Both anchor paths
+performed outside production steady state. All anchor paths
 must be absolute, distinct from each other, and resolved
 outside the verifier home. The pins are mandatory: the signer
 pin must equal the env's signer id, and the key pin must be in
@@ -175,7 +175,7 @@ __all__ = [
 ]
 
 # The wrapper's allowlist, copied from ALLOWED_KEYS in
-# deploy/verifier-identity/run-verifier.sh as shipped (20
+# deploy/verifier-identity/run-verifier.sh as shipped (24
 # names). A key outside this set is not verifier configuration
 # and refuses; the verifier itself would ignore or reject it,
 # and a wiring layer that passed it through would be smuggling
@@ -200,14 +200,28 @@ ALLOWED_ENV_KEYS = frozenset({
     "AION_CEREMONY_SIGNING_SEED_PATH",
     "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH",
     "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT",
+    "AION_CEREMONY_ISSUANCE_ANCHOR_PATH",
+    "AION_CEREMONY_ISSUANCE_ANCHOR_INIT",
+    "AION_CEREMONY_SUPERSESSION_ANCHOR_PATH",
+    "AION_CEREMONY_SUPERSESSION_ANCHOR_INIT",
     "AION_SUPERSESSION_APPROVER_PUBLIC_KEY",
 })
 
 # Required non-empty for a production client: the five core
 # names the verifier itself requires, the deployment mode, and
-# all three anchor paths (production makes anchoring mandatory and
+# all five anchor paths (production makes anchoring mandatory and
 # fail-closed, so an unanchored production client is a
 # misconfiguration, not a weaker-but-valid one).
+# The ceremony ANCHOR paths are the standing exception to the
+# not-wiring-required treatment below: the consumption anchor
+# path has been wiring-required since cycle 22, and cycle 27
+# adds the issuance and supersession anchor paths on the same
+# terms — an anchor path is client-construction configuration,
+# not ceremony capability, and a production client built
+# without one could never start its verifier. Existing
+# production envs must add both new paths (fail-closed;
+# see the cycle-27 migration note in
+# deploy/verifier-identity/README.md).
 # AION_CEREMONY_OPERATORS, AION_CEREMONY_EVIDENCE_DIR and
 # AION_CEREMONY_SIGNING_SEED_PATH (cycle 20) are allowlisted
 # but deliberately NOT wiring-required, mirroring the operators
@@ -227,12 +241,18 @@ REQUIRED_ENV_KEYS = (
     "AION_ANCHOR_PATH",
     "AION_BUDGETS_ANCHOR_PATH",
     "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH",
+    "AION_CEREMONY_ISSUANCE_ANCHOR_PATH",
+    "AION_CEREMONY_SUPERSESSION_ANCHOR_PATH",
 )
 
 _INIT_ENV_KEYS = ("AION_ANCHOR_INIT", "AION_BUDGETS_ANCHOR_INIT",
-                  "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT")
+                  "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT",
+                  "AION_CEREMONY_ISSUANCE_ANCHOR_INIT",
+                  "AION_CEREMONY_SUPERSESSION_ANCHOR_INIT")
 _ANCHOR_ENV_KEYS = ("AION_ANCHOR_PATH", "AION_BUDGETS_ANCHOR_PATH",
-                    "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH")
+                    "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH",
+                    "AION_CEREMONY_ISSUANCE_ANCHOR_PATH",
+                    "AION_CEREMONY_SUPERSESSION_ANCHOR_PATH")
 _KEY_ID_RE = re.compile(r"key-[0-9a-f]{16}")
 
 # The only launch mode this factory performs: the client's

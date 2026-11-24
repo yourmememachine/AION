@@ -493,3 +493,61 @@ and that this addendum exists and carries the canonical
 narrowing. Earlier addenda in this file are history and
 legitimately quote the superseded phrasing; they are not
 rewritten.
+
+## Addendum 7 — 2026-11-23 (cycle 27): both remaining ceremony journals anchored
+
+The follow-up `ceremony-journal-anchoring` is CLOSED. The
+issuance journal (`CeremonyAuthorisationLedger`) and the
+supersession journal (`CeremonySupersessionLedger`) are now
+externally anchored in their own right, mirroring cycle
+22's consumption anchoring: anchor kinds
+`ceremony-issuance` / `ceremony-supersession` in
+`trust/anchoring.py`, configured by
+`AION_CEREMONY_ISSUANCE_ANCHOR_PATH` /
+`AION_CEREMONY_ISSUANCE_ANCHOR_INIT` and
+`AION_CEREMONY_SUPERSESSION_ANCHOR_PATH` /
+`AION_CEREMONY_SUPERSESSION_ANCHOR_INIT` (wrapper allowlist
+20 → 24; both PATH keys wiring-required, on the cycle-22
+consumption terms). Both anchors are verified at startup on
+every verifier invocation via one shared loader
+(`_load_ceremony_journal_anchor`, a faithful generalisation
+of the cycle-22 inline block); production mode with the
+ceremony seed configured requires both paths and refuses
+both INIT flags.
+
+Commit orders: authorise = issuance append (commit point)
+→ issuance-anchor update → signing mirror → signing
+anchor; supersede = decision append (commit point) →
+supersession-anchor update → signing mirror → signing
+anchor. An anchor-update failure is `ledger_failed`: the
+artefact/receipt is withheld and the journal entry stands
+(pair burned / decision stands). With an anchor configured,
+an entry whose anchor update completed survives a
+verifier-home rollback (detected at startup,
+`anchor_refused`); the append→anchor-update window is NOT
+protected against a full rollback inside that window — the
+same window every anchored append in this system carries;
+research mode / anchor unconfigured makes no rollback
+claim. This discharges Addendum 4's conditional closure of
+the supersede item: the unanchored-journal residual it was
+conditioned on no longer exists for either journal.
+
+War-room rulings recorded with this addendum (cycle-27 fix
+round): (a) first-pinning an ESTABLISHED journal is an
+operator ceremony outside the verifier —
+`initialise_anchor(..., allow_nonempty_ceremony=True)`,
+the cycle-17 ship-tx precedent — documented as the
+cycle-27 migration in deploy/verifier-identity/README.md;
+INIT inside the verifier pins only empty journals, by
+design. (b) The wiring-required status of both new PATH
+keys is a deliberate fail-closed break for existing
+production envs, disclosed in the same migration note.
+(c) The availability coupling (any anchor/journal fault
+refuses every mode at startup) is the consumption anchor's
+standing position since cycle 22, now stated explicitly
+for all five anchors in the migration note. (d)
+`health_check.py` keeps the consumption-parity treatment
+(list membership + env validation) for the new anchors;
+extending its direct anchor-vs-journal verification to the
+three ceremony anchors is a follow-up, not a hold — the
+verifier's own startup verification is the enforcement.

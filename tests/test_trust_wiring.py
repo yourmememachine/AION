@@ -136,6 +136,11 @@ def production_env(base, **over):
         "AION_CEREMONY_CONSUMPTION_ANCHOR_PATH":
             str(base / "anchors"
                 / "ceremony-consumption.anchor.json"),
+        "AION_CEREMONY_ISSUANCE_ANCHOR_PATH":
+            str(base / "anchors" / "ceremony-issuance.anchor.json"),
+        "AION_CEREMONY_SUPERSESSION_ANCHOR_PATH":
+            str(base / "anchors"
+                / "ceremony-supersession.anchor.json"),
         # The verifier's explicit-off spelling: allowed.
         "AION_ANCHOR_INIT": "0",
     }
@@ -167,16 +172,18 @@ class ProductionClientRefusalTests(unittest.TestCase):
         self.assertIn(variable, message)
         return message
 
-    def test_allowlist_is_the_shipped_19_names(self):
+    def test_allowlist_is_the_shipped_24_names(self):
         # Pod C ground truth: the shipped wrapper's ALLOWED_KEYS
-        # has 20 names (cycle 19 added AION_CEREMONY_OPERATORS
+        # has 24 names (cycle 27 added the ceremony issuance and
+        # supersession anchor PATH/INIT names; cycle 19 added
+        # AION_CEREMONY_OPERATORS
         # as the 15th; cycle 20 added AION_CEREMONY_EVIDENCE_DIR
         # and AION_CEREMONY_SIGNING_SEED_PATH; cycle 22 added
         # AION_CEREMONY_CONSUMPTION_ANCHOR_PATH and
         # AION_CEREMONY_CONSUMPTION_ANCHOR_INIT; cycle 25 added
         # AION_SUPERSESSION_APPROVER_PUBLIC_KEY as the 20th);
         # AION_SHIP_ANCHOR_PATH is not among them.
-        self.assertEqual(len(ALLOWED_ENV_KEYS), 20)
+        self.assertEqual(len(ALLOWED_ENV_KEYS), 24)
         self.assertIn("AION_CEREMONY_OPERATORS", ALLOWED_ENV_KEYS)
         self.assertIn("AION_CEREMONY_EVIDENCE_DIR", ALLOWED_ENV_KEYS)
         self.assertIn("AION_CEREMONY_SIGNING_SEED_PATH", ALLOWED_ENV_KEYS)
@@ -185,6 +192,14 @@ class ProductionClientRefusalTests(unittest.TestCase):
         self.assertIn("AION_CEREMONY_CONSUMPTION_ANCHOR_INIT",
                       ALLOWED_ENV_KEYS)
         self.assertIn("AION_SUPERSESSION_APPROVER_PUBLIC_KEY",
+                      ALLOWED_ENV_KEYS)
+        self.assertIn("AION_CEREMONY_ISSUANCE_ANCHOR_PATH",
+                      ALLOWED_ENV_KEYS)
+        self.assertIn("AION_CEREMONY_ISSUANCE_ANCHOR_INIT",
+                      ALLOWED_ENV_KEYS)
+        self.assertIn("AION_CEREMONY_SUPERSESSION_ANCHOR_PATH",
+                      ALLOWED_ENV_KEYS)
+        self.assertIn("AION_CEREMONY_SUPERSESSION_ANCHOR_INIT",
                       ALLOWED_ENV_KEYS)
         self.assertNotIn("AION_SHIP_ANCHOR_PATH", ALLOWED_ENV_KEYS)
 
@@ -204,7 +219,7 @@ class ProductionClientRefusalTests(unittest.TestCase):
         wrapper_keys = set(re.findall(r"AION_[A-Z_]+",
                                       match.group(1)))
         self.assertEqual(wrapper_keys, set(ALLOWED_ENV_KEYS))
-        self.assertEqual(len(wrapper_keys), 20)
+        self.assertEqual(len(wrapper_keys), 24)
 
     def test_unknown_ship_anchor_path_refused(self):
         env = self.env(AION_SHIP_ANCHOR_PATH="/tmp/ship.anchor.json")
@@ -238,7 +253,9 @@ class ProductionClientRefusalTests(unittest.TestCase):
 
     def test_init_flag_one_refused(self):
         for flag in ("AION_ANCHOR_INIT", "AION_BUDGETS_ANCHOR_INIT",
-                     "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT"):
+                     "AION_CEREMONY_CONSUMPTION_ANCHOR_INIT",
+                     "AION_CEREMONY_ISSUANCE_ANCHOR_INIT",
+                     "AION_CEREMONY_SUPERSESSION_ANCHOR_INIT"):
             with self.subTest(flag=flag):
                 env = self.env(**{flag: "1"})
                 self.assert_refused(env, flag)

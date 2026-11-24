@@ -196,6 +196,53 @@ silently ignored field:
                             (anchor_refused) — recovery is the
                             audited force_reanchor path, exactly
                             as for signing
+  AION_CEREMONY_ISSUANCE_ANCHOR_PATH
+                            optional: external anchor file for
+                            the ceremony issuance journal (kind
+                            "ceremony-issuance", cycle 27); must
+                            live OUTSIDE AION_VERIFIER_HOME and
+                            be distinct from every other anchor
+                            path. When set, startup verifies the
+                            anchor on every invocation and every
+                            issuance advances it BEFORE the
+                            signing-ledger mirror write.
+                            Production mode with the ceremony
+                            seed configured REQUIRES the path and
+                            refuses the INIT flag below; research
+                            mode with the path unconfigured makes
+                            NO rollback claim for issuances.
+  AION_CEREMONY_ISSUANCE_ANCHOR_INIT
+                            optional: "1" allows ONE bootstrap
+                            invocation to create the issuance
+                            anchor for an EMPTY issuance
+                            journal; a non-empty journal with a
+                            missing anchor is NOT silently
+                            blessed (anchor_refused) — first-pin
+                            of an established journal is the
+                            operator ceremony documented in
+                            deploy/verifier-identity/README.md
+                            (cycle 27 migration), exactly as
+                            for signing
+  AION_CEREMONY_SUPERSESSION_ANCHOR_PATH
+                            optional: external anchor file for
+                            the ceremony supersession journal
+                            (kind "ceremony-supersession", cycle
+                            27); same placement, distinctness,
+                            startup-verification and production
+                            rules as the issuance anchor above.
+                            Every supersession decision advances
+                            it BEFORE the signing-ledger mirror
+                            write. Research mode with the path
+                            unconfigured makes NO rollback claim
+                            for supersession decisions.
+  AION_CEREMONY_SUPERSESSION_ANCHOR_INIT
+                            optional: "1" allows ONE bootstrap
+                            invocation to create the supersession
+                            anchor for an EMPTY supersession
+                            journal; a non-empty journal with a
+                            missing anchor is NOT silently
+                            blessed (anchor_refused) — see the
+                            issuance INIT entry above
   AION_SUPERSESSION_APPROVER_PUBLIC_KEY
                             optional (cycle 25): hex64 encoding
                             of the supersession approver's
@@ -268,23 +315,26 @@ OPERATOR RECOVERY from a post-commit ledger failure: the
 envelope was returned — retry the ceremony under a NEW
 ceremony_id with a NEW evidence bundle (a re-issued evidence
 artefact, hence a new hash); there is no idempotent re-issue.
-The ceremony ISSUANCE journal is NOT externally anchored,
-and neither is the ceremony SUPERSESSION journal
-(ceremony-supersessions.json, cycle 24): the follow-up
-ceremony-journal-anchoring covers BOTH unanchored journals
-(the issuance journal and the supersession journal — the
-consumption journal is separately anchored, see above):
-the issuance journal's evidence-reuse guarantee is
-prevented against an intact journal; after a journal rollback,
-only same-ceremony_id reuse leaves a detectable trace in the
-anchored signing ledger — evidence reuse under a NEW
-ceremony_id is NOT detectable from the anchored store alone
-(see trust/ledger.py's CeremonyAuthorisationLedger for the
-full statement) — never describe either journal as
-rollback-resistant. The supersession journal's own rollback
-position (fail-closed loss, binding inertness, no forgery
-resistance claimed) is stated in trust/ledger.py's
-CeremonySupersessionLedger docstring.
+The ceremony ISSUANCE journal and the ceremony
+SUPERSESSION journal (ceremony-supersessions.json, cycle 24)
+are externally anchored in their own right (cycle 27, anchor
+kinds "ceremony-issuance" / "ceremony-supersession",
+AION_CEREMONY_ISSUANCE_ANCHOR_PATH /
+AION_CEREMONY_SUPERSESSION_ANCHOR_PATH — closing the
+follow-up ceremony-journal-anchoring; the consumption journal
+is separately anchored, see above). With an anchor
+configured (required in production with the ceremony seed),
+an issuance or decision whose anchor update completed
+survives a verifier-home rollback: the rolled-back journal
+is behind its external anchor and startup refuses
+(anchor_refused). The append->anchor-update window (entry
+in the journal, anchor at the pre-entry prefix) is protected
+against an intact home but NOT against a full rollback
+inside that window — the same window every anchored append
+in this system carries; research mode / anchors unconfigured
+makes no rollback claim. See trust/ledger.py's
+CeremonyAuthorisationLedger and CeremonySupersessionLedger
+docstrings for the full statements.
 
 The ceremony_supersede mode (cycle 24, Option A) records a
 supersession decision: an allowlisted operator presents a
@@ -474,6 +524,10 @@ class _Config:
                  budgets_anchor_path=None, budgets_anchor_init=False,
                  ceremony_consumption_anchor_path=None,
                  ceremony_consumption_anchor_init=False,
+                 ceremony_issuance_anchor_path=None,
+                 ceremony_issuance_anchor_init=False,
+                 ceremony_supersession_anchor_path=None,
+                 ceremony_supersession_anchor_init=False,
                  ceremony_operators=(), ceremony_evidence_dir=None,
                  ceremony_signing_key=None,
                  supersession_approver_key=None, *,
@@ -495,6 +549,14 @@ class _Config:
             ceremony_consumption_anchor_path
         self.ceremony_consumption_anchor_init = \
             ceremony_consumption_anchor_init
+        self.ceremony_issuance_anchor_path = \
+            ceremony_issuance_anchor_path
+        self.ceremony_issuance_anchor_init = \
+            ceremony_issuance_anchor_init
+        self.ceremony_supersession_anchor_path = \
+            ceremony_supersession_anchor_path
+        self.ceremony_supersession_anchor_init = \
+            ceremony_supersession_anchor_init
         self.ceremony_operators = tuple(ceremony_operators)
         # Resolved evidence root (Path) or None; resolved ONCE
         # in _load_config (cycle 20, R5(b)).
@@ -511,6 +573,90 @@ class _Config:
 
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+
+def _load_ceremony_journal_anchor(env, *, path_var, init_var, kind,
+                                  journal_factory, journal_label,
+                                  home, deployment_mode,
+                                  ceremony_seed_raw, other_anchors):
+    """Parse, place and startup-verify one ceremony journal's
+    external anchor (cycle 27), mirroring the cycle-22
+    consumption-anchor discipline exactly: production mode with
+    the ceremony seed configured REQUIRES the path and refuses
+    the INIT flag; the path must be absolute, live outside the
+    verifier home, and be distinct from every other anchor path
+    (one file cannot anchor two journals); startup verifies the
+    anchor against the journal on every invocation, and INIT
+    may bootstrap only a missing anchor. Returns
+    (path_or_None, init_bool). ``other_anchors`` is a sequence of
+    (env_var_name, path_or_empty) pairs already resolved."""
+    anchor_path = env.get(path_var, "")
+    init_raw = env.get(init_var, "")
+    if init_raw not in ("", "0", "1"):
+        raise _config("verifier_misconfigured", f"bad {init_var}")
+    anchor_init = init_raw == "1"
+    if deployment_mode == "production" and ceremony_seed_raw:
+        if not anchor_path:
+            raise _config(
+                "verifier_misconfigured",
+                "production mode with the ceremony seed "
+                f"configured requires {path_var}")
+        if anchor_init:
+            raise _config(
+                "verifier_misconfigured",
+                f"production mode refuses {init_var}; anchor "
+                "ceremonies run outside production")
+    if anchor_path and not Path(anchor_path).is_absolute():
+        raise _config(
+            "verifier_misconfigured",
+            f"the {journal_label} anchor path must be absolute")
+    if anchor_init and not anchor_path:
+        raise _config(
+            "verifier_misconfigured",
+            f"{init_var} requires {path_var}")
+    if anchor_path:
+        home_resolved = Path(home).resolve()
+        anchor_resolved = Path(anchor_path).resolve()
+        if anchor_resolved == home_resolved \
+                or home_resolved in anchor_resolved.parents:
+            raise _config(
+                "verifier_misconfigured",
+                f"the {journal_label} anchor must live outside "
+                "the verifier home")
+        for other_name, other_path in other_anchors:
+            if other_path and anchor_resolved \
+                    == Path(other_path).resolve():
+                raise _config(
+                    "verifier_misconfigured",
+                    f"the {journal_label} anchor path must be "
+                    f"distinct from {other_name}")
+        try:
+            journal = journal_factory(home)
+        except Exception:
+            raise _config(
+                "ledger_failed",
+                f"the {journal_label} journal could not be "
+                "opened for anchor verification")
+        try:
+            reasons = verify_anchor(journal, anchor_path, kind=kind)
+        except AnchorError:
+            raise _config(
+                "anchor_refused",
+                f"the {journal_label} anchor path is invalid "
+                "for this journal")
+        if reasons == ("anchor_missing",) and anchor_init:
+            try:
+                initialise_anchor(journal, anchor_path, kind=kind,
+                                  recorded_at=_now())
+            except AnchorError:
+                raise _config(
+                    "anchor_refused",
+                    f"{journal_label} anchor bootstrap failed")
+            reasons = ()
+        if reasons:
+            raise _config("anchor_refused", ",".join(reasons))
+    return (anchor_path or None), anchor_init
 
 
 def _load_config() -> _Config:
@@ -1066,6 +1212,38 @@ def _load_config() -> _Config:
         if consumption_reasons:
             raise _config("anchor_refused",
                           ",".join(consumption_reasons))
+    ceremony_issuance_anchor_path, \
+        ceremony_issuance_anchor_init = \
+        _load_ceremony_journal_anchor(
+            env, path_var="AION_CEREMONY_ISSUANCE_ANCHOR_PATH",
+            init_var="AION_CEREMONY_ISSUANCE_ANCHOR_INIT",
+            kind="ceremony-issuance",
+            journal_factory=CeremonyAuthorisationLedger,
+            journal_label="ceremony issuance",
+            home=home, deployment_mode=deployment_mode,
+            ceremony_seed_raw=ceremony_seed_raw,
+            other_anchors=(
+                ("AION_ANCHOR_PATH", anchor_path),
+                ("AION_BUDGETS_ANCHOR_PATH", budgets_anchor_path),
+                ("AION_CEREMONY_CONSUMPTION_ANCHOR_PATH",
+                 ceremony_consumption_anchor_path)))
+    ceremony_supersession_anchor_path, \
+        ceremony_supersession_anchor_init = \
+        _load_ceremony_journal_anchor(
+            env, path_var="AION_CEREMONY_SUPERSESSION_ANCHOR_PATH",
+            init_var="AION_CEREMONY_SUPERSESSION_ANCHOR_INIT",
+            kind="ceremony-supersession",
+            journal_factory=CeremonySupersessionLedger,
+            journal_label="ceremony supersession",
+            home=home, deployment_mode=deployment_mode,
+            ceremony_seed_raw=ceremony_seed_raw,
+            other_anchors=(
+                ("AION_ANCHOR_PATH", anchor_path),
+                ("AION_BUDGETS_ANCHOR_PATH", budgets_anchor_path),
+                ("AION_CEREMONY_CONSUMPTION_ANCHOR_PATH",
+                 ceremony_consumption_anchor_path),
+                ("AION_CEREMONY_ISSUANCE_ANCHOR_PATH",
+                 ceremony_issuance_anchor_path or "")))
     return _Config(signing_key, signer_id, actor, registry_dir, ttl,
                    purpose, home,
                    proposal_budget=proposal_budget,
@@ -1078,6 +1256,14 @@ def _load_config() -> _Config:
                        ceremony_consumption_anchor_path or None),
                    ceremony_consumption_anchor_init=(
                        ceremony_consumption_anchor_init),
+                   ceremony_issuance_anchor_path=(
+                       ceremony_issuance_anchor_path),
+                   ceremony_issuance_anchor_init=(
+                       ceremony_issuance_anchor_init),
+                   ceremony_supersession_anchor_path=(
+                       ceremony_supersession_anchor_path),
+                   ceremony_supersession_anchor_init=(
+                       ceremony_supersession_anchor_init),
                    ceremony_operators=ceremony_operators,
                    ceremony_evidence_dir=ceremony_evidence_dir,
                    ceremony_signing_key=ceremony_signing_key,
@@ -1125,6 +1311,56 @@ def _update_ceremony_consumption_anchor(config: _Config) -> None:
             "journal but its anchor update failed; the "
             "authorisation stays burned and no success is "
             "returned — recovery is a new ceremony")
+
+
+
+def _update_ceremony_issuance_anchor(config: _Config) -> None:
+    """Advance the ceremony issuance journal's external anchor
+    after an issuance append (cycle 27). A no-op when the anchor
+    is unconfigured (research mode — no rollback claim is made
+    there). A failed update is ledger_failed: the pair stays
+    burned in the issuance journal, and the verifier withholds
+    the envelope rather than returning a success whose rollback
+    protection was never pinned."""
+    if not config.ceremony_issuance_anchor_path:
+        return
+    try:
+        update_anchor(
+            CeremonyAuthorisationLedger(config.home),
+            config.ceremony_issuance_anchor_path,
+            kind="ceremony-issuance", recorded_at=_now())
+    except AnchorError:
+        raise _config(
+            "ledger_failed",
+            "the ceremony authorisation was committed in the "
+            "issuance journal but its anchor update failed; the "
+            "(ceremony_id, evidence_hash) pair stays burned and "
+            "the envelope is withheld — retry under a new "
+            "ceremony_id with a new evidence bundle")
+
+
+def _update_ceremony_supersession_anchor(config: _Config) -> None:
+    """Advance the ceremony supersession journal's external
+    anchor after a decision append (cycle 27). A no-op when the
+    anchor is unconfigured (research mode — no rollback claim
+    is made there). A failed update is ledger_failed: the
+    decision stands in the supersession journal, and no
+    receipt is returned."""
+    if not config.ceremony_supersession_anchor_path:
+        return
+    try:
+        update_anchor(
+            CeremonySupersessionLedger(config.home),
+            config.ceremony_supersession_anchor_path,
+            kind="ceremony-supersession", recorded_at=_now())
+    except AnchorError:
+        raise _config(
+            "ledger_failed",
+            "the supersession decision was committed in the "
+            "supersession journal but its anchor update failed; "
+            "the decision stands and no receipt is returned — "
+            "consumption may proceed against the journaled "
+            "decision")
 
 
 def _read_budgets_anchor(path):
@@ -2758,9 +2994,10 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
     _retain_ceremony_evidence(config, signed.authorisation_id,
                               evidence_bytes)
     # (8) Commit: ceremony journal FIRST (the commit point),
-    # then the signing ledger, then the anchor. Any failure
-    # after the first append is ledger_failed and the pair
-    # stays burned — see the docstring.
+    # then the issuance anchor (cycle 27), then the signing
+    # ledger, then the signing anchor. Any failure after the
+    # first append is ledger_failed and the pair stays burned
+    # — see the docstring.
     recorded_at = _now()
     try:
         CeremonyAuthorisationLedger(
@@ -2772,6 +3009,14 @@ def _mode_ceremony_authorise(config: _Config, body: dict) -> dict:
             "ledger_failed",
             "the ceremony authorisation could not be ledgered; "
             "refusing to return it")
+    # Cycle 27: the issuance anchor advances BEFORE the
+    # signing-ledger mirror, mirroring the cycle-22 consumption
+    # commit order — an issuance whose mirror write failed
+    # followed by a verifier-home rollback leaves the external
+    # issuance anchor ahead of the rolled-back journal, so the
+    # replay is refused at startup (anchor_refused) instead of
+    # issuing a second authorisation for the same evidence.
+    _update_ceremony_issuance_anchor(config)
     try:
         SigningLedger(config.home).append_ceremony_authorisation(
             signed, recorded_at=recorded_at)
@@ -2894,7 +3139,9 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
     the verifier copies the abandoned binding from its own
     head entry and records the verified approval's id,
     payload hash and approver key id in the decision entry;
-    (10) signing-ledger mirror (kind "supersede",
+    (10) supersession-anchor update (cycle 27; failure is
+    ledger_failed, the decision stands, no receipt);
+    (11) signing-ledger mirror (kind "supersede",
     format "ceremony-supersession") plus the signing-anchor
     update. A mirror failure after the commit is
     ledger_failed and the decision STANDS — it is not rolled
@@ -3116,9 +3363,15 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
         raise _config(
             "ledger_failed",
             "the supersession decision could not be committed")
-    # (10) Signing-ledger mirror + signing anchor. A mirror
-    # failure after the commit is ledger_failed; the decision
-    # stands and no receipt is returned.
+    # (10) Supersession anchor (cycle 27), then the
+    # signing-ledger mirror + signing anchor. The anchor
+    # advances BEFORE the mirror, mirroring the cycle-22
+    # consumption commit order, so a decision whose mirror
+    # write failed followed by a rollback of this journal file
+    # is refused at startup instead of silently vanishing. A
+    # mirror failure after the commit is ledger_failed; the
+    # decision stands and no receipt is returned.
+    _update_ceremony_supersession_anchor(config)
     try:
         SigningLedger(config.home).append_ceremony_supersession(
             decision_entry, signed=signed,
