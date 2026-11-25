@@ -110,6 +110,7 @@ class CountingClient:
         self.supersede_calls = 0
         self.consume_calls = 0
         self.authorise_calls = 0
+        self.consumed_authorisation_ids = []
         self.approvals_presented = []
 
     def ceremony_authorise(self, **kw):
@@ -132,6 +133,8 @@ class CountingClient:
 
         def _consume(authorisation):
             self.consume_calls += 1
+            self.consumed_authorisation_ids.append(
+                getattr(authorisation, "authorisation_id", None))
             return real_consumer(authorisation)
 
         return _consume
@@ -204,7 +207,8 @@ class SupersedeAdopterTests(CrashFixture):
         self.inbox = self.base / "approval-inbox"
         self.inbox.mkdir()
 
-    def make_adopter(self, client, approval_path=None):
+    def make_adopter(self, client, approval_path=None,
+                     wired=False):
         config = PinAdopterConfig(
             state_path=self.loop.state_path,
             calibration_path=self.calibration_path,
@@ -215,9 +219,31 @@ class SupersedeAdopterTests(CrashFixture):
             expected_verifier_signer_id=_crash.SIGNER,
             evidence_dir=self.evidence_dir,
             supersession_approval_path=approval_path)
+        kw = {}
+        if wired:
+            from trust.history_reconciliation import (
+                consumption_entries_provider_from_home,
+                supersession_entries_provider_from_home)
+            home = self.home / "ledger"
+            calls = self.provider_calls = {
+                "consumption": 0, "supersession": 0}
+            raw_c = consumption_entries_provider_from_home(home)
+            raw_s = supersession_entries_provider_from_home(home)
+
+            def _counting_c():
+                calls["consumption"] += 1
+                return raw_c()
+
+            def _counting_s():
+                calls["supersession"] += 1
+                return raw_s()
+
+            kw = dict(
+                consumption_entries_provider=_counting_c,
+                supersession_entries_provider=_counting_s)
         return PinAdopter(client=client, store=self.store,
                           signing_key=SNAP_KEY, config=config,
-                          authorisation_public_key=self.pub)
+                          authorisation_public_key=self.pub, **kw)
 
     def supersession_entries(self):
         return CeremonySupersessionLedger(
@@ -481,6 +507,111 @@ class SupersedeAdopterTests(CrashFixture):
         self.assertEqual(len(self.consumption_entries()), 5)
         pin, _history = self.read_store()
         self.assertEqual(pin["cycle_seq"], 5)
+
+    def test_wired_resume_repends_after_head_moves_ahead(self):
+        # Cycle 30: pending is resume-only in the wired
+        # composition. Fresh wired shapes refuse (beyond-head)
+        # or recover (at-head) — pinned in test_trust_runner.
+        # This pins the other half: a retained pending, in a
+        # reconciliation-clean state, RE-PENDS on a wired
+        # no-approval resume attempt. Single (non-cap) burn
+        # seeds the pend; a journaled decision excuses the
+        # abandoned head entry via its candidate pair; the
+        # head then moves strictly ahead of the candidate
+        # (seq 7), an entry reconciliation never flags.
+        self.genesis()                       # pin @1, head @1
+        self.scan_items(2)
+        for _ in range(2):
+            self.bare_cycle()
+        self.burn_once()                     # one burn, pair lost
+        self.assertEqual(
+            self.consumption_entries()[-1]["new_cycle_seq"], 3)
+        self.drive_to_next_sequence()        # state @5
+        adopter = self.make_adopter(
+            CountingClient(self.client), approval_path=self.inbox)
+        with self.assertRaises(
+                PinSupersessionPendingApproval) as cm:
+            adopter.snapshot_and_adopt()
+        pending = cm.exception
+        self.assertEqual(pending.candidate_seq, 5)
+        self.assertEqual(len(self.consumption_entries()), 2)
+        # Seed the decided state (F1 precedent): real decision
+        # for the retained envelope + supersede_decided line,
+        # approval spent.
+        artefact = self.mint_approval_into_inbox(adopter)
+        self.client2.ceremony_supersede(
+            OPERATOR, pending.envelope_dict, artefact)
+        self.assertEqual(len(self.supersession_entries()), 1)
+        adopter._append_journal({
+            "ceremony_id": pending.ceremony_id,
+            "authorisation_id": pending.authorisation_id,
+            "candidate_seq": pending.candidate_seq,
+            "candidate_hash": pending.candidate_hash,
+            "old_cycle_seq": pending.old_cycle_seq,
+            "old_payload_hash": pending.old_payload_hash,
+            "phase": "supersede_decided"})
+        for path in self.inbox.glob("*.json"):
+            path.unlink()
+        # Move the head strictly ahead of the candidate (@7).
+        head = self.consumption_entries()[-1]
+        bundle = "head-ahead test evidence\n"
+        (self.evidence_dir / "head-ahead").write_text(
+            bundle, encoding="utf-8")
+        envelope = self.client.ceremony_authorise(
+            operator_id=OPERATOR, ceremony_id="head-ahead",
+            reason="chain_gap_recovery",
+            old_pin={"cycle_seq": head["new_cycle_seq"],
+                     "payload_hash": head["new_payload_hash"]},
+            candidate={"cycle_seq": 7, "payload_hash": "d" * 64,
+                       "signer_id": SNAP_SIGNER,
+                       "key_id": SNAP_KEY.key_id},
+            evidence_hash=hashlib.sha256(
+                bundle.encode("utf-8")).hexdigest(),
+            evidence_ref="head-ahead")
+        self.client.ceremony_consume(envelope)
+        self.assertEqual(len(self.consumption_entries()), 3)
+        self.assertEqual(
+            self.consumption_entries()[-1]["new_cycle_seq"], 7)
+        # The pin: one WIRED attempt, no approval anywhere,
+        # re-pends for the SAME retained envelope.
+        report_before = wired_report = None
+        counting = CountingClient(self.client2)
+        wired = self.make_adopter(counting,
+                                  approval_path=self.inbox,
+                                  wired=True)
+        report_before = wired.pending_report_path.read_bytes()
+        with self.assertRaises(
+                PinSupersessionPendingApproval) as cm2:
+            wired.snapshot_and_adopt()
+        repend = cm2.exception
+        self.assertEqual(repend.candidate_seq, 5)
+        self.assertEqual(repend.authorisation_id,
+                         pending.authorisation_id)
+        self.assertEqual(counting.authorise_calls, 0)
+        self.assertEqual(counting.supersede_calls, 0)
+        self.assertEqual(counting.consume_calls, 1)
+        # The single consume presented the RETAINED envelope,
+        # not a fresh one (cycle-30 fix round, R5 F2).
+        self.assertEqual(counting.consumed_authorisation_ids,
+                         [pending.authorisation_id])
+        # Reconciliation actually ran in the wired attempt:
+        # both providers were consulted (R5 F1). With
+        # providers=None the same outcome signature is
+        # reachable unwired, so this is the wired-specific pin.
+        self.assertGreaterEqual(
+            self.provider_calls["consumption"], 1)
+        self.assertGreaterEqual(
+            self.provider_calls["supersession"], 1)
+        self.assertEqual(len(self.consumption_entries()), 3)
+        self.assertEqual(len(self.supersession_entries()), 1)
+        # This re-raise branch does not rewrite the report;
+        # it only reports its presence. Pin exactly that:
+        # file present, bytes unchanged (R5 F3).
+        self.assertTrue(wired.pending_report_path.is_file())
+        self.assertEqual(
+            wired.pending_report_path.read_bytes(), report_before)
+        pin, _history = self.read_store()
+        self.assertEqual(pin["cycle_seq"], 1)
 
     def _write_approval_dict(self, artefact):
         (self.inbox / f"{artefact['approval_id']}.json").write_text(
