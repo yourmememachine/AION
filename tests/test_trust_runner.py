@@ -281,14 +281,16 @@ class RunnerTests(unittest.TestCase):
         # adopt step now refuses pin_store_history_incomplete
         # (a SigningError — runner exit 6, step_refused) BEFORE
         # any ceremony, so this shape no longer reaches the
-        # supersession-pending stop. The pending flow remains
-        # reachable for a candidate AT the head burn's own
-        # sequence: the at-sequence excuse is unit-pinned by
-        # cycle-28 test_09/test_10 and the pending flow itself
-        # is covered by the supersession suites on the unwired
-        # adopter — a wired at-sequence pending composition
-        # test is a named follow-up (re-review seat, fix
-        # round), not existing coverage. A beyond-head genuine
+        # supersession-pending stop. CORRECTED in cycle 29:
+        # an at-sequence candidate does NOT reach the pending
+        # stop in the wired composition — after a single head
+        # burn it is the burn's exact pair and LANDS as a
+        # burned_unadopted recovery (exit 0), pinned by
+        # test_adopt_step_at_head_burn_sequence_recovers_is_exit_0
+        # below; the at-sequence excuse itself remains
+        # unit-pinned by cycle-28 test_09/test_10 and the
+        # pending flow by the supersession suites on the
+        # unwired adopter. A beyond-head genuine
         # burn is an operator-reconciliation residual, named
         # in internal/BUILD-CYCLE-28.md.
         # Shape: genesis adopt @13; two test-side hookless
@@ -329,6 +331,90 @@ class RunnerTests(unittest.TestCase):
             CeremonySupersessionLedger(
                 self.home.verifier_home).entries(), [])
         self.assertEqual(self.read_pin()["cycle_seq"], 13)
+        self.assert_real_state_untouched()
+
+    def test_adopt_step_at_head_burn_sequence_recovers_is_exit_0(self):
+        # Cycle 29: the wired AT-SEQUENCE attempt, pinned as it
+        # actually behaves. This closes the cycle-28 fix-round
+        # follow-up ("a wired at-sequence pending composition
+        # test") by correcting its premise: the failing-first
+        # probe for this shape expected exit 7
+        # (supersession_pending) and got exit 0 — recorded in
+        # internal/cycle29-work/failing-first.md. An
+        # at-sequence candidate after a single head burn is the
+        # burn's EXACT pair (same seq, same payload hash), so
+        # the head entry is not even relevant to history
+        # reconciliation (relevance at a sequence requires a
+        # different hash) and the known-unadopted head excuse
+        # is never consulted; step (3) re-presents the retained
+        # burned candidate, the attempt classifies
+        # burned_unadopted against a head burn at derived
+        # depth 0 (< cap 2), and the recovery consume LANDS:
+        # exit 0, reanchored, pin moves to the head's own
+        # sequence. No supersession decision is requested and
+        # no pending report is written. Scoped claim: a FRESH
+        # wired attempt in THIS burn shape does not reach the
+        # supersession-pending stop; the sibling's beyond-head
+        # shape is refused by reconciliation first (exit 6)
+        # because its head entry is unaccounted there — that
+        # refusal is shape-specific, not categorical. Whether
+        # any fresh wired shape reaches pending post-cycle-28
+        # is an open follow-up, recorded in
+        # internal/BUILD-CYCLE-29.md (the resume path re-pends
+        # without a fresh verifier refusal and is covered by
+        # the unwired supersession suites). Claim correction
+        # to cycle 28 recorded in internal/BUILD-CYCLE-29.md.
+        proc = self.run_runner([{"adopt": True}])
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertEqual(self.read_pin()["cycle_seq"], 13)
+        for expected_seq in (14, 15):
+            loop = CoreLoop(self.state_dir)
+            entry = loop.run_one_cycle(
+                CODERS, REVIEWERS, "reconciled", True, DELTA)
+            self.assertEqual(entry["cycle_id"], expected_seq)
+        proc = self.run_runner_holding_pin_lock([{"adopt": True}])
+        self.assertEqual(proc.returncode, 4, proc.stderr.decode())
+        self.assertEqual(self.read_pin()["cycle_seq"], 13)
+        self.assertEqual(self.consumption_count(), 2)
+        head = CeremonyConsumptionLedger(
+            self.home.verifier_home).entries()[-1]
+        self.assertEqual(head["new_cycle_seq"], 15)
+        self.assertEqual(head["old_cycle_seq"], 13)
+
+        proc = self.run_runner([{"adopt": True}])
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        lines = self.parse_lines(proc)
+        self.assertEqual(len(lines), 1)
+        line = lines[0]
+        self.assertEqual(line["kind"], "adopt")
+        self.assertEqual(line["outcome"], "reanchored")
+        self.assertEqual(line["pin_seq"], 15)
+        self.assertEqual(line["record_reason"], "burned_unadopted")
+        self.assertEqual(line["pin_hash"], head["new_payload_hash"])
+        # The recovery consume landed exactly once; no
+        # supersession decision was requested or journaled,
+        # and no pending report exists.
+        self.assertEqual(self.consumption_count(), 3)
+        recovery = CeremonyConsumptionLedger(
+            self.home.verifier_home).entries()[-1]
+        self.assertEqual(recovery["consumption_kind"], "recovery")
+        self.assertEqual(recovery["recovery_depth"], 1)
+        self.assertEqual(recovery["recovery_of"],
+                         head["authorisation_id"])
+        self.assertEqual(recovery["old_cycle_seq"], 13)
+        self.assertEqual(recovery["new_cycle_seq"], 15)
+        self.assertEqual(
+            CeremonySupersessionLedger(
+                self.home.verifier_home).entries(), [])
+        self.assertFalse(
+            (self.pin_dir / "pending-supersession.json").exists())
+        store = PinStore(self.pin_dir, state_dir=self.state_dir)
+        pin, history = store.read_all(
+            signing_key=self.home.snapshot_key)
+        self.assertEqual(pin["cycle_seq"], 15)
+        self.assertEqual(len(history), 2)
+        self.assertEqual(
+            CoreLoop(self.state_dir).state["cycle_seq"], 15)
         self.assert_real_state_untouched()
 
     def test_idle_cycle_step_is_exit_0(self):

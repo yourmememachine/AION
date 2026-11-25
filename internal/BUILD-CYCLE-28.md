@@ -172,3 +172,9 @@ pin-store head anchoring, lost-advance detection, a
 reconciliation repair procedure for wholesale pin-directory
 loss, operator-authentication-channel, and the cycles 17+18
 recovery-contract document.
+
+---
+
+## Correction pointer (cycle 29)
+
+The claim in this record that an at-sequence candidate "can still enter the supersession-pending flow" was tested in cycle 29 and is NOT composition-true for the wired exact-pair shape: it lands as a burned_unadopted recovery (exit 0). See internal/BUILD-CYCLE-29.md. This pointer is appended, not a rewrite; the original text stands as the historical record.

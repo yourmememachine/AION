@@ -193,3 +193,9 @@ build_pin_adopter outside tests:
 Conclusion: every production adoption entry point wires the
 providers; no unwired production path exists, and no
 additional wiring change was needed in this round.
+
+---
+
+## Correction pointer (cycle 29)
+
+The statement that the supersession-pending flow remains reachable for a candidate AT the head burn own sequence was tested in cycle 29: the wired exact-pair at-sequence attempt lands as a burned_unadopted recovery (exit 0), it does not reach pending. See internal/BUILD-CYCLE-29.md. Appended pointer, not a rewrite.
