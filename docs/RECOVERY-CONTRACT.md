@@ -82,16 +82,26 @@ Recovery returns a list except in two journal-level cases:
    anchor is re-verified after settlement. Only NEW evidence counts;
    identical repeats are suppressed. A new park reason raises
    `JournalIntegrityError` carrying the completed settlements in
-   `.outcomes` and any accompanying EXCEPTION-path load failures in
-   `.anchor_errors` (never in `.reasons`). A new exception-path load
-   failure alone raises plain `AnchorError`, also carrying
+   `.outcomes` and any accompanying NEW load failures — exception-path
+   or returned — in `.anchor_errors` (never in `.reasons`). A new
+   load failure alone — exception-path or a returned operator
+   reason — raises plain `AnchorError`, also carrying
    `.outcomes`. Settlements already journaled stand in both cases.
-   **Gap:** `verify_anchor` RETURNS `anchor_malformed` /
-   `anchor_missing*` as values rather than raising, and the
-   re-verification loops collect only returned park reasons — so a
-   mid-recovery swap to a malformed or missing anchor is silently
-   ignored. Only exception-path failures and returned park reasons
-   are detected.
+   **Closed (cycle 32):** `verify_anchor` RETURNS
+   `anchor_malformed` / `anchor_missing*` as values rather than
+   raising; the re-verification loops now collect returned
+   non-park reasons too, deduped per anchor against that
+   anchor's initial verdict. A mid-recovery swap to a malformed
+   or missing anchor therefore surfaces on the same terms as a
+   new exception-path failure: plain `AnchorError` when it is the
+   only NEW change, or in `.anchor_errors` (labelled
+   `"<source>: <bare reason>"`) when a NEW park reason
+   accompanies it — a park reason already present in the initial
+   verdict does not route it there. Any returned non-park string
+   counts (not only the three named reasons), matching the
+   pre-settlement classification, and repeated labels within one
+   re-verification are deduped. Only identical repeats of that
+   anchor's initial verdict are suppressed.
 
 Consequence, qualified: `recover()` is not type-idempotent for
 tx-anchor evidence — the same tx park evidence parks on run 1 (live
@@ -159,7 +169,7 @@ caller duty:
   `update_anchor(..., kind="ship-tx")`; until then, rollback to the
   anchored prefix erases the settlements undetectably (see Limits).
 - Verification command for this contract's main pin file:
-  `python3 -m unittest tests.test_trust_shiptx_anchoring` (58
+  `python3 -m unittest tests.test_trust_shiptx_anchoring` (68
   tests). Cycle-23 write-half behaviour is pinned separately in
   `tests/test_cycle23_ship_anchors.py`.
 
@@ -227,8 +237,9 @@ caller duty:
 - Wire a production recovery caller that passes `tx_anchor_path`.
 - Choose a non-`[]` surface for carrier-less evidence, or record a
   decision to keep `[]`.
-- Post-settlement re-verification: surface returned (non-exception)
-  malformed/missing anchor failures instead of discarding them.
 - Pin-store head anchoring; reconciliation repair for wholesale
   pin-directory loss; operator-authentication-channel;
   concurrent-actor interleaving (outside the sequential model).
+- Same-file re-check at post-settlement re-verification: the
+  same-file diagnosis is computed once, pre-settlement (cycle 32
+  forced-dissent item, applies to all re-verification channels).

@@ -994,5 +994,216 @@ class JournalIntegrityErrorTests(TxAnchorFixture):
             [COMMITTED])
 
 
+    # -- cycle 32: post-settlement RETURNED non-park reasons -----
+
+    def _fake_seq(self, seq_by_kind):
+        seen = {}
+
+        def fake_verify(journal, path, *, kind, **kw):
+            seen[kind] = seen.get(kind, 0) + 1
+            seq = seq_by_kind[kind]
+            result = seq[min(seen[kind], len(seq)) - 1]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        return fake_verify
+
+    def test_post_returned_malformed_only_raises_plain(self):
+        from unittest import mock
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        fake = self._fake_seq({"ship-tx": [(), ("anchor_malformed",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    tx_anchor_path=self.tx_anchor_path())
+        from trust.anchoring import JournalIntegrityError
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertNotIsInstance(ctx.exception, JournalIntegrityError)
+        self.assertIn("ship-tx: anchor_malformed", str(ctx.exception))
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+        self.assertEqual(
+            [o["to_state"] for o in ctx.exception.outcomes],
+            [COMMITTED])
+
+    def test_post_returned_missing_established_raises_plain(self):
+        from unittest import mock
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        fake = self._fake_seq(
+            {"ship-tx": [(), ("anchor_missing_established_ledger",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertIn("anchor_missing_established_ledger",
+                      str(ctx.exception))
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+
+    def test_post_returned_mixed_park_and_malformed_is_jie(self):
+        from unittest import mock
+        from trust.anchoring import JournalIntegrityError
+        tx_id = self.post_record_tx()
+        initialise_anchor(self.ledger, self.ship_anchor_path(),
+                          kind="ship", recorded_at=NOW,
+                          allow_nonempty_ceremony=True)
+        self.init_tx_anchor()
+        fake = self._fake_seq({
+            "ship": [(), ("anchor_malformed",)],
+            "ship-tx": [(), ("anchor_head_not_in_chain",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            with self.assertRaises(JournalIntegrityError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    anchor_path=self.ship_anchor_path(),
+                    tx_anchor_path=self.tx_anchor_path())
+        exc = ctx.exception
+        self.assertEqual(exc.reasons, ("anchor_head_not_in_chain",))
+        self.assertEqual(exc.anchor_sources,
+                         ("ship-tx: anchor_head_not_in_chain",))
+        self.assertEqual(exc.anchor_errors,
+                         ("ship: anchor_malformed",))
+        self.assertEqual([o["to_state"] for o in exc.outcomes],
+                         [COMMITTED])
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+
+    def test_post_returned_same_reason_pre_and_post_no_raise(self):
+        from unittest import mock
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        fake = self._fake_seq(
+            {"ship-tx": [("anchor_malformed",), ("anchor_malformed",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            outcomes = self.journal.recover(
+                self.ledger, self.loop3(), recorded_at=NOW,
+                tx_anchor_path=self.tx_anchor_path())
+        self.assertEqual(len(outcomes), 1)
+        self.assertIn("anchor_malformed", outcomes[0]["error"])
+        self.assertEqual(self.journal.state(tx_id),
+                         POST_RECORD_VERIFIED)
+
+    def test_post_returned_reason_on_other_anchor_is_new(self):
+        from unittest import mock
+        self.post_record_tx()
+        initialise_anchor(self.ledger, self.ship_anchor_path(),
+                          kind="ship", recorded_at=NOW,
+                          allow_nonempty_ceremony=True)
+        self.init_tx_anchor()
+        fake = self._fake_seq({
+            "ship": [("anchor_malformed",), ("anchor_malformed",)],
+            "ship-tx": [(), ("anchor_malformed",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    anchor_path=self.ship_anchor_path(),
+                    tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertIn("ship-tx: anchor_malformed", str(ctx.exception))
+
+    def test_post_returned_unknown_reason_is_operator_error(self):
+        from unittest import mock
+        self.post_record_tx()
+        self.init_tx_anchor()
+        fake = self._fake_seq(
+            {"ship-tx": [(), ("some_future_reason",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertIn("ship-tx: some_future_reason", str(ctx.exception))
+
+    def test_post_returned_error_with_no_settlements_raises(self):
+        from unittest import mock
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        self.journal.transition(tx_id, COMMITTED, NOW)
+        fake = self._fake_seq({"ship-tx": [(), ("anchor_malformed",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertEqual(ctx.exception.outcomes, ())
+
+    def test_pre_park_plus_post_returned_error_stays_plain(self):
+        from unittest import mock
+        from trust.anchoring import JournalIntegrityError
+        self.post_record_tx()
+        self.init_tx_anchor()
+        fake = self._fake_seq({
+            "ship-tx": [("anchor_head_not_in_chain",),
+                        ("anchor_malformed",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertNotIsInstance(ctx.exception, JournalIntegrityError)
+        self.assertEqual(
+            [o["to_state"] for o in ctx.exception.outcomes],
+            [ANOMALY])
+
+    def test_post_returned_and_exception_errors_both_surface(self):
+        from unittest import mock
+        self.post_record_tx()
+        initialise_anchor(self.ledger, self.ship_anchor_path(),
+                          kind="ship", recorded_at=NOW,
+                          allow_nonempty_ceremony=True)
+        self.init_tx_anchor()
+        fake = self._fake_seq({
+            "ship": [(), AnchorError("boom")],
+            "ship-tx": [(), ("anchor_malformed",)]})
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=fake):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    anchor_path=self.ship_anchor_path(),
+                    tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertIn("ship: anchor_error:boom", str(ctx.exception))
+        self.assertIn("ship-tx: anchor_malformed", str(ctx.exception))
+
+    def test_post_real_anchor_corrupted_mid_recovery_raises(self):
+        from unittest import mock
+        tx_id = self.post_record_tx()
+        self.init_tx_anchor()
+        real_verify = verify_anchor
+        calls = {"n": 0}
+
+        def corrupting_verify(journal, path, *, kind, **kw):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                Path(path).write_bytes(b"not json at all")
+            return real_verify(journal, path, kind=kind, **kw)
+
+        with mock.patch("trust.anchoring.verify_anchor",
+                        side_effect=corrupting_verify):
+            with self.assertRaises(AnchorError) as ctx:
+                self.journal.recover(
+                    self.ledger, self.loop3(), recorded_at=NOW,
+                    tx_anchor_path=self.tx_anchor_path())
+        self.assertIs(type(ctx.exception), AnchorError)
+        self.assertIn("anchor_malformed", str(ctx.exception))
+        self.assertEqual(self.journal.state(tx_id), COMMITTED)
+
+
 if __name__ == "__main__":
     unittest.main()

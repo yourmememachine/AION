@@ -762,7 +762,13 @@ class ShipTxJournal(HashChainJournal):
         JournalIntegrityError after the run's settlements,
         which stand as journaled evidence and ride on the
         exception as ``outcomes``; a NEW anchor-load failure
-        appearing only then stays plain AnchorError. Recovery never advances either
+        appearing only then stays plain AnchorError — whether
+        it arrives as an exception or as a RETURNED operator
+        reason (``anchor_malformed`` / ``anchor_missing*``,
+        cycle 32: returned reasons are deduped per anchor
+        against that anchor's initial verdict and surfaced the
+        same way, riding in ``anchor_errors`` when a park
+        reason accompanies them). Recovery never advances either
         anchor: transitions it appends leave the tx anchor
         stale-but-valid (it names an older prefix), and the
         caller must call update_anchor(..., kind="ship-tx")
@@ -1001,6 +1007,18 @@ class ShipTxJournal(HashChainJournal):
                         if r in ANCHOR_PARK_REASONS \
                                 and r not in ship_park_reasons:
                             new_park.append((f"ship: {r}", r))
+                        elif r not in ANCHOR_PARK_REASONS \
+                                and r not in ship_reasons:
+                            # A RETURNED operator-error reason
+                            # (cycle 32): verify_anchor returns
+                            # anchor_malformed / anchor_missing*
+                            # as values, not raises, and the
+                            # pre-cycle-32 loop silently discarded
+                            # them — a mid-recovery swap to a
+                            # malformed or missing anchor passed
+                            # unreported. Surface it exactly like
+                            # a new exception-path failure.
+                            new_park.append((f"ship: {r}", None))
                 except Exception as exc:
                     # An exception identical to the one the
                     # initial verification already classified is
@@ -1015,10 +1033,16 @@ class ShipTxJournal(HashChainJournal):
                         if r in ANCHOR_PARK_REASONS \
                                 and r not in tx_park_reasons:
                             new_park.append((f"ship-tx: {r}", r))
+                        elif r not in ANCHOR_PARK_REASONS \
+                                and r not in tx_reasons:
+                            new_park.append((f"ship-tx: {r}", None))
                 except Exception as exc:
                     if f"anchor_error:{exc}" not in tx_reasons:
                         new_park.append(
                             (f"ship-tx: anchor_error:{exc}", None))
+            # Within-run dedup by label (a returned tuple could
+            # repeat a reason; the exception channel cannot).
+            new_park = list(dict.fromkeys(new_park))
             if new_park:
                 message = (
                     "anchor verification changed during "
