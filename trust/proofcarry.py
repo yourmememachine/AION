@@ -215,9 +215,14 @@ def _expand_whole_tree(root) -> list:
     """Expand the ENTIRE tree at ``root`` to a sorted entry
     list of {path, sha256, size} with repo-relative POSIX
     paths, under the same walk discipline as _expand_scope:
-    skip any directory named __pycache__ and any *.pyc file;
-    refuse (ProofError) on any symlink observed anywhere and
-    on any non-regular file."""
+    skip any directory named __pycache__ (a .pyc file outside
+    __pycache__ is tree content like any other file and IS
+    listed); refuse (ProofError) on any symlink observed
+    anywhere and on any non-regular file. Limits, stated:
+    entries are files only, so adding or removing an EMPTY
+    directory is invisible to this expansion, and entries
+    carry {sha256, size} only, so a mode-only change is
+    invisible here (the module docstring's mode note)."""
     root = Path(root)
     by_path = {}
     if not root.exists():
@@ -235,8 +240,6 @@ def _expand_whole_tree(root) -> list:
         if "__pycache__" in dirnames:
             dirnames.remove("__pycache__")
         for name in sorted(filenames):
-            if name.endswith(".pyc"):
-                continue
             fpath = Path(dirpath) / name
             rel = fpath.relative_to(root).as_posix()
             if "__pycache__" in Path(rel).parts:
@@ -662,6 +665,14 @@ def _run_in_scratch(argv, root, scope_paths, *, mutation=None):
 _HARNESS_CRASH_MARKERS = (
     "ModuleNotFoundError", "ImportError",
     "SyntaxError", "IndentationError",
+    # Fix round 2: a mutation that breaks a harness submodule
+    # at attribute/name level surfaces as one of these, and
+    # counting it as the check "noticing" would accept a
+    # harness break as discrimination. Same documented
+    # conservative tradeoff as the original markers: a
+    # semantic failure whose stderr merely names one of these
+    # is refused as mutation_invalid.
+    "NameError", "AttributeError",
 )
 
 
@@ -736,6 +747,20 @@ def _harness_dependencies(argv, root) -> set:
                 elif node.module:
                     module_paths.append(
                         (node.module.split("."), None))
+                # `from package import submodule`: the imported
+                # names may themselves be submodule files
+                # (package/submodule.py) and belong in the
+                # closure; names that are plain attributes of
+                # the package simply yield no existing candidate
+                # and seed nothing.
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    if module_paths:
+                        base_parts, base_kind = module_paths[-1]
+                        module_paths.append(
+                            (list(base_parts) + [alias.name],
+                             base_kind))
             for parts, kind in module_paths:
                 if kind == "relative":
                     bases = [""]
@@ -1048,6 +1073,21 @@ def record_ship_with_proof(loop, *, base_root, post_root, artefact,
             if reasons:
                 raise ShipRefused(
                     "proof_refused:" + ",".join(reasons), reasons)
+            # W4b: unscoped re-check against the SNAPSHOT.
+            # W2 checked the live trees; an out-of-scope edit
+            # landing between W2 and the snapshot copy would
+            # otherwise enter the snapshot, pass W4 (which
+            # verifies scope_paths only) and ship invisibly
+            # for paths the manifest does not bind.
+            try:
+                snap_unscoped = _unscoped_changes(
+                    base_root, snapshot, artefact["scope_paths"])
+            except ProofError:
+                snap_unscoped = ("unscoped_changes",)
+            if snap_unscoped:
+                raise ShipRefused(
+                    "proof_refused:unscoped_changes",
+                    ("unscoped_changes",))
             # W5: delegate inside the context.
             entry = trust.shipcheck.record_ship(
                 loop, root=snapshot, **record_ship_kwargs)
