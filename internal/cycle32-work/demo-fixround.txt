@@ -1,0 +1,13 @@
+cycle-32 fix-round demo (seat C)
+
+== (a) round-1 demo artefact re-verified from fresh git-archive extractions ==
+artefact change_id='cycle-32-proofcarry-prototype' artefact_hash=347ef7166fd6b58c56f19bf41ce9cffae92114bebc50b996b6827cab29882548
+verify round-1 artefact (base=8e8234f, post=a7e522b, current post-fix checker): REFUSED reasons=('mutation_invalid:cycle32-test-suites-pass',)
+diagnosis (a): the round-1 artefact's invariant 'cycle32-test-suites-pass' mutates by DELETING tests/test_cycle32_proof_ship.py, a suite module its harness tests/cycle32_suite_check.py loads by name (unittest loadTestsFromName -- a dynamic load the static import closure of design 12.4.2 cannot see). Reproduced by hand on the a7e522b tree: with that file deleted the harness run exits 1 with 'ModuleNotFoundError: No module named tests.test_cycle32_proof_ship' and 'ImportError: Failed to import test module' on stderr. Under the fix-round step-8 crash-signature rule (design 12.4.3) that mutated run is a harness crash, not the check noticing a content change, so the current checker refuses mutation_invalid where the round-1 checker accepted. The refusal is the new rules working as designed against a pre-fix artefact; the round-1 artefact is NOT regenerated here (its generator and outputs are another seat's files).
+
+== (b) fix-round artefact for the fix round's change to trust/proofcarry.py ==
+artefact written: /home/hatch/workspace/ai/internal/cycle32-work/demo-fixround-artefact.json change_id=cycle-32-fixround-proofcarry
+base ref: HEAD (git archive); post tree: working tree
+base_tree_hash=a56fbbd4846dc7a4d29e2c5eacec31cd6cffacaeb6b2ddef3c72d80e504172a2 post_tree_hash=4ada1c15352d40fd735a5112af3766858e9550b02767682cebf6113cbd9e80ca artefact_hash=fb50d18e5116938f2dbc948a67812d9120de29754b10b73dfacf1f4eae5fb295
+verify fix-round change (untouched post tree): ACCEPTED reasons=()
+verify tampered post tree (one comment appended to trust/proofcarry.py): REFUSED reasons=('post_tree_mismatch',)

@@ -15,11 +15,15 @@ integration behaviour.
 """
 
 import base64
+import contextlib
 import hashlib
+import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -31,11 +35,13 @@ from signing import (
     sign_attestation,
     sign_gate_decision,
 )
+import trust.proofcarry as proofcarry
 from trust.errors import ShipRefused
 from trust.ledger import ShipLedger
 from trust.manifest import build_manifest
 from trust.proofcarry import build_proof_artefact, record_ship_with_proof
 from trust.release import build_release_record
+from trust.shiptx import ShipTxJournal
 
 KEY = make_signing_key(bytes(range(32, 64)))
 
@@ -196,6 +202,205 @@ class RecordShipWithProofTests(ProofShipFixture):
         self.assertEqual(self.ledger.entries(), [])
         self.assertEqual(self.loop.state["cycle_seq"], seq_before)
         self.assertEqual(self.loop.state["history"], [])
+
+
+class _TamperPostTreeLoop(CoreLoop):
+    """A CoreLoop whose run_one_cycle first tampers with the
+    LIVE post tree, then records normally (design 12.2.3).
+
+    This is the worst moment for the tamper: verification has
+    already accepted the live tree, and the tamper lands while
+    the cycle is being recorded. Against the pre-addendum
+    wrapper (which delegated the live tree) record_ship's
+    post-record re-verification saw the tamper and withheld
+    finalise; against the snapshot composition the tamper
+    cannot reach the shipped tree and the ship finalises."""
+
+    tamper_target = None
+
+    def run_one_cycle(self, *args, **kwargs):
+        Path(self.tamper_target).write_bytes(b"tampered\n")
+        return super().run_one_cycle(*args, **kwargs)
+
+
+class FixRoundShipTests(ProofShipFixture):
+    """Design 12.1.3 / 12.2.3: unscoped-change refusal,
+    artefact-hash binding, and the snapshot composition."""
+
+    @property
+    def bindings_path(self):
+        return self.ledger.journal_dir / "proof-bindings.jsonl"
+
+    def _snapshot_of_ship_state(self):
+        tx_path = self.ledger.journal_dir / "ship-tx.json"
+        return (
+            json.dumps(self.ledger.entries(), sort_keys=True),
+            tx_path.read_bytes() if tx_path.exists() else None,
+            self.loop.state_path.read_bytes(),
+        )
+
+    # -- 12.1.1 / 12.1.3: unscoped changes --------------------
+
+    def test_unscoped_change_refused_before_burn(self):
+        # One file outside scope_paths differs between base
+        # and post (the artefact itself is valid over scope).
+        (self.post_root / "eval" / "gate.py").write_text(
+            "GATE = False\n")
+        before = self._snapshot_of_ship_state()
+        with self.assertRaises(ShipRefused) as ctx:
+            self.record_with_proof()
+        self.assertEqual(ctx.exception.reasons,
+                         ("unscoped_changes",))
+        self.assertEqual(self._snapshot_of_ship_state(), before)
+        self.assertFalse(self.bindings_path.exists())
+
+    def test_unscoped_addition_and_deletion_refused(self):
+        added = self.post_root / "extra.py"
+        added.write_text("EXTRA = 1\n")
+        with self.assertRaises(ShipRefused) as ctx:
+            self.record_with_proof()
+        self.assertEqual(ctx.exception.reasons,
+                         ("unscoped_changes",))
+        added.unlink()
+        (self.post_root / "eval" / "gate.py").unlink()
+        with self.assertRaises(ShipRefused) as ctx:
+            self.record_with_proof()
+        self.assertEqual(ctx.exception.reasons,
+                         ("unscoped_changes",))
+        self.assertEqual(self.ledger.entries(), [])
+        self.assertFalse(self.bindings_path.exists())
+
+    def test_unscoped_pycache_difference_ignored(self):
+        cache = self.post_root / "core" / "__pycache__"
+        cache.mkdir()
+        (cache / "a.cpython-311.pyc").write_bytes(b"\x00\x01\x02")
+        entry = self.record_with_proof()
+        self.assertEqual(entry["cycle_id"], 1)
+        kinds = [e["kind"] for e in self.ledger.entries()]
+        self.assertEqual(kinds, ["burn", "finalise"])
+
+    # -- 12.1.2 / 12.1.3: the proof binding -------------------
+
+    def test_scoped_ship_writes_proof_binding(self):
+        entry = self.record_with_proof()
+        self.assertEqual(entry["proof_artefact_hash"],
+                         self.artefact["artefact_hash"])
+        self.assertEqual(entry["proof_post_tree_hash"],
+                         self.artefact["post_tree_hash"])
+        lines = self.bindings_path.read_text(
+            encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        record = json.loads(lines[0])
+        self.assertEqual(set(record), {
+            "cycle_id", "item_id", "change_id", "manifest_hash",
+            "artefact_hash", "post_tree_hash", "recorded_at"})
+        self.assertEqual(record["cycle_id"], entry["cycle_id"])
+        self.assertEqual(record["item_id"], entry["item_id"])
+        self.assertEqual(record["change_id"],
+                         self.artefact["change_id"])
+        self.assertEqual(record["artefact_hash"],
+                         self.artefact["artefact_hash"])
+        self.assertEqual(record["post_tree_hash"],
+                         self.artefact["post_tree_hash"])
+        self.assertEqual(record["manifest_hash"],
+                         self.manifest.manifest_hash)
+        # The durable carrier is the bindings file, NOT the
+        # persisted loop state: the on-disk history entry for
+        # this cycle carries neither proof key.
+        persisted = json.loads(
+            self.loop.state_path.read_text(encoding="utf-8"))
+        persisted_entry = next(
+            e for e in persisted["history"]
+            if e["cycle_id"] == entry["cycle_id"])
+        self.assertNotIn("proof_artefact_hash", persisted_entry)
+        self.assertNotIn("proof_post_tree_hash", persisted_entry)
+
+    def test_proof_binding_failure_ship_stands(self):
+        with mock.patch.object(
+                proofcarry, "_append_proof_binding",
+                side_effect=OSError("disk full")):
+            with self.assertRaises(ShipRefused) as ctx:
+                self.record_with_proof()
+        self.assertIn(
+            "recorded and the decision finalised, but the "
+            "proof binding failed", str(ctx.exception))
+        self.assertIn("cycle 1", str(ctx.exception))
+        kinds = [e["kind"] for e in self.ledger.entries()]
+        self.assertEqual(kinds, ["burn", "finalise"])
+        self.assertEqual(self.loop.state["cycle_seq"], 1)
+        self.assertEqual(len(self.loop.state["history"]), 1)
+
+    # -- 12.2: snapshot composition ---------------------------
+
+    def test_live_tamper_during_recording_is_harmless(self):
+        loop = _TamperPostTreeLoop(self.loop.state_dir)
+        loop.tamper_target = self.post_root / "core" / "a.py"
+        entry = self.record_with_proof(loop=loop)
+        self.assertEqual(entry["cycle_id"], 1)
+        kinds = [e["kind"] for e in self.ledger.entries()]
+        self.assertEqual(kinds, ["burn", "finalise"])
+        tx_entries = ShipTxJournal(self.ledger.journal_dir).entries()
+        self.assertEqual(tx_entries[-1]["to_state"], "COMMITTED")
+        # The tamper really landed on the LIVE tree (the test
+        # is not vacuous): its bytes differ from what the
+        # shipped manifest recorded for that path.
+        live_bytes = (self.post_root / "core" / "a.py").read_bytes()
+        self.assertEqual(live_bytes, b"tampered\n")
+        manifest_entry = next(
+            f for f in self.manifest.files
+            if f["path"] == "core/a.py")
+        self.assertNotEqual(
+            hashlib.sha256(live_bytes).hexdigest(),
+            manifest_entry["sha256"])
+        record = json.loads(self.bindings_path.read_text(
+            encoding="utf-8").splitlines()[0])
+        self.assertEqual(record["post_tree_hash"],
+                         self.artefact["post_tree_hash"])
+
+    def test_pre_call_tamper_refuses_before_burn(self):
+        (self.post_root / "core" / "a.py").write_text("A = 3\n")
+        with self.assertRaises(ShipRefused) as ctx:
+            self.record_with_proof()
+        self.assertIn("post_tree_mismatch", ctx.exception.reasons)
+        self.assertEqual(self.ledger.entries(), [])
+        self.assertFalse(self.bindings_path.exists())
+
+    def test_snapshot_removed_after_ship_and_after_refusal(self):
+        recorded = []
+        original = proofcarry._snapshot_tree
+
+        @contextlib.contextmanager
+        def recording_snapshot(root):
+            with original(root) as snapshot:
+                recorded.append(snapshot)
+                yield snapshot
+
+        with mock.patch.object(proofcarry, "_snapshot_tree",
+                               recording_snapshot):
+            with mock.patch("trust.shipcheck.record_ship",
+                            side_effect=ShipRefused("delegate boom")):
+                with self.assertRaises(ShipRefused):
+                    self.record_with_proof()
+            self.assertEqual(len(recorded), 1)
+            self.assertFalse(recorded[0].exists())
+            entry = self.record_with_proof()
+        self.assertEqual(entry["cycle_id"], 1)
+        self.assertEqual(len(recorded), 2)
+        self.assertFalse(recorded[1].exists())
+
+    def test_manifest_built_before_live_change_refuses(self):
+        # Flip ONLY the executable bit of a scoped file after
+        # the manifest and artefact were built: proofcarry
+        # does not bind mode (12.5), so W1/W4 pass, but the
+        # snapshot carries the flipped bit and check_ship's
+        # manifest comparison refuses inside record_ship,
+        # pre-burn (the 12.2.1 residual, fail-closed).
+        target = self.post_root / "core" / "a.py"
+        os.chmod(target, os.stat(target).st_mode | 0o111)
+        with self.assertRaises(ShipRefused):
+            self.record_with_proof()
+        self.assertEqual(self.ledger.entries(), [])
+        self.assertFalse(self.bindings_path.exists())
 
 
 if __name__ == "__main__":

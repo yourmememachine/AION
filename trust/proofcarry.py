@@ -26,22 +26,39 @@ exists in the artefact or anywhere else in this module.
 
 Honest scope, stated plainly: see CLAIM below. An artefact
 establishes only what its declared checks actually exercised,
-on the exact trees it binds. It establishes nothing about
-properties the change did not declare, nothing about trees
-other than the ones hashed, and it is not a proof of general
-correctness. The mutation is a single declared perturbation
--- defaulting to reverting a changed file to its base
-contents -- not an exploration of the mutation space. Checks
-are subprocesses run with the caller's privileges and no
-sandboxing beyond ``shell=False`` and a timeout; a check the
-artefact declares is code the verifier operator is choosing
-to execute, exactly as with a test suite.
+against the exact tree contents it binds. The binding covers
+tree contents only: checks run as ordinary subprocesses with
+the checker's privileges and inherited environment, and the
+execution environment, the interpreter, and anything outside
+the tree a check reads or writes are not bound by the
+artefact. It establishes nothing about properties the change
+did not declare, nothing about trees other than the ones
+hashed, and it is not a proof of general correctness. The
+mutation is a single declared perturbation -- defaulting to
+reverting a changed file to its base contents -- not an
+exploration of the mutation space. Checks are subprocesses
+run with the caller's privileges and no sandboxing beyond
+``shell=False`` and a timeout; a check the artefact declares
+is code the verifier operator is choosing to execute, exactly
+as with a test suite.
+
+Tree entries bind content hash and size only, not the file
+mode: a mode-only change is invisible to this module alone
+(the ship manifest binds the executable bit, so in the ship
+composition a mode flip refuses the ship). ``tree_hash``
+also does not check whether ``root`` itself is a symlink:
+``root`` is supplied by the operator, and a symlinked root
+resolves every scope under the operator's chosen anchor;
+symlinks below that anchor are refused.
 """
 
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
+import contextlib
+import json
 import os
 import re
 import shutil
@@ -67,9 +84,14 @@ CLAIM = (
     "the exact tree contents bound in the artefact, each "
     "declared check passed on that tree, and each check was "
     "shown to fail on the pre-change tree (for invariants "
-    "declared new) and on a mutated tree. It establishes "
-    "nothing about properties the change did not declare, and "
-    "it is not a proof of general correctness."
+    "declared new) and on a mutated tree. The binding covers "
+    "tree contents only: checks run as ordinary subprocesses "
+    "with the checker's privileges and inherited environment, "
+    "and the execution environment, the interpreter, and "
+    "anything outside the tree a check reads or writes are "
+    "not bound by the artefact. It establishes nothing about "
+    "properties the change did not declare, and it is not a "
+    "proof of general correctness."
 )
 
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -187,6 +209,93 @@ def _expand_scope(root, scope_paths) -> list:
                 by_path[rel] = {"path": rel, "sha256": info["sha256"],
                                 "size": info["size"]}
     return [by_path[p] for p in sorted(by_path)]
+
+
+def _expand_whole_tree(root) -> list:
+    """Expand the ENTIRE tree at ``root`` to a sorted entry
+    list of {path, sha256, size} with repo-relative POSIX
+    paths, under the same walk discipline as _expand_scope:
+    skip any directory named __pycache__ and any *.pyc file;
+    refuse (ProofError) on any symlink observed anywhere and
+    on any non-regular file."""
+    root = Path(root)
+    by_path = {}
+    if not root.exists():
+        return []
+    if not root.is_dir():
+        raise ProofError(f"whole-tree root is not a directory: {root}")
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for dirname in list(dirnames):
+            sub = Path(dirpath) / dirname
+            if os.path.islink(sub):
+                raise ProofError(
+                    f"symlinked directory inside the tree: "
+                    f"{sub.relative_to(root).as_posix()}")
+        if "__pycache__" in dirnames:
+            dirnames.remove("__pycache__")
+        for name in sorted(filenames):
+            if name.endswith(".pyc"):
+                continue
+            fpath = Path(dirpath) / name
+            rel = fpath.relative_to(root).as_posix()
+            if "__pycache__" in Path(rel).parts:
+                continue
+            if os.path.islink(fpath) or not fpath.is_file():
+                raise ProofError(f"non-regular file inside the tree: {rel}")
+            info = _hash_file(fpath)
+            by_path[rel] = {"path": rel, "sha256": info["sha256"],
+                            "size": info["size"]}
+    return [by_path[p] for p in sorted(by_path)]
+
+
+def _whole_tree_changed_paths(base_root, post_root) -> list:
+    base = {e["path"]: (e["sha256"], e["size"])
+            for e in _expand_whole_tree(base_root)}
+    post = {e["path"]: (e["sha256"], e["size"])
+            for e in _expand_whole_tree(post_root)}
+    return sorted(
+        p for p in set(base) | set(post) if base.get(p) != post.get(p))
+
+
+def _unscoped_changes(base_root, post_root, scope_paths) -> tuple:
+    return tuple(
+        p for p in _whole_tree_changed_paths(base_root, post_root)
+        if not _path_in_scope(p, scope_paths))
+
+
+def _append_proof_binding(journal_dir, record) -> None:
+    """Append exactly one JSON line for ``record`` to
+    proof-bindings.jsonl in ``journal_dir``, fsync'd (file,
+    then directory). Raises OSError on any failure; it does
+    not catch."""
+    journal_dir = Path(journal_dir)
+    path = journal_dir / "proof-bindings.jsonl"
+    line = json.dumps(record, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False) + "\n"
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(line)
+        fh.flush()
+        os.fsync(fh.fileno())
+    dir_fd = os.open(journal_dir, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+@contextlib.contextmanager
+def _snapshot_tree(root):
+    """Yield the Path of a private snapshot copy of root."""
+    # Pre-walk first: refuse symlinks and non-regular files
+    # BEFORE anything is copied, so the copy never
+    # dereferences a link the walk would have refused.
+    _expand_whole_tree(root)
+    with tempfile.TemporaryDirectory(
+            prefix="proofcarry-snapshot-") as tmp:
+        dest = Path(tmp) / "tree"
+        shutil.copytree(root, dest, ignore=_IGNORE)
+        yield dest
 
 
 def tree_hash(root, scope_paths) -> str:
@@ -311,12 +420,13 @@ def _validate_invariant_input(inv):
 def build_proof_artefact(*, change_id, base_root, post_root, scope_paths,
                          invariants, created_at="") -> dict:
     """Build a proof artefact for a change. Runs every declared
-    check on the post tree and records the outcome as
-    builder-run evidence; a check that does not pass there
-    raises ProofError -- there is no artefact for a failing
-    change. Checks are NOT run on the base or mutated trees
-    here: showing they fail there is the verifier's job, done
-    independently at verify time."""
+    check in a fresh scratch copy of the post tree (never on
+    the live post tree) and records the outcome as builder-run
+    evidence; a check that does not pass there, or that
+    modifies its scratch copy, raises ProofError -- there is
+    no artefact for a failing change. Checks are NOT run on
+    the base or mutated trees here: showing they fail there is
+    the verifier's job, done independently at verify time."""
     if not isinstance(change_id, str) or not change_id:
         raise ProofError("change_id must be a non-empty string")
     if not isinstance(created_at, str):
@@ -340,7 +450,17 @@ def build_proof_artefact(*, change_id, base_root, post_root, scope_paths,
         if "mutation" not in entry:
             entry["mutation"] = _default_mutation(
                 base_root, changed, target=target)
-        exit_code, stdout, stderr = _run_check(entry["argv"], post_root)
+        result, side_effect, _applied = _run_in_scratch(
+            entry["argv"], post_root, scope)
+        if result is None:
+            raise ProofError(
+                f"check could not be run: {entry['argv']!r}")
+        if side_effect:
+            raise ProofError(
+                f"check_side_effect:{entry['id']}: the builder "
+                f"check modified its scratch copy of the post "
+                f"tree; refusing to build the artefact")
+        exit_code, stdout, stderr = result
         if exit_code != 0:
             raise ProofError(
                 f"check for invariant {entry['id']!r} failed on the "
@@ -487,19 +607,177 @@ def _safe_run(argv, cwd):
 _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 
-def _scratch_run(argv, root):
-    """Run argv in a scratch copy of the tree at ``root``.
+def _run_in_scratch(argv, root, scope_paths, *, mutation=None):
+    """Run argv in a fresh scratch copy of root.
+
+    Returns (result, side_effect, applied):
+      result     -- (exit_code, stdout, stderr), or None when
+                    the copy or the run could not be made
+                    (no verdict exists);
+      side_effect -- True when the scratch tree's scope hash
+                    after the run differs from before it;
+      applied    -- False only when a requested mutation could
+                    not be applied (result is then None).
     The copy always lives at <tmpdir>/tree, so every probe
-    (post, base, mutation) presents the same cwd basename.
-    Returns (exit, stdout, stderr) or None if the copy or the
-    run itself could not be made."""
+    presents the same cwd basename."""
+    applied = True
     try:
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "tree"
-            shutil.copytree(root, dest, ignore=_IGNORE)
-            return _safe_run(argv, dest)
+            try:
+                shutil.copytree(root, dest, ignore=_IGNORE)
+            except (OSError, shutil.Error, ValueError):
+                return (None, False, False) if mutation is not None \
+                    else (None, False, True)
+            if mutation is not None:
+                target = dest / mutation["path"]
+                try:
+                    if target.is_dir():
+                        return (None, False, False)
+                    if mutation["content_b64"] is None:
+                        target.unlink()
+                    else:
+                        decoded = base64.b64decode(
+                            mutation["content_b64"], validate=True)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(decoded)
+                except (OSError, ValueError, binascii.Error):
+                    return (None, False, False)
+            try:
+                pre = tree_hash(dest, scope_paths)
+            except ProofError:
+                return (None, False, applied)
+            result = _safe_run(argv, dest)
+            try:
+                post = tree_hash(dest, scope_paths)
+                side_effect = post != pre
+            except ProofError:
+                side_effect = True
+            return (result, side_effect, True)
     except (OSError, shutil.Error, ValueError):
-        return None
+        return (None, False, False) if mutation is not None \
+            else (None, False, True)
+
+
+_HARNESS_CRASH_MARKERS = (
+    "ModuleNotFoundError", "ImportError",
+    "SyntaxError", "IndentationError",
+)
+
+
+def _harness_crash_in_stderr(stderr: bytes) -> bool:
+    text = stderr.decode("utf-8", errors="replace")
+    return any(marker in text for marker in _HARNESS_CRASH_MARKERS)
+
+
+def _is_plain_file(root, cand) -> bool:
+    """True when ``root / cand`` is a regular file and not a
+    symlink. Failure-silent by design (design 12.4.2: argv
+    elements that are flags, interpreter paths, or expressions
+    simply seed nothing): any filesystem error on a candidate
+    -- OSError such as ENAMETOOLONG from a long argv element
+    treated as a path, or ValueError from an unencodable one
+    -- means the candidate is not a harness file, never an
+    exception out of the closure computation."""
+    try:
+        full = root / cand
+        return full.is_file() and not os.path.islink(full)
+    except (OSError, ValueError):
+        return False
+
+
+def _harness_dependencies(argv, root) -> set:
+    """The set of canonical repo-relative paths the check
+    harness consists of: argv-referenced files plus the
+    transitive local-import closure of any .py file among
+    them, computed against the tree at ``root``."""
+    root = Path(root)
+    deps = set()
+    for element in argv:
+        if not isinstance(element, str):
+            continue
+        cand = element[2:] if element.startswith("./") else element
+        try:
+            _check_scope_path(cand)
+        except ProofError:
+            continue
+        if _is_plain_file(root, cand):
+            deps.add(cand)
+    parsed = set()
+    worklist = [p for p in deps if p.endswith(".py")]
+    while worklist:
+        current = worklist.pop()
+        if current in parsed:
+            continue
+        parsed.add(current)
+        try:
+            tree_ast = ast.parse((root / current).read_bytes())
+        except (OSError, SyntaxError, ValueError):
+            continue
+        importer_dir = current.rsplit("/", 1)[0] if "/" in current else ""
+        for node in ast.walk(tree_ast):
+            module_paths = []  # list of (parts, bases)
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    module_paths.append(
+                        (alias.name.split("."), None))
+            elif isinstance(node, ast.ImportFrom):
+                if node.level and node.level >= 1:
+                    base_parts = importer_dir.split("/") \
+                        if importer_dir else []
+                    ascend = node.level - 1
+                    if ascend:
+                        base_parts = base_parts[:-ascend] \
+                            if ascend <= len(base_parts) else []
+                    parts = list(base_parts)
+                    if node.module:
+                        parts += node.module.split(".")
+                    module_paths.append((parts, "relative"))
+                elif node.module:
+                    module_paths.append(
+                        (node.module.split("."), None))
+            for parts, kind in module_paths:
+                if kind == "relative":
+                    bases = [""]
+                    # parts already include the importing dir.
+                    candidates = _import_candidates(parts, "")
+                    _add_import_candidates(
+                        candidates, root, deps, worklist)
+                else:
+                    for base in ("", importer_dir):
+                        candidates = _import_candidates(parts, base)
+                        _add_import_candidates(
+                            candidates, root, deps, worklist)
+    return deps
+
+
+def _import_candidates(parts, base) -> list:
+    """Candidate files for a module path ``parts`` resolved
+    against directory ``base`` (repo-relative, '' = root):
+    base/parts.py, base/parts/__init__.py, and for each proper
+    prefix, base/prefix/__init__.py."""
+    if not parts or any(p in ("", ".", "..") for p in parts):
+        return []
+    prefix = (base + "/") if base else ""
+    joined = "/".join(parts)
+    candidates = [prefix + joined + ".py",
+                  prefix + joined + "/__init__.py"]
+    for i in range(1, len(parts)):
+        candidates.append(
+            prefix + "/".join(parts[:i]) + "/__init__.py")
+    return candidates
+
+
+def _add_import_candidates(candidates, root, deps, worklist) -> None:
+    for cand in candidates:
+        try:
+            _check_scope_path(cand)
+        except ProofError:
+            continue
+        if _is_plain_file(root, cand) and cand not in deps:
+            deps.add(cand)
+            if cand.endswith(".py"):
+                worklist.append(cand)
 
 
 def _mutation_references_argv(mutation_path, argv) -> bool:
@@ -520,18 +798,22 @@ def _mutation_references_argv(mutation_path, argv) -> bool:
     return False
 
 
-def _mutation_invalid_reason(inv, post_files, post_root):
+def _mutation_invalid_reason(inv, post_files, post_root, scope_paths):
     """Pre-execution mutation validation (design step 5 plus
-    the harness-presence rule). Returns True if invalid."""
+    the harness rules). Returns True if invalid."""
     mutation = inv["mutation"]
     mpath = mutation["path"]
     try:
         _check_scope_path(mpath)
     except ProofError:
         return True
-    if _mutation_references_argv(mpath, inv["argv"]):
+    if not _path_in_scope(mpath, scope_paths):
         return True
     if post_files is None or mpath not in post_files:
+        return True
+    if mpath in _harness_dependencies(inv["argv"], post_root):
+        return True
+    if _mutation_references_argv(mpath, inv["argv"]):
         return True
     if mutation["content_b64"] is None:
         return False
@@ -643,16 +925,23 @@ def verify_proof_artefact(artefact, *, base_root, post_root,
             add(f"evidence_failed:{inv_id}")
 
     for inv_id in ids:
-        if _mutation_invalid_reason(by_id[inv_id], post_files, post_root):
+        if _mutation_invalid_reason(by_id[inv_id], post_files, post_root,
+                                    scope):
             add(f"mutation_invalid:{inv_id}")
 
     if reasons:
         return tuple(reasons)
 
-    # Step 6: post-tree re-run, in a scratch copy.
+    # Step 6: post-tree re-run, in a fresh scratch copy. A
+    # run with a side effect is void: its verdict is discarded
+    # entirely.
     for inv_id in ids:
         inv = by_id[inv_id]
-        result = _scratch_run(inv["argv"], post_root)
+        result, side_effect, _applied = _run_in_scratch(
+            inv["argv"], post_root, scope)
+        if side_effect:
+            add(f"check_side_effect:{inv_id}")
+            continue
         if result is None or result[0] != 0:
             add(f"check_failed:{inv_id}")
             continue
@@ -663,51 +952,39 @@ def verify_proof_artefact(artefact, *, base_root, post_root,
                 add(f"evidence_output_mismatch:{inv_id}")
     # Step 7: base-tree discrimination -- "new" only. A probe
     # that cannot be observed to fail (exit 0, timeout, or
-    # spawn error) does not discriminate.
+    # spawn error) does not discriminate. A side-effecting
+    # run is void, not discrimination.
     for inv_id in ids:
         inv = by_id[inv_id]
         if inv["scope"] != "new":
             continue
-        result = _scratch_run(inv["argv"], base_root)
+        result, side_effect, _applied = _run_in_scratch(
+            inv["argv"], base_root, scope)
+        if side_effect:
+            add(f"check_side_effect:{inv_id}")
+            continue
         if result is None or result[0] == 0:
             add(f"check_not_discriminating:{inv_id}")
     # Step 8: mutation vacuity -- every invariant. Apply the
-    # mutation to a copy of the post scratch copy; a probe
-    # that cannot be observed to fail is vacuous.
+    # mutation in a fresh scratch copy of the post tree; a
+    # probe that cannot be observed to fail is vacuous, and a
+    # mutated run that fails with a harness-crash signature
+    # in stderr is mutation_invalid, never noticing.
     for inv_id in ids:
         inv = by_id[inv_id]
-        mutation = inv["mutation"]
-        mpath = mutation["path"]
-        decoded = None
-        if mutation["content_b64"] is not None:
-            decoded = base64.b64decode(mutation["content_b64"],
-                                       validate=True)
-        result = None
-        applied = True
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                stage = Path(tmp) / "stage" / "tree"
-                shutil.copytree(post_root, stage, ignore=_IGNORE)
-                with tempfile.TemporaryDirectory() as tmp2:
-                    dest = Path(tmp2) / "tree"
-                    shutil.copytree(stage, dest, ignore=_IGNORE)
-                    target = dest / mpath
-                    if target.is_dir():
-                        applied = False
-                    elif mutation["content_b64"] is None:
-                        target.unlink()
-                    else:
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(decoded)
-                    if applied:
-                        result = _safe_run(inv["argv"], dest)
-        except (OSError, shutil.Error, ValueError):
-            applied = False
+        result, side_effect, applied = _run_in_scratch(
+            inv["argv"], post_root, scope, mutation=inv["mutation"])
+        if side_effect:
+            add(f"check_side_effect:{inv_id}")
+            continue
         if not applied:
             add(f"mutation_invalid:{inv_id}")
             continue
         if result is None or result[0] == 0:
             add(f"check_vacuous:{inv_id}")
+            continue
+        if _harness_crash_in_stderr(result[2]):
+            add(f"mutation_invalid:{inv_id}")
     return tuple(reasons)
 
 
@@ -717,10 +994,26 @@ def record_ship_with_proof(loop, *, base_root, post_root, artefact,
     """The proof-carrying ship path: verify the artefact
     against the live trees first; any refusal raises ShipRefused
     before anything is delegated, so nothing is burned for an
-    unproven change. On acceptance this delegates to
-    trust.shipcheck.record_ship with root=post_root."""
+    unproven change. On acceptance the wrapper snapshots the
+    post tree, verifies the artefact against the snapshot, and
+    delegates to trust.shipcheck.record_ship with
+    root=<snapshot> -- the live post tree is never delegated.
+    After a successful ship it sets proof_artefact_hash and
+    proof_post_tree_hash on the returned entry and appends a
+    durable binding record to proof-bindings.jsonl in the
+    ledger's journal directory. The proof keys set on the
+    returned entry are a convenience on the caller's copy
+    only and are not persisted loop state; the bindings file
+    is the durable carrier."""
+    # W0: guards, before anything else.
     if "root" in record_ship_kwargs:
         raise ProofError("root is supplied by record_ship_with_proof")
+    if "ledger" not in record_ship_kwargs \
+            or "manifest" not in record_ship_kwargs:
+        raise ProofError(
+            "record_ship_with_proof requires ledger=... and "
+            "manifest=... so the proof binding can be recorded")
+    # W1: live verification.
     reasons = verify_proof_artefact(
         artefact, base_root=base_root, post_root=post_root,
         expected_change_id=expected_change_id)
@@ -734,5 +1027,53 @@ def record_ship_with_proof(loop, *, base_root, post_root, artefact,
     if current_post_hash != artefact["post_tree_hash"]:
         raise ShipRefused("proof_refused:post_tree_mismatch",
                           ("post_tree_mismatch",))
-    return trust.shipcheck.record_ship(
-        loop, root=post_root, **record_ship_kwargs)
+    # W2: unscoped refusal.
+    try:
+        unscoped = _unscoped_changes(
+            base_root, post_root, artefact["scope_paths"])
+    except ProofError:
+        unscoped = ("unscoped_changes",)
+    if unscoped:
+        raise ShipRefused("proof_refused:unscoped_changes",
+                          ("unscoped_changes",))
+    # W3: snapshot the post tree. W4/W5 run inside the context.
+    entered = False
+    try:
+        with _snapshot_tree(post_root) as snapshot:
+            entered = True
+            # W4: snapshot verification (authoritative).
+            reasons = verify_proof_artefact(
+                artefact, base_root=base_root, post_root=snapshot,
+                expected_change_id=expected_change_id)
+            if reasons:
+                raise ShipRefused(
+                    "proof_refused:" + ",".join(reasons), reasons)
+            # W5: delegate inside the context.
+            entry = trust.shipcheck.record_ship(
+                loop, root=snapshot, **record_ship_kwargs)
+    except (ProofError, OSError, shutil.Error):
+        if entered:
+            raise
+        raise ShipRefused("proof_refused:post_tree_mismatch",
+                          ("post_tree_mismatch",))
+    # W6: returned-entry proof fields (non-durable convenience).
+    entry["proof_artefact_hash"] = artefact["artefact_hash"]
+    entry["proof_post_tree_hash"] = artefact["post_tree_hash"]
+    # W7: durable binding record.
+    record = {
+        "cycle_id": entry["cycle_id"],
+        "item_id": entry["item_id"],
+        "change_id": artefact["change_id"],
+        "manifest_hash": record_ship_kwargs["manifest"].manifest_hash,
+        "artefact_hash": artefact["artefact_hash"],
+        "post_tree_hash": artefact["post_tree_hash"],
+        "recorded_at": _now(),
+    }
+    try:
+        _append_proof_binding(
+            record_ship_kwargs["ledger"].journal_dir, record)
+    except OSError as exc:
+        raise ShipRefused(
+            f"cycle {entry['cycle_id']} recorded and the decision "
+            f"finalised, but the proof binding failed: {exc}")
+    return entry

@@ -32,9 +32,14 @@ CLAIM = (
     "against the exact tree contents bound in the artefact, "
     "each declared check passed on that tree, and each check "
     "was shown to fail on the pre-change tree (for invariants "
-    "declared new) and on a mutated tree. It establishes "
-    "nothing about properties the change did not declare, "
-    "and it is not a proof of general correctness.")
+    "declared new) and on a mutated tree. The binding covers "
+    "tree contents only: checks run as ordinary subprocesses "
+    "with the checker's privileges and inherited environment, "
+    "and the execution environment, the interpreter, and "
+    "anything outside the tree a check reads or writes are "
+    "not bound by the artefact. It establishes nothing about "
+    "properties the change did not declare, and it is not a "
+    "proof of general correctness.")
 
 BANNED_PHRASES = (
     "proves the change is correct",
@@ -46,6 +51,15 @@ BANNED_PHRASES = (
     "proven correct",
     "correctness is guaranteed",
     "verified to be correct",
+    # Fix round (design section 12.6): the claim binds tree
+    # contents only, so execution-environment over-claims are
+    # banned with the same force as correctness over-claims.
+    "hermetic execution",
+    "binds the execution environment",
+    "environment is bound",
+    "runs in a sandbox",
+    "guarantees the execution environment",
+    "isolated execution",
 )
 
 CLAIM_FILE = "trust/proofcarry.py"
@@ -68,9 +82,16 @@ class TestCycle32ClaimPin(unittest.TestCase):
                     f"phrase {phrase!r}")
 
     def test_no_overclaim_phrases_in_design_final(self):
-        text = _normalised(
-            REPO / "internal" / "cycle32-work"
-            / "design-final.md").lower()
+        raw = (REPO / "internal" / "cycle32-work"
+               / "design-final.md").read_text(encoding="utf-8")
+        # Only the pre-section-12 portion is scanned: section
+        # 12 (the fix-round addendum) must NAME the phrases it
+        # bans in order to ban them, exactly as this test file
+        # does and is likewise not scanned. The module scan
+        # below stays full-file: trust/proofcarry.py must never
+        # contain a banned phrase anywhere, including comments.
+        pre_section_12 = raw.split("\n## 12.", 1)[0]
+        text = re.sub(r"\s+", " ", pre_section_12).lower()
         for phrase in BANNED_PHRASES:
             with self.subTest(phrase=phrase):
                 self.assertNotIn(
