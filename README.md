@@ -3,8 +3,8 @@
 **Bring the AI that would exist in 2036 into 2027 — like ASI.**
 
 A fully independent project — not related to any blockchain or crypto project, in its own separate repo.
-Repo: yourmememachine/ai (local skeleton, not yet pushed)
-Owner: Dilip Teneti
+Repo: yourmememachine/AION
+Owner: Teneti
 
 ## Mission
 Do not build 2025 AI in 2027. Build 2036-level AI in 2027:
@@ -19,17 +19,14 @@ closest buildable system in 2027 — a self-improving, multi-agent system that
 gets measurably smarter at its own work each cycle — and measures it, rather
 than claiming ASI by name alone.
 
-## The 15 developers (AI team, 24/7 rotation)
-See `agents/ROSTER.md`
-
 ## Structure
-- `agents/` — the 15 developer roles and their charters
-- `core/` — the never-stop loop: scan → build → war-room review → ship → repeat
+- `agents/` — developer roles and their charters
+- `core/` — the never-stop loop: scan → build → review → ship → repeat
 - `action/` — real-world action layer (tools, services, approvals)
 - `products/` — first 2027 products
 - `docs/` — roadmap to 2027
 
 ## Timeline
-- Nov–Dec 2026: build core loop + first agent team, war-room tested
+- Nov–Dec 2026: build core loop + evaluation harness
 - Jan 2027: first product live
 - 2027: self-improvement cycles, payments, voice, robotics pilots
