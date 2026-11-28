@@ -7,14 +7,25 @@ record corrections one seat required. Blind round-2 brief:
 internal/CROSS-CHECK-BRIEF-CYCLE-35-R2.md. Parent record:
 internal/BUILD-CYCLE-35.md (see its ADDENDUM).
 
-**Ship sequence (Dilip, 2026-11-28):** round-1 verdicts —
+**STATUS: SHIPPED (2026-11-28).** Final scores — Round 1:
 ChatGPT 0.97 SHIP, Gemini 0.94 SHIP, Claude 0.88 SHIP with
-conditions. Two scores sat below the 0.95 ship band. Dilip
-first directed "Ok ship", then corrected it the same day
-(12:57 CST) to **"Fix n ship" — fix first, then ship.** The
-cycle is NOT recorded as shipped; it ships after this round's
-re-scoring. Ship rules unchanged: 0.95+ seat score ships;
-engineering standard is the full spec, no scope trimmed.
+conditions. Round 2 (on this fix round): ChatGPT 0.99 SHIP
+(all conditions discharged, no fixes required), Claude 0.95
+SHIP (in the 0.95–0.99 band; three documentation fixes
+requested before closing — applied in the closing section
+below). Gemini's round-2 score was not obtained (its
+sign-in stalled on phone verification); the owner shipped
+on the two in-band round-2 seats plus Gemini's round-1
+SHIP. Full ship record: internal/CROSS-CHECK-35.md.
+
+**Ship sequence (Dilip, 2026-11-28):** round-1 verdicts as
+above; two scores sat below the 0.95 ship band. Dilip first
+directed "Ok ship", then corrected it the same day
+(12:57 CST) to **"Fix n ship" — fix first, then ship** —
+hence this round. After the round-2 scores landed he
+directed **"Ship it" (13:12 CST)** and the cycle shipped.
+Ship rules unchanged: 0.95+ seat score ships; engineering
+standard is the full spec, no scope trimmed.
 
 ## Changes
 - memory/principles.py (modified):
@@ -219,7 +230,12 @@ reproduced exactly unless noted.
   seed 2, heldout-secondmin seeds 2–3) are abstentions,
   taxonomy insufficient_evidence; selective accuracy 1.0.
 - Traps (factory): primary metric false-application rate
-  0.00 — zero false applications in 240 items, all seeds.
+  0.00 — zero false applications; the rate's denominator is
+  the items where applying would be wrong: 0/60 per seed,
+  0/180 pooled (the 240 pooled trap-tier items include the
+  60 squares applications, which are legitimate and are
+  reported under Cross-Domain Structural Transfer — see the
+  closing section below).
   Refusal taxonomy per seed: trap_refused 40 (geometric,
   alternating), precondition_failed 20 (periodic — refused
   on invariant miss; it satisfies no antagonist, so no trap
@@ -256,3 +272,63 @@ framed as a control after the fact. Second: a mechanism
 designed after seeing a failure has contaminated its own
 evidence; the honest repair is a fresh frozen set, not a
 better story about the old one.
+
+## Closing documentation fixes (Claude, round 2)
+
+Claude's round-2 verdict (0.95, SHIP) asked for three
+documentation fixes before the cycle closed. Each was
+verified against memory/principles.py before being written
+here; this section states only what the code does.
+
+**(a) Complexity unit for the version-space cap, and the
+stored-length-vs-bound case.** The cap's complexity unit is
+the program length: the number of primitives in the program
+tuple (`len(program)` in `_version_space_block`). Programs
+in this engine have no macro or compound layer — a stored
+principle's program IS its sequence of DSL primitives,
+executed directly by `run_program` — so the stored length
+is the minimal DSL expansion length, not a count of named
+macros. (In the coincidence item, the disagreeing consistent
+program (drop_first, drop_first, min) has length 3 and is
+caught by rule (c) against a cap of the stored program's
+length.) The rules interact with the search bound as
+follows: the shortest-program search behind rules (a)/(b)
+is bounded at depth 3 (`induce_program(episodes,
+max_depth=3)`), but the rule-(c) enumeration is run with
+the cap itself as its bound (`consistent_programs(episodes,
+max_depth=cap)`). So when a stored program's length exceeds
+depth 3, the checked region extends to the stored program's
+full length — the cap is NOT silently clipped to the
+induction bound. What the guarantee does not cover, by
+design: consistent programs LONGER than the stored program
+(the Occam cap itself), and programs outside the VALUE_PRIMS
+vocabulary. One further behaviour, stated for completeness:
+a consistent program that raises on the query (e.g. is
+undefined there) is skipped by rules (b)/(c), not counted
+as disagreeing.
+
+**(b) False-application-rate denominator.** The factory
+trap tier runs 80 items per seed set: geometric 20,
+alternating 20, periodic 20 — the items where applying a
+learned principle would be wrong — plus squares 20, where
+application is legitimate. The false-application rate is
+therefore 0/60 per seed set, 0/180 pooled. The 240 pooled
+trap-tier total quoted in round-1 and round-2 documents
+includes the 60 pooled squares applications; those belong
+to the Cross-Domain Structural Transfer result (1.00,
+20/20 per seed), not to the rate's denominator. Fresh set:
+the two coincidence families (fresh-coincide,
+fresh-degenerate) run 20 items each — 40 items per seed
+set, 120 pooled — with 0 applications and 0 false
+applications (all abstained, insufficient_evidence).
+
+**(c) The agreement gate's guarantee, stated as a
+residual.** The agreement gate's guarantee is relative to
+the recorded tie set {eval_precedence, eval_left_to_right}:
+agreement between the two candidates is consensus, not
+correctness. If the true evaluation rule were a third
+order, the two candidates could still agree on a * b ± c
+forms and the gate's answer would be wrong. This is a
+second instance of the correlated-error residual — the
+gate validates agreement inside a hypothesis set; it
+cannot validate the set itself.
