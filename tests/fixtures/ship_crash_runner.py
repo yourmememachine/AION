@@ -271,7 +271,7 @@ def build_or_load(base: Path):
         att = VerifierAttestation(
             verifier_id="seat-3", decision="approve",
             sealed_hash=SEALED, reward_hacking_checked=True,
-            evidence_ref="war-room-cycle-8", attested_at=_ts(-10))
+            evidence_ref="review-cycle-8", attested_at=_ts(-10))
         satt = sign_attestation(
             att, signing_key=KEY, signer_id="seat-3",
             proposal_id=proposal,

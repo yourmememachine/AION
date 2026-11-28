@@ -188,7 +188,7 @@ class ManifestTests(unittest.TestCase):
         self.assertFalse(diff.is_empty())
 
     def test_forged_timestamp_pyc_is_detected_as_shadow(self):
-        # The war room's probe: bytecode compiled from different
+        # The review's probe: bytecode compiled from different
         # source, header forged to the real source's mtime+size,
         # executes at import while the source never changes. The
         # manifest cannot bless the shadow's content — it refuses

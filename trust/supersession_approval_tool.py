@@ -23,7 +23,7 @@ adopter's code path has no route to mint an approval. The
 adopter stops on ceremony_supersede_required, writes a
 pending-supersession report, and a later, separate invocation
 of THIS tool is what turns the report into a signed approval
-artefact (design: internal/cycle25-work/design-approval.md).
+artefact (design: the cycle-25 design-approval record).
 
 Key custody: the approver seed is a 32-byte Ed25519 seed in a
 hex file, loaded here under the same discipline as the

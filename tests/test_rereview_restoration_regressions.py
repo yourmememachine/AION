@@ -8,7 +8,7 @@ ceremony lacked rollback-resistant authority/history. Cycles
 tests pin, against a PRODUCTION-mode verifier home (the
 tests/cycle23_harness.py provisioning: research INIT bootstrap,
 INIT stripped, AION_DEPLOYMENT_MODE=production), what the
-re-review war rooms must judge:
+re-review reviews must judge:
 
   1. Verifier-home rollback of the consumption journal alone
      (external anchor left at its advanced value) is refused
@@ -65,7 +65,7 @@ removed operator (ceremony_operator_not_authorised at
 authorise). The expectation in the re-review brief - that
 the authority transition invalidates outstanding envelopes
 at consume - is therefore NOT the system's behaviour today;
-the war room must judge whether issuance-time-only membership
+the review must judge whether issuance-time-only membership
 is acceptable.
 
 CYCLE 25 DISCLOSURE (CROSS-CHECK-18 Q2, settled): the leg-2

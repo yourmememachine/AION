@@ -63,7 +63,7 @@ Sanctioned paths, and what "sanctioned" means:
   ledger head (`check_ship(expected_ledger_head=...)`; build
   records should pin the head — the cycle-8 record does).
 * Attestation issuance (Trust Boundary v2): claims and
-  issuance are split. `submit_claim` ledgers a seat's assertion
+  issuance are split. `submit_claim` ledgers an attester's assertion
   UNSIGNED — it grants nothing. `issue_attestation` DERIVES the
   attestation verifier-side from ledgered sealed-eval records
   (sealed scores from the records, the factory gap check run by
@@ -124,7 +124,7 @@ Sanctioned paths, and what "sanctioned" means:
   does not consume it — the gate is a protected path, and
   gate adoption is pending the owner's approval of the
   Protected Gate Rule proposal
-  (internal/PROTECTED-GATE-PROPOSAL.md). Divergence scope,
+  (the Protected Gate proposal record). Divergence scope,
   stated precisely: the gate/policy/oversight agreement and
   divergence claims are measured on the 66-spelling corpus
   in `tests/test_trust_pathpolicy_differential.py`, and on
@@ -177,7 +177,7 @@ it; `sealed_eval` returns an exact score (a per-position oracle
 for short answer spaces) and every registry read burns
 access-log entries, so eval volume is an orchestrator-side rate
 concern; state files are not yet manifest-bound; reviewer
-independence is asserted by roster construction, not yet
+independence is asserted by construction, not yet
 measured; a `__pycache__` bytecode shadow anywhere under the
 manifest's included roots refuses builds and ships outright
 (release hygiene: build manifests over a pycache-clean tree).

@@ -11,7 +11,7 @@ it does: the over-claim phrases that cycle 25 used
 supersession-claim source files, and the canonical narrowed
 sentence must be present where the trust claim is stated.
 
-History is exempt: internal/DECISION-CONSUMPTION-HEAD.md's
+History is exempt: the consumption-head decision record's
 earlier addenda legitimately quote the superseded phrasing,
 so for that file this pin asserts only that Addendum 6
 exists and carries the canonical narrowing.

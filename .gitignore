@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+agents/
+internal/
+state/
+docs/ROADMAP-NEW.md
+docs/ROADMAP-2027.md

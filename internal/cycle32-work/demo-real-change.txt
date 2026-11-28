@@ -1,5 +1,0 @@
-artefact written: /home/hatch/workspace/ai/internal/cycle32-work/demo-artefact.json change_id=cycle-32-proofcarry-prototype
-base ref: 8e8234f
-base_tree_hash=f4d47f66bc02a59aadebaf771863a1bf068fb1e16ffb0d3331a24e98bbf9bd97 post_tree_hash=a96aec888fa585ba368f2cdc634ec8095748cb9a21deade14daea9750f3a765e artefact_hash=347ef7166fd6b58c56f19bf41ce9cffae92114bebc50b996b6827cab29882548
-verify real change (untouched post tree): ACCEPTED reasons=()
-verify tampered post tree (one comment appended to the module): REFUSED reasons=('post_tree_mismatch',)

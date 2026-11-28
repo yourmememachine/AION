@@ -1,9 +1,9 @@
 """Tests for the production signed-path wiring
 (trust/wiring.py) — Item B, recorded as STATE CYCLE 13.
 (Item A, the gate adoption, was built in the same combined
-run but is NOT being recorded — split war room, escalated.)
+run but is NOT being recorded — split review, escalated.)
 
-Pod E (seats 12/13/14) coverage:
+Coverage:
 
 * production_client's refusal battery — one test per refusal
   class, each asserting VerifierConfigError AND that the error
@@ -49,7 +49,7 @@ Pod E (seats 12/13/14) coverage:
       python3 -m unittest \
           tests.test_trust_wiring.LiveProductionWiringTests
 
-Ground truth used (Pod C, shipped code over design note): the
+Ground truth used (shipped code over design note): the
 wrapper allowlist has 19 names (cycle 19 added
 AION_CEREMONY_OPERATORS; cycle 20 added
 AION_CEREMONY_EVIDENCE_DIR and AION_CEREMONY_SIGNING_SEED_PATH;
@@ -173,7 +173,7 @@ class ProductionClientRefusalTests(unittest.TestCase):
         return message
 
     def test_allowlist_is_the_shipped_24_names(self):
-        # Pod C ground truth: the shipped wrapper's ALLOWED_KEYS
+        # Ground truth: the shipped wrapper's ALLOWED_KEYS
         # has 24 names (cycle 27 added the ceremony issuance and
         # supersession anchor PATH/INIT names; cycle 19 added
         # AION_CEREMONY_OPERATORS

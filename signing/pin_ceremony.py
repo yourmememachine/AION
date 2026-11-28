@@ -5,7 +5,7 @@ the strict snapshot wrapper refuse any candidate more than one
 sequence past the caller's pin (``chain_gap``). That refusal is
 refuse-on-gap by design, but without a recovery path it is also a
 liveness trap: a missed or expired intermediate deadlocks strict
-catch-up forever. Both external war-room seats (cycle 14) and the
+catch-up forever. Both external review seats (cycle 14) and the
 internal forced-dissent seat named the same fix — build the
 ceremony BEFORE any production caller depends on the wrapper.
 This module is that ceremony, and nothing else:
@@ -161,7 +161,7 @@ Honest limits:
   consult the retained bytes, and the signed envelope hash is
   the commitment to them. In-process, evidence independence is
   additionally enforced as non-equality with the candidate's
-  own hashes (war-room cycle 15, forced-dissent seat): a
+  own hashes (review cycle 15, forced-dissent seat): a
   re-hash of the candidate is refused at the ceremony as
   defence in depth. The envelope's ``evidence_ref`` is not
   (and cannot be) equality-checked in-process — the caller has
@@ -541,7 +541,7 @@ def advance_pin(pin, signed, reasons) -> dict:
             "pin may advance only on a verification result of ()")
     # A pin carrying key/signer bindings may advance only to a
     # candidate under the same bindings — no silent signer switch
-    # through the normal path (war-room cycle 15, rev-r2).
+    # through the normal path (review cycle 15, rev-r2).
     if captured.get("key_id", signed.key_id) != signed.key_id \
             or captured.get("signer_id", signed.signer_id) \
             != signed.signer_id:
@@ -931,7 +931,7 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
     if old_pin is not None:
         if reason not in {REASON_CHAIN_GAP_RECOVERY,
                           REASON_BURNED_UNADOPTED}:
-            # Gate on state, not label (war-room cycle 15, rev-r2):
+            # Gate on state, not label (review cycle 15, rev-r2):
             # with a usable pin present, chain_gap_recovery and
             # burned_unadopted are the only coherent ceremony
             # reasons — lost/corrupted/initial claims with a
@@ -953,7 +953,7 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
             # A one-step candidate that does not chain to the pin
             # is a fork/replacement (chain_discontinuity), an
             # integrity failure — never a ceremony trigger
-            # (war-room cycle 15, forced-dissent seat).
+            # (review cycle 15, forced-dissent seat).
             raise SigningError(
                 "candidate at pin+1 does not chain to the pin; "
                 "that is an integrity failure, not a re-anchor case")
@@ -968,7 +968,7 @@ def reanchor_pin(old_pin, signed, *, signing_key: SigningKey,
             and old_pin is not None):
         # The ceremony must be gated on an actual strict
         # verification classified reanchor_required, not invoked
-        # freely (war-room cycle 15, forced-dissent seat). Cycle
+        # freely (review cycle 15, forced-dissent seat). Cycle
         # 16: the caller's tuple is no longer trusted on its own —
         # eligibility is RECOMPUTED here, against the captured pin
         # and this candidate, through the strict wrapper, and the
@@ -1139,7 +1139,7 @@ def verify_ceremony_record(record, *, signing_key: SigningKey,
     if record.key_id != signing_key.key_id:
         reasons.append("unknown_key")
     # Re-validate the ceremony invariants, not only the MAC
-    # (war-room cycle 15, rev-r2): a record that violates the
+    # (review cycle 15, rev-r2): a record that violates the
     # rules reanchor_pin enforces must not verify as () merely
     # because a key holder signed it.
     def _is_seq(v):

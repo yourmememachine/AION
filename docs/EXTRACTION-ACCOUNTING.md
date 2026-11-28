@@ -3,9 +3,9 @@
 This document states the exact accounting rules for the sealed-eval
 oracle, as enforced in code (`trust/budgets.py`,
 `trust/verifier_main.py`, `trust/ledger.py`). It answers the v2
-cross-check findings seat-gpt F3 (budgets bound queries, not
+cross-check finding F3 (budgets bound queries, not
 disclosed information; identity issuance / Sybil unspecified) and
-seat-gemini's record-reuse and identity points. The automated
+the record-reuse and identity points from external review. The automated
 attack harness that demonstrates these rules against the real
 verifier subprocess is `tests/test_trust_extraction.py`; the
 single-use consumption tests are `tests/test_trust_consumption.py`.

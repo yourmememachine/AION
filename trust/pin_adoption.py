@@ -13,8 +13,8 @@ loop's state or calibration files (it reads bytes and attests
 them; state mutation stays the loop's), and never retries a
 consume, an authorise or an adopt automatically.
 
-Supersession (cycle 25, CROSS-CHECK-18 Q1; design:
-internal/cycle25-work/design-approval.md): when a consume is
+Supersession (cycle 25, external review Q1; design:
+the cycle-25 design-approval record): when a consume is
 refused pre-commit with ``ceremony_supersede_required``, the
 adopter STOPS. It does not request a supersession decision and
 does not re-run the consume. It persists a

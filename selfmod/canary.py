@@ -697,7 +697,7 @@ class CanaryManager:
             raise CanaryError(
                 "journal entry cap: not enough headroom for this "
                 "proposal's lifecycle; compaction is required")
-        # Enforce the tree caps before copying anything (war-room R2 F8).
+        # Enforce the tree caps before copying anything (review R2 F8).
         self._tree_manifest()
 
         # Snapshot the pre-image and check for no-op changes.
@@ -803,7 +803,7 @@ class CanaryManager:
 
     def _verify_canary_against_staged(self, entry: dict) -> dict:
         """Canary bytes must hash to the staged candidate, per file and
-        in aggregate — never to themselves (war-room cycle-5 F1)."""
+        in aggregate — never to themselves (review cycle-5 F1)."""
         data_by_path = {}
         changes = []
         for path in entry["changed_paths"]:
@@ -829,7 +829,7 @@ class CanaryManager:
     def commit(self, proposal_id: str) -> ApplyResult:
         entry = self._require_active(proposal_id, ("VERIFIED",))
         preimage = self._load_preimage(entry)
-        # Defence in depth at commit time (war-room R3): protected
+        # Defence in depth at commit time (review R3): protected
         # scope re-checked, and the decision stored at stage time
         # re-validated against the recomputed candidate root hash.
         canonical = [canonicalise_path(p) for p in entry["changed_paths"]]
@@ -936,7 +936,7 @@ class CanaryManager:
         preexisting = set(entry.get("preexisting_dirs", []))
         for path in entry["changed_paths"]:
             meta = preimage[path]
-            # Never write or delete through a symlink (war-room R2 F4):
+            # Never write or delete through a symlink (review R2 F4):
             # _resolve_in_tree refuses any symlinked component.
             target = self._resolve_in_tree(path)
             if target.is_symlink():
@@ -952,7 +952,7 @@ class CanaryManager:
                 except FileNotFoundError:
                     pass
                 # Prune only dirs that did not exist before staging
-                # and are now empty (war-room R4 F5).
+                # and are now empty (review R4 F5).
                 parent = target.parent
                 while parent != self.root and parent.exists():
                     rel = parent.relative_to(self.root).as_posix()

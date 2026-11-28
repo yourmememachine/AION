@@ -355,7 +355,7 @@ class TestRecovery(CanaryCase):
         with self.assertRaises(NeedsRecoveryError):
             CanaryManager(self.root, self.journal)
         # Recovery goes through the public classmethod entry point —
-        # no object.__new__ bypass (war-room cycle-5 F2).
+        # no object.__new__ bypass (review cycle-5 F2).
         result = CanaryManager.recover_journal(self.root, self.journal)
         self.assertEqual(result["state"], "ROLLED_BACK")
         self.assertEqual((self.root / "mod.py").read_bytes(), b"print('v1')\n")
@@ -372,8 +372,8 @@ class TestRecovery(CanaryCase):
             CanaryManager(self.root, self.root / "journal")
 
 
-class TestWarRoomFixes(CanaryCase):
-    """Regression tests for the cycle-5 war-room findings."""
+class TestReviewFixes(CanaryCase):
+    """Regression tests for the cycle-5 review findings."""
 
     def test_canary_tamper_refused_before_any_live_write(self):
         self.stage_default()

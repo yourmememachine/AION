@@ -76,7 +76,7 @@ enough — _commit_gated contained no signed_only check, so a
 hand-constructed unsigned GateDecision(accepted=True) whose
 verifier_note carried the entry's correct content hash committed
 successfully on a signed_only store with no key, no envelope and
-no verifier (war-room CRITICAL-1, demonstrated by probe). Now,
+no verifier (review CRITICAL-1, demonstrated by probe). Now,
 when the store's mode is signed_only, _commit_gated additionally
 requires a one-shot permit: commit_signed — AFTER it has verified
 the envelope MAC and any presented attestation — mints the permit

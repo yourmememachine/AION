@@ -1,5 +1,5 @@
 """Adversarial recovery tests for trust.shiptx / trust.shipcheck
-(Trust Boundary v2 fix round): the war-room findings against the
+(Trust Boundary v2 fix round): the review findings against the
 original recovery.
 
 Pins: H1 (another ship's cycle is never attributed to a crashed

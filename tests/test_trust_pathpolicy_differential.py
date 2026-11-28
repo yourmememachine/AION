@@ -1,9 +1,9 @@
 """Differential harness: gate vs path-policy/1 vs oversight
 (Trust Boundary v3, CROSS-CHECK-4 item 4).
 
-ADOPTION HAS HAPPENED: in cycle 13, under Dilip's approval of
+ADOPTION HAS HAPPENED: in cycle 13, under approval of
 the Protected Gate proposal
-(internal/PROTECTED-GATE-PROPOSAL.md), eval/gate.py adopted
+(the Protected Gate proposal record), eval/gate.py adopted
 path-policy/1 — its check_protected_paths judges the canonical
 spelling of each path (via a function-local import of
 trust.pathpolicy.canonicalise), returns offenders as their

@@ -33,7 +33,7 @@ def make_request(mgr, **kw):
     args = dict(proposal_id="prop-1", author_id="seat-9",
                 builder_ids=list(BUILDERS), candidate=dict(CAND),
                 preimage=dict(PRE), rationale="tighten the gate",
-                evidence_ref="war-room record 6", ttl_seconds=3600, now=NOW)
+                evidence_ref="review record 6", ttl_seconds=3600, now=NOW)
     args.update(kw)
     return mgr.create_request(**args)
 
@@ -360,7 +360,7 @@ if __name__ == "__main__":
 LATER = None  # set in classes below via ts()
 
 
-class WarRoomFixTests(unittest.TestCase):
+class ReviewFixTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.mgr = make_manager(self.tmp.name)

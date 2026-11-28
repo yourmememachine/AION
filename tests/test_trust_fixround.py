@@ -1,4 +1,4 @@
-"""Fix-round tests — Trust Boundary v3 war-room fixes:
+"""Fix-round tests — Trust Boundary v3 review fixes:
 
   S1 (HIGH)   sealed_eval must refuse proposal_ids whose scope
               root fails signing's id grammar, before any budget

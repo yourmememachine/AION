@@ -353,7 +353,7 @@ supersede shape refuses pre-commit as
 ceremony_supersede_required.
 
 Cycle 25 narrows who may obtain that decision (design:
-internal/cycle25-work/design-approval.md). Supersession
+the cycle-25 design-approval record). Supersession
 independence in cycle 25 is independence at the
 authorisation-event level, and nothing more: the mode
 issues ONLY against a supersession approval artefact that
@@ -2401,7 +2401,7 @@ _CEREMONY_CANDIDATE_KEYS = {"cycle_seq", "payload_hash",
 # contains no approval-signing call, and the approval tool
 # trust/supersession_approval_tool.py is imported by NOTHING in
 # the running system). The design contract is
-# internal/cycle25-work/design-approval.md sections 5 and 8.
+# the cycle-25 design-approval record, sections 5 and 8.
 #
 # PRESENTATION (design section 2/8): the artefact is presented
 # IN THE REQUEST BODY under the key "supersession_approval" —
@@ -3061,8 +3061,8 @@ def _mode_ceremony_supersede(config: _Config, body: dict) -> dict:
     its own head anyway — pure attack surface for zero
     information.
 
-    Cycle 25 (CROSS-CHECK-18, seat-gpt's Q1 criteria; design
-    internal/cycle25-work/design-approval.md section 8): a
+    Cycle 25 (external review, Q1 criteria; design
+    the cycle-25 design-approval record, section 8): a
     decision now additionally requires a genuinely independent
     authorisation event — a supersession approval artefact
     (trust/supersession_approval.py), signed under a dedicated

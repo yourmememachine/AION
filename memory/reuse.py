@@ -85,10 +85,10 @@ from eval.registry import EvalRegistry
 from .solver import StrategySolver, derive_lessons
 from .store import MemoryStore, decide_write
 
-# The harness's named seats: Pod C seats authored the solver and the
-# lessons (builders); the reviewer seats include the verifier, who is
+# The harness's writer identities authored the solver and the
+# lessons (builders); the reviewers include the verifier, who is
 # never a builder. The registry actor for sealed operations is the
-# verifier seat.
+# verifier.
 WRITER_IDS = ("seat-9", "seat-10", "seat-11")
 REVIEWER_IDS = ("seat-1", "seat-2", "seat-3", "seat-4", "seat-5", "seat-6")
 VERIFIER_ID = "seat-3"
@@ -304,8 +304,8 @@ def run_reuse_measurement(registry_dir, memory_dir, *, public_seed,
             attestation=attestation,
             expected_sealed_hash=manifest,
             verifier_note=(
-                "verifier seat-3 (Pod D, safety) — rotated in for this "
-                "cycle; builders are Pod C seats 9/10/11"),
+                "verifier seat-3 — rotated in for this "
+                "cycle; the verifier is never a builder"),
         )
         record = {"family": family, "token": lesson["content"],
                   "accepted": decision.accepted,

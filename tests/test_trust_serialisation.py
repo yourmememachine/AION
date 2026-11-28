@@ -1,12 +1,12 @@
 """Serialisation ambiguity battery — Trust Boundary v3, item 6
-(external seats seat-gpt F8 / seat-gemini parser point).
+(external review finding F8 / parser point).
 
-POD E split:
-  seat-13 — WIRE layer: raw bytes into the real verifier
+Three parts:
+  WIRE layer: raw bytes into the real verifier
             subprocess, plus trust.protocol.strict_loads directly.
-  seat-14 — MODE bodies: bodies through the real verifier's five
+  MODE bodies: bodies through the real verifier's five
             modes, plus the equivalence controls.
-  seat-15 — ARTEFACT dicts: library level (eval attestation
+  ARTEFACT dicts: library level (eval attestation
             records, gate-decision envelopes, attestation
             envelopes) with no subprocess.
 

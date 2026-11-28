@@ -1,9 +1,9 @@
 """The versioned path policy, path-policy/1 (Trust Boundary
 v2, item 6) — consumed by the build manifest, by the verifier,
 and now by the gate: the gate HAS adopted it, lazily, inside
-eval.gate.check_protected_paths, under Dilip's approval of the
+eval.gate.check_protected_paths, under approval of the
 Protected Gate Rule proposal
-(internal/PROTECTED-GATE-PROPOSAL.md). It is not a universal
+(the Protected Gate proposal record). It is not a universal
 policy: see the adoption-status section below for exactly who
 consumes it and who does not.
 
@@ -61,7 +61,7 @@ a silent gap):
   offenders as their canonical spelling, and raises
   GateInputError for any spelling that cannot be canonicalised.
   That adoption was a Protected Gate Rule change (eval/ is a
-  protected path), approved by Dilip under the proposal cited
+  protected path), approved under the proposal cited
   above. The policy still MIRRORS the gate's protected lists
   under drift detection. Callers that feed paths to the gate no
   longer need to canonicalise first for the gate's own verdict

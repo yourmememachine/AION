@@ -23,10 +23,10 @@ Three anchors, none of which is the code under test:
   openssl's deterministic signature must be BYTE-IDENTICAL to
   ours, and each side must verify the other's signatures.
 
-Independent re-probe (war room, cycle 21): a non-builder reviewer
+Independent re-probe (review, cycle 21): a non-builder reviewer
 re-probed the full adversarial table with separately written
 openssl driver code and reproduced every pinned pair with zero
-mismatches — recorded in internal/cycle21-work/review-r2.md.
+mismatches — recorded in the cycle-21 review record.
 
 GUARD (R8): a KAT literal that disagrees with BOTH this
 implementation and openssl is a build blocker to report to the

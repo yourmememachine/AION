@@ -797,7 +797,7 @@ class ShipTxJournal(HashChainJournal):
         # after early transactions have already been settled,
         # would let settlements land on a journal whose head the
         # caller asked to have pinned first.
-        # Same-file diagnosis (cycle 17, war-room fix round):
+        # Same-file diagnosis (cycle 17, review fix round):
         # the same file passed for both anchors is a wiring
         # error provable in-process, whichever of the two files
         # it is. Identity is by samefile (symlink- and

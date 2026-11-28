@@ -457,7 +457,7 @@ class CombinedAnchorTests(TxAnchorFixture):
 
 
 class FixRoundTests(TxAnchorFixture):
-    """War-room fix round (rev-r1/r2/r3/r5): the same-file
+    """Review fix round (rev-r1/r2/r3/r5): the same-file
     guard in both directions and under aliasing, the
     all-terminal raise, the discriminating wrapper cases, the
     never-advances claim, force_reanchor/audit for the new

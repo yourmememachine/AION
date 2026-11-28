@@ -412,7 +412,7 @@ class ProtocolFuzzTests(VerifierFixture):
 
 
 class FixPinTests(VerifierFixture):
-    """Pins for the cycle-8 war-room fixes on the verifier."""
+    """Pins for the cycle-8 review fixes on the verifier."""
 
     def test_gate_empty_registry_refused(self):
         client = VerifierClient(verifier_env=dict(

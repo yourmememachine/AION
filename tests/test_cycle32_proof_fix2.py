@@ -1,5 +1,5 @@
 """Cycle 32-PROOF fix round 2 — failing-first tests for the
-war-room items R1/R2 (1)-(4) on the first fix round:
+review items R1/R2 (1)-(4) on the first fix round:
 
 (1) the harness import closure must include submodules named
     by `from package import submodule`;

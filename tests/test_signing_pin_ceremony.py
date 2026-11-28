@@ -1162,7 +1162,7 @@ class Cycle20ConsumptionTests(unittest.TestCase):
         regressed pin is returned. Added leg: a NEW envelope
         for old=seq1/candidate=seq5 (head=4, live pin 6) —
         cycle 23 RE-PIN (supersede rule, coordinator, pending
-        war-room ratification): this leg's shape (candidate
+        review ratification): this leg's shape (candidate
         strictly ahead of the head, old pin behind it) is the
         supersede shape, so the consumption now LANDS and
         reanchor returns the seq-5 pin. The verifier cannot

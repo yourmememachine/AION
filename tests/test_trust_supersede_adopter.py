@@ -7,7 +7,7 @@ tests/test_trust_pin_adoption_crash.py, the R12 pattern): a
 movement is consumed to its recovery cap with every returned
 pair discarded, so the pin sits behind the consumed head with
 no retained pair to reconcile from. Cycle 25 flow (design:
-internal/cycle25-work/design-approval.md):
+the cycle-25 design-approval record):
 
   1. first consume refuses ``ceremony_supersede_required``
      (pre-commit; the envelope is provably unconsumed);

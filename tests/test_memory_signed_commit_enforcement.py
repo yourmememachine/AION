@@ -2,7 +2,7 @@
 
 - CRITICAL-1: MemoryStore._commit_gated on a signed_only store
   must refuse a hand-constructed unsigned GateDecision — the exact
-  war-room probe — and must require the one-shot permit that only
+  review probe — and must require the one-shot permit that only
   the verified signing.commit_signed path mints.
 - Permit binding: a permit is single-use, bound to one entry's
   content hash and to the store instance that minted it.
@@ -100,7 +100,7 @@ class Critical1ProbeTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_exact_critical1_probe_refused(self):
-        # The war-room probe, verbatim in spirit: a hand-constructed
+        # The review probe, verbatim in spirit: a hand-constructed
         # unsigned GateDecision(accepted=True) whose verifier_note
         # carries the entry's CORRECT content hash (decide_write
         # stamps exactly that binding), presented directly to

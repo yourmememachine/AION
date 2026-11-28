@@ -4,7 +4,7 @@ external monotonic head anchoring for BOTH ledgers.
 Pins: the first-init ceremony refuses a second init AND refuses
 a non-empty journal without the explicit ceremony flag (M4: the
 previous pin — init on a non-empty journal silently blessing its
-current head — was the unsafe behaviour the war room flagged;
+current head — was the unsafe behaviour the review flagged;
 pinning a rolled-back journal's head would launder the rollback
 into a valid anchor); updates are strictly monotonic and refuse
 over a rolled-back journal; a rolled-back, truncated or deleted
@@ -86,7 +86,7 @@ class CeremonyTests(AnchorFixture):
         self.assertEqual(self.verify(), ())
 
     def test_initialise_nonempty_journal_refused_by_default(self):
-        # M4 (war room): this test previously PINNED init on a
+        # M4 (review): this test previously PINNED init on a
         # non-empty journal as intended behaviour. That is the
         # bug: called directly on a rolled-back non-empty journal,
         # initialise_anchor blessed the rolled-back head. The

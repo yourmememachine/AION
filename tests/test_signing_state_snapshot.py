@@ -177,7 +177,7 @@ class SignVerifyTests(unittest.TestCase):
         reasons = verify_signed_snapshot(forged, signing_key=KEY, now=NOW)
         self.assertIn("payload_hash_mismatch", reasons)
         # An internally inconsistent tamper fails even earlier, at
-        # payload re-derivation (war-room cycle 10 fix round).
+        # payload re-derivation (review cycle 10 fix round).
         forged = replace(signed, cycle_seq=99)
         reasons = verify_signed_snapshot(forged, signing_key=KEY, now=NOW)
         self.assertIn("malformed_payload", reasons)
@@ -322,7 +322,7 @@ class EnvelopeTests(unittest.TestCase):
 
 
 class FixRoundTests(unittest.TestCase):
-    """War-room cycle 10 fix round: every finding pinned."""
+    """Review cycle 10 fix round: every finding pinned."""
 
     def test_payload_builder_validates_facts(self):
         from signing.state_snapshot import StateFacts, state_snapshot_payload
@@ -503,7 +503,7 @@ class FixRoundTests(unittest.TestCase):
 
 
 class Cycle12FixRoundTests(unittest.TestCase):
-    """War-room cycle 12 re-verification: every finding pinned."""
+    """Review cycle 12 re-verification: every finding pinned."""
 
     def test_history_len_cannot_exceed_last_cycle(self):
         from signing.state_snapshot import StateFacts, state_snapshot_payload
@@ -727,7 +727,7 @@ class Cycle14ChainGapTests(unittest.TestCase):
 
 
 class Cycle14FixRoundTests(unittest.TestCase):
-    """War-room cycle 14 fix round: every FIX finding pinned."""
+    """Review cycle 14 fix round: every FIX finding pinned."""
 
     _hist = staticmethod(Cycle14ChainGapTests._hist)
     _sign_seq = Cycle14ChainGapTests._sign_seq

@@ -1,6 +1,6 @@
 """Static deploy tests for deploy/verifier-identity/.
 
-FINDING-1 (war room): the verifier's budget variables
+FINDING-1 (review): the verifier's budget variables
 AION_VERIFIER_PROPOSAL_BUDGET / AION_VERIFIER_IDENTITY_BUDGET
 were missing from run-verifier.sh's ALLOWED_KEYS allowlist and
 from setup.sh's verifier.env template — an operator setting

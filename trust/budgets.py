@@ -28,7 +28,7 @@ What is enforced, per registry actor identity:
   alone, and a single proposal's extraction budget is 25
   transcripts — at most 25 exact scores, each of which leaks at
   most log2(n+1) bits about an n-item sealed set.
-* Detection is IDENTITY-scoped, not proposal-scoped (war-room
+* Detection is IDENTITY-scoped, not proposal-scoped (review
   HIGH-1): replay, near-duplicate similarity and probe counting
   all compare a new transcript against EVERY transcript recorded
   for that identity, across all proposals. The proposal label is
@@ -51,7 +51,7 @@ What is enforced, per registry actor identity:
   the denominator is the longer length). A new transcript is a
   near-duplicate probe when, against ANY previous transcript of
   the same identity, EITHER its similarity is >= 0.8 OR the
-  absolute number of differing positions is <= 2 (war-room
+  absolute number of differing positions is <= 2 (review
   HIGH-2). The absolute rule exists because the fraction rule is
   blind exactly where extraction is cheapest: at similarity
   0.70/0.79 a probe never counted, and for sealed sets of n <= 4
@@ -100,7 +100,7 @@ operator who accepts a budget reset deletes the file
 deliberately, as an auditable act — the store never does it
 silently.
 
-Integrity (war-room MEDIUM-1): the persisted state is
+Integrity (review MEDIUM-1): the persisted state is
 hash-chained. Each saved state carries "prev_chain_hash" (the
 head of the state it replaces; the genesis hash for the first
 save) and "chain_hash" = sha256 over the previous head and the

@@ -1,6 +1,5 @@
 """Fail-closed deployment-mode contract + effective-mode
-reporting — Trust Boundary v3.1, items 1 and 5-support
-(POD A: seat-1 / seat-3).
+reporting — Trust Boundary v3.1, items 1 and 5-support.
 
 The contract under test:
 

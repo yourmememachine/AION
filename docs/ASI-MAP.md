@@ -1,6 +1,6 @@
 # ASI Map — How We Complete The Task
 
-Goal (Dilip): ASI is the goal. Bring the AI that would exist in 2036 into
+Goal: ASI is the goal. Bring the AI that would exist in 2036 into
 2027. Keep updating, thinking and planning about the future, every hour.
 
 ## What "ASI" means here — the scorecard we measure, not a slogan
@@ -16,16 +16,16 @@ A system counts as ASI-like only as it earns these, measured:
 Every hourly update reports this scorecard: % per capability, tests, verdict.
 
 ## The map — phases, each with an exit gate
-- P0 Foundation (NOW, Nov 2026): never-stop loop, 3-coder gate, 6-reviewer
-  war-room gate, persistent state. Exit: loop + tests green. [36 tests, done]
+- P0 Foundation (NOW, Nov 2026): never-stop loop, build gate, independent
+  review gate, persistent state. Exit: loop + tests green. [36 tests, done]
 - P1 Memory + Benchmarks (Nov–Dec 2026): long-term memory store, frozen
   benchmark suite (coding, research, reasoning, self-improvement delta).
   Exit: same task run twice scores better the 2nd time, from memory alone.
 - P2 Tool Agents (Dec 2026): browser, code, files, search as safe tools with
   permission gates. Exit: agent completes a multi-step real task end-to-end.
-- P3 Research Agent (Jan 2027): scans the future hourly, debates findings
-  (15 seats), updates the roadmap itself. Exit: its roadmap changes are
-  cited, debated and survive war-room review.
+- P3 Research Agent (Jan 2027): scans the future hourly, debates findings,
+  updates the roadmap itself. Exit: its roadmap changes are
+  cited, debated and survive independent review.
 - P4 Self-Improvement Engine (Jan–Mar 2027): agents propose changes to
   themselves, test on frozen benchmarks, keep only verified gains.
   Exit: 3 consecutive months of measured benchmark gains, no regressions.
@@ -47,8 +47,8 @@ The critique was checked and accepted in substance. These tracks run in
 EVERY phase, not at the end:
 - X1 Scalable oversight: as capability grows, oversight grows with it.
   Any self-modification, tool permission, or payment capability above the
-  current tier needs extra reviewers + a dedicated red-team seat, and a
-  human (Dilip) gate for tier jumps. No silent capability escalation.
+  current tier needs extra reviewers + a dedicated red-team reviewer, and a
+  human gate for tier jumps. No silent capability escalation.
 - X2 Anti-gaming evaluation: benchmarks are split — a frozen public set the
   builders may see, and a SEALED held-out set they may not (hash-locked,
   rotated, access-logged). A gain counts only if it appears on the sealed
@@ -57,14 +57,14 @@ EVERY phase, not at the end:
   regression suite — no benchmark may go down, not just the target one,
   (b) a forgetting check on old capabilities, (c) a reward-hacking check
   by a verifier who did not build it, on sealed data. One failure = revert.
-- X4 Calibration, not consensus: the 15 record independent scores BEFORE
+- X4 Calibration, not consensus: reviewers record independent scores BEFORE
   discussion; dissent is preserved in the record, never averaged away.
-  Reviewer calibration is tracked against real outcomes, so a seat that is
+  Reviewer calibration is tracked against real outcomes, so a reviewer that is
   confidently wrong loses weight. Consensus without independent evidence
   is treated as no evidence.
 - X5 Robustness + contingency: adversarial/distribution-shift tests in
   every phase's exit gate. Calendar is a target, not a forcing function:
-  if a phase exit fails twice, the weekly war room must pivot the approach
+  if a phase exit fails twice, the weekly review must pivot the approach
   or extend that phase — it may not lower the gate to meet the date.
   External red-teaming is required before P6 (money) and P7 (robot) unlock.
 
@@ -73,12 +73,12 @@ on any benchmark, for 3 consecutive months. P8 is a candidate bar, not ASI
 itself: true ASI would need broad competence across domains, tested on
 sealed tasks from domains the system was not built for — added to P8.
 
-## How the 15 work, continuously
-Hourly cycle: Scan (2,6,7,15) → Build, 3+ coders (rotating) → War room,
-6 reviewers, blind then reconciled → Fix + verify → Self-improve record →
-Ship/record. Next hour starts from state, never from zero.
-Daily: roadmap re-plan — Future pod re-scores the scorecard, re-ranks backlog.
-Weekly: strategy war room — is this still the fastest path to ASI in 2027?
+## How the loop runs, continuously
+Hourly cycle: Scan → Build → independent review, blind then reconciled →
+Fix + verify → Self-improve record → Ship/record. Next hour starts from
+state, never from zero.
+Daily: roadmap re-plan — the scorecard is re-scored, the backlog re-ranked.
+Weekly: strategy review — is this still the fastest path to ASI in 2027?
 Kill what is not measuring up.
 
 ## Honest limits that shape the plan
@@ -89,7 +89,7 @@ Kill what is not measuring up.
 - True ASI is not proven by anyone. We publish the scorecard so progress is
   verified, never claimed.
 - Safety gates are part of ASI, not a brake on it: no real assets, no
-  spending, no public push without Dilip's word and the war-room pass.
+  spending, no public push without the owner's word and the review pass.
 
 ## Completion condition
 Task is complete when P8 passes: 3 unseen goals in a row, end-to-end,

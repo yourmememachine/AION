@@ -11,7 +11,7 @@ this suite fails loudly. That failure is the point.
 The corpus formerly also pinned a known divergence: the gate
 fed a RAW non-canonical spelling could miss a protected file,
 while the policy — judging the canonical spelling — caught it.
-That divergence is CLOSED: in cycle 13, under Dilip's approval
+That divergence is CLOSED: in cycle 13, under approval
 of the Protected Gate proposal, eval/gate.py adopted the policy
 (its check_protected_paths now judges the canonical spelling
 and raises GateInputError for spellings that cannot be
@@ -192,7 +192,7 @@ class CorpusAgreementTests(unittest.TestCase):
 
 
 class AdoptionTests(unittest.TestCase):
-    """Pin the ADOPTED behaviour (cycle 13, Dilip's approval of
+    """Pin the ADOPTED behaviour (cycle 13, approval of
     the Protected Gate proposal): the gate now judges the
     canonical spelling via path-policy/1, so its verdict on a
     RAW non-canonical spelling agrees with the policy's "gate"

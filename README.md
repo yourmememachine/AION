@@ -20,11 +20,16 @@ gets measurably smarter at its own work each cycle — and measures it, rather
 than claiming ASI by name alone.
 
 ## Structure
-- `agents/` — developer roles and their charters
 - `core/` — the never-stop loop: scan → build → review → ship → repeat
-- `action/` — real-world action layer (tools, services, approvals)
-- `products/` — first 2027 products
-- `docs/` — roadmap to 2027
+- `eval/` — sealed evaluation, the ship gate and calibration
+- `memory/` — long-term memory store and the transfer/principle engines
+- `signing/` — Ed25519 signing, pin ceremony and state snapshots
+- `trust/` — the verifier, ship transactions and the path policy
+- `selfmod/` — guarded self-modification (canary)
+- `oversight/` — approval and oversight checks
+- `deploy/` — verifier deployment identity and health checks
+- `docs/` — the product map and mechanism documents
+- `tests/` — the full test suite
 
 ## Timeline
 - Nov–Dec 2026: build core loop + evaluation harness

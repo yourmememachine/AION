@@ -1,6 +1,6 @@
 """Tests for MAC-authenticated (signed) gate decisions.
 
-Standard library only. Pins the war-room red-team list: field flips,
+Standard library only. Pins the review red-team list: field flips,
 transplants, note-segment swaps, alg/key confusion, expiry, replay
 against another entry, and the strict commit_signed path.
 """
@@ -484,8 +484,8 @@ class CommitSignedTests(unittest.TestCase):
         self.assertEqual(entry["seq"], 1)
 
 
-class WarRoomFixTests(unittest.TestCase):
-    """Pins for the cycle-7 war-room fix list (R1/R2/R4/R5/R6)."""
+class ReviewFixTests(unittest.TestCase):
+    """Pins for the cycle-7 review fix list (R1/R2/R4/R5/R6)."""
 
     def setUp(self):
         self.signed = sign(accepted_decision(), attestation=attestation())

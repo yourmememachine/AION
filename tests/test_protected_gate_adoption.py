@@ -1,7 +1,7 @@
 """Negative-integration tests for the Protected Gate adoption
-(cycle 13, Dilip's approval of internal/PROTECTED-GATE-PROPOSAL.md).
+(cycle 13, approval of the Protected Gate proposal record).
 
-Both external seats (ChatGPT and Gemini) asked for an end-to-end
+Both external reviewers (ChatGPT and Gemini) asked for an end-to-end
 negative test of the adopted gate, not only unit pins: an
 otherwise-ACCEPTABLE change must be refused solely because a
 changed path is a non-canonical spelling of a protected file,

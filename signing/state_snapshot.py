@@ -269,7 +269,7 @@ def parse_state_bytes(state_bytes) -> StateFacts:
         completed = entry.get("completed_at")
         if completed is not None:
             # Every entry's timestamp is validated, not only the
-            # last one's (war-room cycle 10, rev-r2/r3), and the
+            # last one's (review cycle 10, rev-r2/r3), and the
             # sequence must be non-decreasing: history is written
             # in time order, so a later cycle stamped earlier than
             # its predecessor — or an early cycle stamped after
@@ -343,7 +343,7 @@ def _validate_facts(facts: StateFacts) -> str | None:
     point shared by signing, verification and envelope
     reconstruction, so a snapshot carrying facts no signer would
     emit fails as malformed_payload everywhere, not only when a
-    caller happens to supply the state bytes (war-room cycle 10,
+    caller happens to supply the state bytes (review cycle 10,
     rev-r1/r2/r4)."""
     if not _is_int(facts.schema_version) or facts.schema_version != 1:
         raise SigningError("state schema_version must be the integer 1")
@@ -367,7 +367,7 @@ def _validate_facts(facts: StateFacts) -> str | None:
         # History cycle ids are strictly increasing positive
         # integers ending at cycle_seq, so at most cycle_seq
         # entries can exist; more is signer-impossible even though
-        # fewer is legitimate (pruned history). War-room cycle 12,
+        # fewer is legitimate (pruned history). Review cycle 12,
         # rev-r1/rev-r4.
         raise SigningError(
             "history_len exceeds the last history cycle")
@@ -642,7 +642,7 @@ def verify_signed_snapshot(signed, *, signing_key: SigningKey,
                 "'signer_id' bindings and no other keys")
         # Capture each pin field ONCE, through the one accessor,
         # and validate and compare only the captured locals
-        # (war-room cycle 14, rev-r2 + re-verification seat): the
+        # (review cycle 14, rev-r2 + re-verification seat): the
         # pin is the trust anchor, and re-reading a mapping lets
         # an inconsistent-read pin (values changing between reads,
         # or a shared dict mutated concurrently) be validated as
@@ -676,7 +676,7 @@ def verify_signed_snapshot(signed, *, signing_key: SigningKey,
                 != pin_hash:
             # The immediate successor of the pinned snapshot must
             # chain to it: this is the one continuity check a
-            # single pin supports (war-room cycle 10, rev-r5 +
+            # single pin supports (review cycle 10, rev-r5 +
             # external seat). Older gaps are not chain-verified;
             # see the module docstring.
             reasons.append("chain_discontinuity")
@@ -717,8 +717,8 @@ def verify_snapshot_for_state(signed, *, signing_key: SigningKey,
     convention as ``verify_signed_decision``); consumers attesting
     a live state must use this wrapper, which is to snapshots what
     ``commit_signed``'s strong form is to gate decisions
-    (war-room cycle 10, rev-r2). Chain continuity is enforced
-    here (cycle 14, closing the war-room cycle 12 rev-r2 dissent):
+    (review cycle 10, rev-r2). Chain continuity is enforced
+    here (cycle 14, closing the review cycle 12 rev-r2 dissent):
     a snapshot more than one sequence past the pin reports
     ``chain_gap`` — never ``()`` — even when every other binding
     is perfect and its ``prev_snapshot_hash`` points at the unseen

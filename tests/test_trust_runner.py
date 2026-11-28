@@ -277,7 +277,7 @@ class RunnerTests(unittest.TestCase):
         # the compound adopted-line-loss + store-restore state,
         # which is indistinguishable from a genuine burn at the
         # reconciliation layer. Claim narrowing, recorded in
-        # internal/cycle28-work/fix-round-gpt.md: the wired
+        # the cycle-28 fix record: the wired
         # adopt step now refuses pin_store_history_incomplete
         # (a SigningError — runner exit 6, step_refused) BEFORE
         # any ceremony, so this shape no longer reaches the
@@ -292,7 +292,7 @@ class RunnerTests(unittest.TestCase):
         # pending flow by the supersession suites on the
         # unwired adopter. A beyond-head genuine
         # burn is an operator-reconciliation residual, named
-        # in internal/BUILD-CYCLE-28.md.
+        # in the cycle-28 build record.
         # Shape: genesis adopt @13; two test-side hookless
         # cycles open state to 15; a held-lock adopt burns the
         # 13->15 ceremony movement (pin stays 13, head 15);
@@ -340,7 +340,7 @@ class RunnerTests(unittest.TestCase):
         # test") by correcting its premise: the failing-first
         # probe for this shape expected exit 7
         # (supersession_pending) and got exit 0 — recorded in
-        # internal/cycle29-work/failing-first.md. An
+        # the cycle-29 failing-first record. An
         # at-sequence candidate after a single head burn is the
         # burn's EXACT pair (same seq, same payload hash), so
         # the head entry is not even relevant to history
@@ -360,10 +360,10 @@ class RunnerTests(unittest.TestCase):
         # refusal is shape-specific, not categorical. Whether
         # any fresh wired shape reaches pending post-cycle-28
         # is an open follow-up, recorded in
-        # internal/BUILD-CYCLE-29.md (the resume path re-pends
+        # the cycle-29 build record (the resume path re-pends
         # without a fresh verifier refusal and is covered by
         # the unwired supersession suites). Claim correction
-        # to cycle 28 recorded in internal/BUILD-CYCLE-29.md.
+        # to cycle 28 recorded in the cycle-29 build record.
         proc = self.run_runner([{"adopt": True}])
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         self.assertEqual(self.read_pin()["cycle_seq"], 13)

@@ -55,7 +55,7 @@ approval journal, and the self-modification canary journal.
 Two protected consumers in `eval/` did not meet the
 duplicate-key clause when this inventory was written and were
 recorded as findings P-1/P-2 below; both are FIXED in cycle 13
-under Dilip's Protected Gate approval (see the Protected
+under Protected Gate approval (see the Protected
 findings section for their dispositions); one consumer in `trust/verifier_main.py` (row 26)
 and the budgets-anchor reader in
 `deploy/verifier-identity/health_check.py` (row 34) were
@@ -125,7 +125,7 @@ in the meantime. Recommended protected change: add an
 `CorruptRegistryError`, mirroring `memory/store.py`) and use the
 same strict parse in `_disk_changed`."
 
-Disposition: FIXED in cycle 13 under Dilip's Protected Gate approval — the recommended change was applied exactly as proposed: `_load` now rejects duplicate keys via an `object_pairs_hook` raising `CorruptRegistryError`, and `_disk_changed` uses the same strict parse (duplicate/constant/float hooks), so a duplicate-key `registry.json` is refused at parse by both loaders. The pre-fix residual was a parser differential, not an integrity break: both loaders' digests/chains were recomputed over the last-wins parse. No claim beyond that: the fix closes the duplicate-key differential for this loader; it does not change what the digest binds or make the registry tamper-proof against a writer who recomputes it.
+Disposition: FIXED in cycle 13 under Protected Gate approval — the recommended change was applied exactly as proposed: `_load` now rejects duplicate keys via an `object_pairs_hook` raising `CorruptRegistryError`, and `_disk_changed` uses the same strict parse (duplicate/constant/float hooks), so a duplicate-key `registry.json` is refused at parse by both loaders. The pre-fix residual was a parser differential, not an integrity break: both loaders' digests/chains were recomputed over the last-wins parse. No claim beyond that: the fix closes the duplicate-key differential for this loader; it does not change what the digest binds or make the registry tamper-proof against a writer who recomputes it.
 
 **Finding P-2 (`eval/calibration.py`, `CalibrationLog._load`).**
 Same shape as P-1: non-finite numbers are refused at parse time
@@ -134,7 +134,7 @@ with a bogus-first duplicate entry `score`. Recommended
 protected change: add the same `object_pairs_hook` rejection
 (raising `CorruptCalibrationError`).
 
-Disposition: FIXED in cycle 13 under Dilip's Protected Gate approval — the recommended change was applied exactly as proposed: `_load` now rejects duplicate keys via an `object_pairs_hook` raising `CorruptCalibrationError`, so a duplicate-key `calibration.json` is refused at parse. The pre-fix residual was a parser differential, not an integrity break: the entry hashes were recomputed over the last-wins parse. No claim beyond that: the fix closes the duplicate-key differential for this loader only.
+Disposition: FIXED in cycle 13 under Protected Gate approval — the recommended change was applied exactly as proposed: `_load` now rejects duplicate keys via an `object_pairs_hook` raising `CorruptCalibrationError`, so a duplicate-key `calibration.json` is refused at parse. The pre-fix residual was a parser differential, not an integrity break: the entry hashes were recomputed over the last-wins parse. No claim beyond that: the fix closes the duplicate-key differential for this loader only.
 
 ## Differential tests
 

@@ -1,5 +1,5 @@
 """Unit tests for the sealed-eval attestation (trust/attestation)
-— score-exactness pins from the cycle-8 war room.
+— score-exactness pins from the cycle-8 review.
 
 The signed payload stores correct/n, never the presented score;
 a presented score that differs at all was not the signed score.

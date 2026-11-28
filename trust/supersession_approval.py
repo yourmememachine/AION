@@ -31,9 +31,9 @@ what makes the authorisation separate:
   it was refused against).
 
 Trust claim, stated precisely (design:
-internal/cycle25-work/design-approval.md section 1, as
+the cycle-25 design-approval record, section 1, as
 narrowed in cycle 26 — see
-internal/DECISION-CONSUMPTION-HEAD.md Addendum 6):
+the consumption-head decision record, Addendum 6):
 supersession requires a separately invoked,
 cryptographically independent approval operation — a
 standalone tool invocation, with its own inputs, producing

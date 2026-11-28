@@ -289,7 +289,7 @@ class TestVerifierNote(unittest.TestCase):
     def test_note_recorded_in_decision(self):
         decision = self._valid_change(
             verifier_note="seat-9 verifies this round; rotated from seat-4, "
-                          "different pod from all builders")
+                          "independent of all builders")
         self.assertIn("rotated", decision.verifier_note)
 
     def test_note_defaults_empty_and_is_validated(self):

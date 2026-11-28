@@ -2,7 +2,7 @@
 budgets (Trust Boundary v2, item 5). All stores live in temp
 directories; no real verifier home is touched.
 
-War-room fix round (Trust Boundary v2): detection is now
+Review fix round (Trust Boundary v2): detection is now
 IDENTITY-scoped (HIGH-1), probes also count on an absolute
 differing-positions rule (HIGH-2), the store is hash-chained
 with verify_integrity()/head_hash() (MEDIUM-1), and a two-phase
@@ -121,7 +121,7 @@ class BudgetStoreTests(unittest.TestCase):
         self.assertEqual(store.proposal_count("prop-a"), 1)
         self.assertIsNone(store.check_and_record(
             IDENTITY, "prop-a", transcript("fresh")))
-        # UPDATED (war-room HIGH-1): replay detection is
+        # UPDATED (review HIGH-1): replay detection is
         # IDENTITY-scoped now, so the same transcript under a
         # DIFFERENT proposal label IS a replay for the same
         # identity — the old per-proposal assertion here encoded
@@ -147,7 +147,7 @@ class BudgetStoreTests(unittest.TestCase):
         self.assertEqual(transcript_similarity(base, base + ["z"]), 10 / 11)
 
     def test_near_duplicate_probes_latch_at_limit(self):
-        # UPDATED (war-room HIGH-1): probe counting is
+        # UPDATED (review HIGH-1): probe counting is
         # IDENTITY-scoped (the accessor takes an identity now) and
         # the latch is scoped to the probed transcript FAMILY for
         # that identity — the old assertions encoded per-proposal
@@ -271,7 +271,7 @@ class BudgetStoreTests(unittest.TestCase):
 
 
 class IdentityScopedDetectionTests(unittest.TestCase):
-    """War-room HIGH-1: rotating the caller-chosen proposal label
+    """Review HIGH-1: rotating the caller-chosen proposal label
     must not reset replay, similarity or probe detection — all
     three are scoped to the verifier identity across proposals."""
 
@@ -344,7 +344,7 @@ class IdentityScopedDetectionTests(unittest.TestCase):
 
 
 class AbsoluteDifferenceProbeTests(unittest.TestCase):
-    """War-room HIGH-2: probes whose similarity FRACTION is below
+    """Review HIGH-2: probes whose similarity FRACTION is below
     0.8 still count when the absolute number of differing
     positions is <= 2 — decisively for small sealed sets, where
     the fraction detector can never fire on single-position
@@ -407,7 +407,7 @@ class AbsoluteDifferenceProbeTests(unittest.TestCase):
     def test_three_differing_positions_do_not_count(self):
         # n=10, 3 differing positions: similarity 0.7 (< 0.8) AND
         # absolute difference 3 (> 2) — not a probe under either
-        # rule. (0.70 was one of the war room's invisible probes
+        # rule. (0.70 was one of the review's invisible probes
         # at n=3..4 scale; at n=10 a 3-position change is a
         # genuinely different transcript, and the fraction rule
         # takes over from 2 differing positions upward in effect
@@ -422,7 +422,7 @@ class AbsoluteDifferenceProbeTests(unittest.TestCase):
 
 
 class IntegrityTests(unittest.TestCase):
-    """War-room MEDIUM-1: the persisted state is hash-chained;
+    """Review MEDIUM-1: the persisted state is hash-chained;
     tampering that keeps the structural invariants consistent
     still fails, verify_integrity() reports it without raising,
     and head_hash() gives an external anchor something to pin."""
@@ -498,7 +498,7 @@ class IntegrityTests(unittest.TestCase):
 
 
 class TwoPhaseApiTests(unittest.TestCase):
-    """War-room MEDIUM-2: check_only refuses exactly when record
+    """Review MEDIUM-2: check_only refuses exactly when record
     would, but records NOTHING — so a transcript the verifier
     later rejects on its own validation (e.g. answer count) burns
     no budget."""

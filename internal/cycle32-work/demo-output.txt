@@ -1,4 +1,0 @@
-artefact format='proof-artefact/1' change_id='cycle32-demo-change'
-verify untouched post tree: ACCEPTED reasons=()
-verify tampered post tree: REFUSED reasons=('post_tree_mismatch',)
-verify vacuous check: REFUSED reasons=('check_not_discriminating:always-passes', 'check_vacuous:always-passes')

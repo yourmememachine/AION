@@ -458,8 +458,8 @@ def gate_maps(pub_b, pub_c, sealed_b, sealed_c, gold_b=None, gold_c=None):
     )
 
 
-class WarRoomRegressionTests(StoreTestCase):
-    """Findings from the cycle-4 war room, pinned as tests."""
+class ReviewRegressionTests(StoreTestCase):
+    """Findings from the cycle-4 review, pinned as tests."""
 
     def _rehash_and_write(self, mutate):
         data = json.loads(self.store.memory_path.read_text())

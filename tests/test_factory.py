@@ -68,7 +68,7 @@ class GenerationTests(unittest.TestCase):
     def test_answers_are_correct(self):
         # Every family must be verified, across generations covering
         # every active window; an unhandled family fails the test
-        # rather than being silently skipped (war-room fix F9).
+        # rather than being silently skipped (review fix F9).
         seen = set()
         for gen in range(len(FAMILY_NAMES)):
             for item in generate_batch("verify", gen, 40):

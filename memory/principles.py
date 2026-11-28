@@ -4,7 +4,7 @@ Cycle 34 measured the boundary of the strategy-token memory
 (memory/solver.py): within-family transfer only, zero transfer to
 new formats, and a learned rule firing wrongly on a trap
 distribution. Three external designs (Claude, ChatGPT, Gemini —
-obtained blind, reconciled in internal/BUILD-CYCLE-35.md)
+obtained blind, reconciled in the cycle-35 build record)
 converged on the same fix, implemented here:
 
 - Lessons are PRINCIPLES, not procedures: a small program over
@@ -37,7 +37,7 @@ than the no-memory baseline: factory prompts fall back to the
 naive strategy solver, few-shot prompts abstain ("").
 
 Fix round (post round-1 external review; see
-internal/BUILD-CYCLE-35-FIX.md) adds three mechanisms:
+the cycle-35 fix record) adds three mechanisms:
 
 - AGREEMENT-GATED ANSWERING for derivation ties: where
   derivation recorded tied candidate programs for a cluster
