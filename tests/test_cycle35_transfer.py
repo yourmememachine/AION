@@ -7,21 +7,33 @@ handling with zero false applications; false-refusal rate
 <= 0.01; control reproduces baseline; memory never worse.
 
 The one diagnosed residual, pinned here rather than hidden: the
-shifted arithmetic family stays at 0.00. Public gen-1 expression
-episodes are all (a * b - c), on which operator precedence and
-left-to-right evaluation coincide, so derivation abstains on the
-tie (see the derivation audit assertion below). The four lesson
+shifted arithmetic family is an OPEN GAP. Public gen-1
+expression episodes are all (a * b - c), on which operator
+precedence and left-to-right evaluation coincide, so derivation
+abstains on the tie (see the derivation audit assertion below).
+In Cycle 34 this family was a no-lesson control by design; in
+Cycle 35 derivation tried and abstained, and the record says
+so. The fix round adds agreement-gated answering: the tied
+candidates answer items they agree on and abstain on items they
+disagree on. Every shifted arithmetic item is of the form
+a + b * c, on which the candidates disagree, so the family
+score equals the (zero) agreement fraction — asserted below as
+a computed quantity, not a magic number. The four lesson
 families carry the shifted tier to 1.00 each; the aggregate
-including the control family is 0.80 by that construction.
+including the open-gap family is 0.80 by that construction.
 """
 
+import re
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from memory.transfer import generate_shifted
 from memory.transfer35 import LESSON_FAMILIES, run_cycle35_measurement
+
+_ARITH_RE = re.compile(r"What is ([0-9]+) \+ ([0-9]+) \* ([0-9]+)\?")
 
 SEED_SETS = (
     {"public_seed": "p2-public-7f3a91c2e4",
@@ -54,14 +66,80 @@ class Cycle35MeasurementTests(unittest.TestCase):
             for family in LESSON_FAMILIES:
                 self.assertEqual(per_family[family], 1.0, family)
 
-    def test_shifted_arithmetic_residual_is_the_diagnosed_tie(self):
-        for r in self.reports:
-            per_family = r["tiers"]["shifted"]["after"]["per_family"]
-            self.assertEqual(per_family["arithmetic"], 0.0)
+    def test_shifted_arithmetic_is_an_open_gap_with_agreement_gate(self):
+        for seeds, r in zip(SEED_SETS, self.reports):
             audit = r["derivation_audit"]["clusters"]["expression"]
             self.assertEqual(audit["decision"], "abstain_tie")
             self.assertEqual(set(audit["tied"]),
                              {"eval_precedence", "eval_left_to_right"})
+            self.assertTrue(audit["agreement_gated"])
+            # The family is recorded as an open gap, not a control.
+            gaps = {g["family"]: g for g in r["open_gaps"]}
+            self.assertIn("arithmetic", gaps)
+            self.assertEqual(gaps["arithmetic"]["status"], "open_gap")
+            # The score equals the fraction of items the tied
+            # candidates agree on (the gate answers those; the
+            # rest fall back to the baseline, which scores 0 on
+            # this family — the pre-fix pin). Computed from the
+            # items, not hard-coded.
+            items = [i for i in generate_shifted(seeds["shifted_seed"], 20)
+                     if i["family"] == "arithmetic"]
+            agree = 0
+            for item in items:
+                a, b, c = (int(x) for x in
+                           _ARITH_RE.fullmatch(item["prompt"]).groups())
+                if a + b * c == (a + b) * c:
+                    agree += 1
+            per_family = r["tiers"]["shifted"]["after"]["per_family"]
+            self.assertEqual(per_family["arithmetic"],
+                             agree / len(items))
+
+    def test_engine_stats_reported_separately_from_accuracy(self):
+        for r in self.reports:
+            for tier in r["tiers"].values():
+                stats = tier["engine"]
+                self.assertIn("abstention_rate", stats)
+                self.assertIn("selective_accuracy", stats)
+                self.assertIn("refusal_taxonomy", stats)
+            in_dist = r["tiers"]["in_distribution"]["engine"]
+            self.assertEqual(in_dist["selective_accuracy"], 1.0)
+            held = r["tiers"]["heldout"]["engine"]
+            taxonomy = held["refusal_taxonomy"]
+            if held["abstention_rate"] > 0:
+                self.assertIn("insufficient_evidence", taxonomy)
+
+    def test_traps_primary_metric_and_structural_transfer_split(self):
+        for r in self.reports:
+            traps = r["traps"]
+            self.assertEqual(traps["primary_metric"],
+                             "false_application_rate")
+            squares = traps["structural_transfer"]["trap-squares"]
+            self.assertEqual(squares["label"],
+                             "Cross-Domain Structural Transfer")
+            self.assertEqual(squares["end_to_end"], 1.0)
+            self.assertIn("trap_refused",
+                          traps["refusal_taxonomy"])
+
+    def test_fresh_crosscheck_set(self):
+        positive = ("fresh-last", "fresh-secondmin",
+                    "fresh-nextgeo", "fresh-count")
+        abstaining = ("fresh-coincide", "fresh-degenerate")
+        for r in self.reports:
+            per_family = r["fresh_crosscheck"]["per_family"]
+            self.assertEqual(set(per_family),
+                             set(positive) | set(abstaining))
+            for family, m in per_family.items():
+                self.assertEqual(m["false_applications"], 0, family)
+                self.assertEqual(m["safe_handling"], 1.0, family)
+            for family in positive:
+                self.assertGreaterEqual(
+                    per_family[family]["end_to_end"], 0.90, family)
+            for family in abstaining:
+                # The coincidence families must be abstained on,
+                # never confidently answered by the stored
+                # principle the samples cannot distinguish.
+                self.assertEqual(
+                    per_family[family]["applications"], 0, family)
 
     def test_heldout_per_family_and_aggregate(self):
         for r in self.reports:

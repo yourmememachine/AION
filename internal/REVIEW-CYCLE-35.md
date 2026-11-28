@@ -94,6 +94,50 @@ accepted without naming its items).
   answer (induction checks all episodes; enumeration order is
   fixed); the solver never reads item family labels.
 
+## Fix round (post round-1 external review)
+
+External round 1: ChatGPT 0.97 SHIP, Gemini 0.94 SHIP,
+Claude 0.88 SHIP with conditions. Dilip's sequence: "Fix n
+ship" — the delta lands before the cycle is recorded as
+shipped. Full disposition: internal/BUILD-CYCLE-35-FIX.md.
+Delta-specific attack notes:
+
+- Agreement gate reach: the gate runs only when NO stored
+  principle passed for the shape, so it can never override a
+  stored principle's refusal or break a stored competition.
+  Verified on the sealed tier: in-distribution stays 1.00,
+  and the gate's only shifted-tier trace is the 20 arithmetic
+  abstentions per seed (insufficient_evidence), exactly the
+  items where the candidates disagree.
+- Version-space block, false-block risk: the block fires
+  only when a consistent program within the complexity cap
+  DISAGREES on the query. Held-out aggregates are unchanged
+  (1.00 / 0.99 / 0.995) and the fresh positive families are
+  1.00 on all seeds — no legitimate stored firing was lost.
+  The cap enumeration runs only when a stored principle
+  passed and is longer than the shortest induced program;
+  for all derived principles (length 1) it never enumerates,
+  so measurement cost is unchanged in the common path.
+- Empty-induction block: checked against every existing
+  few-shot unit test and both few-shot tiers — no held-out
+  or trap item relied on firing a stored principle with an
+  empty version space (every legitimately firing stored
+  principle's own program is in the vocabulary, hence in
+  the space). The one behaviour change is the constructed
+  parity case, which is the point of the rule.
+- Generic antagonist refactor: trap metrics byte-identical
+  to round 1 (0 false applications; geometric/alternating
+  refused with the trap code, now produced by extrap_add's
+  declared invariant rather than its ratio_mode). Periodic
+  traps now show precondition_failed in the taxonomy — a
+  reporting difference, not a behaviour difference: they
+  were and are refused on invariant miss.
+- Contamination handling: heldout35.py untouched (sha256
+  re-verified da4096e5…); the fresh generator was written
+  and hashed (501e0ff8…) before the measurement code that
+  consumes it was run, and it imports only the frozen
+  prompt/render helpers from heldout35.
+
 ## Residual risks accepted and disclosed
 - The primitive vocabulary is hand-built (as was the strategy
   vocabulary before it): transfer is demonstrated across

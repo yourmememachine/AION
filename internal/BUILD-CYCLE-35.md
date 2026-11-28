@@ -139,6 +139,39 @@ an honest derivation must be able to say "the evidence cannot
 distinguish these" and abstain — the audit trail of what was
 NOT learned is part of the result.
 
+## ADDENDUM (fix round, 2026-11-28) — corrections and ship sequence
+
+This addendum supersedes three things in the record above:
+
+1. **Arithmetic is an OPEN GAP, not a "designated control."**
+   The Results section above calls the arithmetic family
+   "Cycle 34's designated no-lesson control." That framing is
+   corrected: in Cycle 34 the family was a control by design;
+   in Cycle 35 derivation TRIED on the expression cluster and
+   abstained on a genuine tie (precedence vs left-to-right,
+   indistinguishable on the public episodes). It is recorded
+   as an open gap with its audit record. The fix round adds
+   agreement-gated answering at inference; the gap remains
+   open on the shifted tier because every shifted arithmetic
+   item is of a form the tied candidates disagree on.
+2. **heldout35 seed set 2 is CONTAMINATED for the
+   cross-check mechanism.** The stored/induced cross-check
+   was designed after observing a held-out failure in seed
+   set 2 (Review item 4), so that seed set is dev data for
+   the mechanism and its post-fix numbers are not clean
+   evidence for it. The cross-check is re-measured on a
+   fresh frozen set (memory/heldout35fresh.py) in the fix
+   round; see internal/BUILD-CYCLE-35-FIX.md.
+3. **Ship sequence.** External round 1: ChatGPT 0.97 SHIP,
+   Gemini 0.94 SHIP, Claude 0.88 SHIP with conditions. Dilip
+   first directed "Ok ship" and then corrected it the same
+   day (2026-11-28 12:57 CST) to **"Fix n ship" — fix first,
+   then ship.** The cycle is therefore NOT recorded as
+   shipped on the round-1 verdicts; it ships after the fix
+   round's re-scoring. The delta and its disposition of every
+   seat condition are in internal/BUILD-CYCLE-35-FIX.md; the
+   round-2 brief is internal/CROSS-CHECK-BRIEF-CYCLE-35-R2.md.
+
 ## Open follow-ups
 - External-seat round on the brief (parent runs it).
 - The arithmetic family stays evidence-bound until public
