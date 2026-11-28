@@ -44,11 +44,25 @@ from trust.shiptx import (
 )
 
 NOW = _rec.NOW
+
+
+def _refresh_clock():
+    """Re-stamp the fixture clock (cycle 33): NOW is copied from
+    test_trust_shiptx_recovery at import time and goes stale
+    during a long test run; refresh the source chain and re-read
+    its stamp."""
+    global NOW
+    _rec._refresh_clock()
+    NOW = _rec.NOW
 StubLoop = _rec.StubLoop
 JournalRecoveryFixture = _rec.JournalRecoveryFixture
 
 
 class TxAnchorFixture(JournalRecoveryFixture):
+    def setUp(self):
+        super().setUp()
+        _refresh_clock()
+
     def tx_anchor_path(self):
         return Path(self.tmp.name) / "anchors" / "ship-tx.anchor.json"
 

@@ -55,6 +55,16 @@ def _ts(minutes_offset):
 NOW = _ts(0)
 ATTESTED = _ts(-10)
 SATT_AT = _ts(-5)
+
+
+def _refresh_clock():
+    """Re-stamp the fixture clock (cycle 33): freshness checks
+    use the host wall clock, so import-time stamps expire during
+    a long test run; setUp re-stamps instead."""
+    global NOW, ATTESTED, SATT_AT
+    NOW = _ts(0)
+    ATTESTED = _ts(-10)
+    SATT_AT = _ts(-5)
 SEALED = "b" * 64
 PROPOSAL = "prop-proof-ship"
 ITEM = "proof-carrying-self-improvement"
@@ -107,6 +117,7 @@ def make_invariants():
 
 class ProofShipFixture(unittest.TestCase):
     def setUp(self):
+        _refresh_clock()
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
         self.base_root = make_tree(base / "base-repo", 1)

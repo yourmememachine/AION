@@ -48,6 +48,16 @@ def _ts(minutes_offset):
 NOW = _ts(0)          # wall-clock: record_ship takes no now=
 ATTESTED = _ts(-10)
 SATT_AT = _ts(-5)
+
+
+def _refresh_clock():
+    """Re-stamp the fixture clock (cycle 33): freshness checks
+    use the host wall clock, so import-time stamps expire during
+    a long test run; setUp re-stamps instead."""
+    global NOW, ATTESTED, SATT_AT
+    NOW = _ts(0)
+    ATTESTED = _ts(-10)
+    SATT_AT = _ts(-5)
 SEALED = "b" * 64
 PROPOSAL = "prop-ship"
 ITEM = "store-enforced-signed-commits"
@@ -71,6 +81,7 @@ def make_tree(root: Path):
 
 class ShipFixture(unittest.TestCase):
     def setUp(self):
+        _refresh_clock()
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
         self.root = make_tree(base / "repo")

@@ -48,6 +48,15 @@ from trust.shiptx import (
 
 TxFixture = _fixture_module.TxFixture
 NOW = _fixture_module.NOW
+
+
+def _refresh_clock():
+    """Re-stamp the fixture clock (cycle 33): NOW is copied from
+    test_trust_shiptx at import time and goes stale during a long
+    test run; refresh the source module and re-read its stamp."""
+    global NOW
+    _fixture_module._refresh_clock()
+    NOW = _fixture_module.NOW
 ITEM = _fixture_module.ITEM
 PROPOSAL = _fixture_module.PROPOSAL
 
@@ -61,6 +70,7 @@ class StubLoop:
 
 class JournalRecoveryFixture(unittest.TestCase):
     def setUp(self):
+        _refresh_clock()
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name) / "home"
         self.journal = ShipTxJournal(self.home)
@@ -332,6 +342,10 @@ class OutOfOrderFinaliseRootTests(TxFixture):
     itself, so it may journal POST_RECORD_VERIFIED for a
     below-POST_RECORD_VERIFIED transaction whose burn was
     finalised out of order, and commit it."""
+
+    def setUp(self):
+        super().setUp()
+        _refresh_clock()
 
     def _out_of_order_tx(self, *, cycle_recorded):
         journal = self.journal()
@@ -652,6 +666,10 @@ class ConcurrencyTests(JournalRecoveryFixture):
 
 
 class RecordShipGateIntegrationTests(TxFixture):
+    def setUp(self):
+        super().setUp()
+        _refresh_clock()
+
     def test_record_ship_refused_while_item_in_flight(self):
         journal = self.journal()
         journal.begin("d-dangling", "p-other", "f" * 64, NOW,
