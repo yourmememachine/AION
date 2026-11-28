@@ -522,7 +522,8 @@ class FixRoundTests(unittest.TestCase):
         record = json.loads(lines[0])
         self.assertEqual(set(record), {
             "cycle_id", "item_id", "change_id", "manifest_hash",
-            "artefact_hash", "post_tree_hash", "recorded_at"})
+            "artefact_hash", "post_tree_hash", "recorded_at",
+            "prev_binding_hash", "binding_hash"})
         self.assertEqual(record["cycle_id"], entry["cycle_id"])
         self.assertEqual(record["item_id"], entry["item_id"])
         self.assertEqual(record["change_id"], artefact["change_id"])

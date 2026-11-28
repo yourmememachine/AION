@@ -267,14 +267,114 @@ def _unscoped_changes(base_root, post_root, scope_paths) -> tuple:
         if not _path_in_scope(p, scope_paths))
 
 
-def _append_proof_binding(journal_dir, record) -> None:
-    """Append exactly one JSON line for ``record`` to
-    proof-bindings.jsonl in ``journal_dir``, fsync'd (file,
-    then directory). Raises OSError on any failure; it does
-    not catch."""
+_BINDING_FILE = "proof-bindings.jsonl"
+_BINDING_GENESIS = "0" * 64
+_BINDING_KEYS = {
+    "cycle_id", "item_id", "change_id", "manifest_hash",
+    "artefact_hash", "post_tree_hash", "recorded_at",
+    "prev_binding_hash", "binding_hash",
+}
+
+
+def _parse_proof_bindings(journal_dir) -> list:
+    """Parse every binding record in ``journal_dir``. A
+    missing or empty file parses to []. Raises ProofError on
+    a malformed line or record shape, OSError on a read
+    failure."""
+    path = Path(journal_dir) / _BINDING_FILE
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            raise ProofError("blank line in proof bindings")
+        try:
+            record = json.loads(line)
+        except ValueError as exc:
+            raise ProofError(
+                f"proof binding is not valid JSON: {exc}") from exc
+        if not isinstance(record, dict) \
+                or set(record) != _BINDING_KEYS:
+            raise ProofError("proof binding has wrong keys")
+        records.append(record)
+    return records
+
+
+def _binding_chain_reasons(records) -> tuple:
+    """() iff ``records`` form one hash chain: genesis prev,
+    each prev naming the previous record's binding_hash, and
+    every binding_hash recomputing over its record core."""
+    prev = _BINDING_GENESIS
+    for record in records:
+        if record["prev_binding_hash"] != prev \
+                or not _is_hex64(record["binding_hash"]):
+            return ("proof_binding_chain_broken",)
+        core = {k: v for k, v in record.items()
+                if k != "binding_hash"}
+        if _sha256(_canonical(core)) != record["binding_hash"]:
+            return ("proof_binding_chain_broken",)
+        prev = record["binding_hash"]
+    return ()
+
+
+def verify_proof_bindings(journal_dir) -> tuple:
+    """Pure check of the durable proof-binding chain in
+    ``journal_dir``: () means every recorded binding is
+    intact and chained. Editing, reordering or truncating
+    the MIDDLE of the file is detected; deleting the tail
+    is not distinguishable from a shorter history by this
+    check alone — that needs a non-author anchor, which
+    remains a separate follow-up and is not claimed here."""
+    try:
+        records = _parse_proof_bindings(journal_dir)
+    except (ProofError, OSError):
+        return ("proof_binding_malformed",)
+    return _binding_chain_reasons(records)
+
+
+def _preflight_proof_binding(journal_dir) -> tuple:
+    """Fail-closed pre-burn probe, with no side effects (it
+    creates nothing): the existing chain must verify, the
+    bindings path must be a regular file when it exists, and
+    the journal directory must be writable. Returns refusal
+    reasons, () when the post-ship append can be expected to
+    land. A race after this probe is still possible; the
+    post-ship append failure stays anomaly-signalled."""
+    reasons = verify_proof_bindings(journal_dir)
+    if reasons:
+        return reasons
     journal_dir = Path(journal_dir)
-    path = journal_dir / "proof-bindings.jsonl"
-    line = json.dumps(record, sort_keys=True, separators=(",", ":"),
+    path = journal_dir / _BINDING_FILE
+    if path.exists() and not path.is_file():
+        return ("proof_binding_unavailable",)
+    target = path if path.exists() else journal_dir
+    if not os.access(target, os.W_OK):
+        return ("proof_binding_unavailable",)
+    return ()
+
+
+def _append_proof_binding(journal_dir, record) -> None:
+    """Append ``record`` to proof-bindings.jsonl in
+    ``journal_dir`` as the next hash-chained binding:
+    prev_binding_hash names the current tail (genesis for
+    the first record) and binding_hash self-hashes the
+    record core. fsync'd (file, then directory). Raises
+    ProofError if the existing chain does not verify,
+    OSError on any IO failure; it does not catch."""
+    journal_dir = Path(journal_dir)
+    path = journal_dir / _BINDING_FILE
+    records = _parse_proof_bindings(journal_dir)
+    reasons = _binding_chain_reasons(records)
+    if reasons:
+        raise ProofError(
+            "existing proof binding chain does not verify: "
+            + ", ".join(reasons))
+    full = dict(record)
+    full["prev_binding_hash"] = (
+        records[-1]["binding_hash"] if records
+        else _BINDING_GENESIS)
+    full["binding_hash"] = _sha256(_canonical(full))
+    line = json.dumps(full, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False) + "\n"
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(line)
@@ -1025,11 +1125,16 @@ def record_ship_with_proof(loop, *, base_root, post_root, artefact,
     root=<snapshot> -- the live post tree is never delegated.
     After a successful ship it sets proof_artefact_hash and
     proof_post_tree_hash on the returned entry and appends a
-    durable binding record to proof-bindings.jsonl in the
-    ledger's journal directory. The proof keys set on the
-    returned entry are a convenience on the caller's copy
-    only and are not persisted loop state; the bindings file
-    is the durable carrier."""
+    hash-chained binding record to proof-bindings.jsonl in
+    the ledger's journal directory. Before anything is
+    delegated the existing chain must verify and the file
+    must be appendable (fail-closed, pre-burn). The proof
+    keys set on the returned entry are a convenience on the
+    caller's copy only and are not persisted loop state; the
+    bindings file is the durable carrier. The chain detects
+    edits to recorded bindings; it does not anchor the tail
+    outside the journal's trust domain — that remains a
+    separate follow-up and is not claimed here."""
     # W0: guards, before anything else.
     if "root" in record_ship_kwargs:
         raise ProofError("root is supplied by record_ship_with_proof")
@@ -1061,6 +1166,20 @@ def record_ship_with_proof(loop, *, base_root, post_root, artefact,
     if unscoped:
         raise ShipRefused("proof_refused:unscoped_changes",
                           ("unscoped_changes",))
+    # W2b: fail-closed binding gate, after live verification
+    # and before the snapshot/delegation — still before any
+    # burn, because the burn happens inside the delegation.
+    # The existing binding chain must verify and the bindings
+    # file must be appendable; a corrupt or unwritable
+    # bindings file refuses here, while nothing is spent —
+    # a ship that cannot be bound must not happen at all,
+    # instead of shipping and discovering it afterwards.
+    binding_reasons = _preflight_proof_binding(
+        record_ship_kwargs["ledger"].journal_dir)
+    if binding_reasons:
+        raise ShipRefused(
+            "proof_refused:" + ",".join(binding_reasons),
+            binding_reasons)
     # W3: snapshot the post tree. W4/W5 run inside the context.
     entered = False
     try:
@@ -1112,7 +1231,7 @@ def record_ship_with_proof(loop, *, base_root, post_root, artefact,
     try:
         _append_proof_binding(
             record_ship_kwargs["ledger"].journal_dir, record)
-    except OSError as exc:
+    except (OSError, ProofError) as exc:
         raise ShipRefused(
             f"cycle {entry['cycle_id']} recorded and the decision "
             f"finalised, but the proof binding failed: {exc}")
